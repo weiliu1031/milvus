@@ -75,3 +75,7 @@ func SortedSliceEqual(s1, s2 interface{}) bool {
 	}
 	return true
 }
+
+func MakeSlice[T any](elements ...T) []T {
+	return elements
+}

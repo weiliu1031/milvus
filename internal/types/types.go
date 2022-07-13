@@ -1233,6 +1233,8 @@ type QueryNode interface {
 	TimeTickProvider
 
 	WatchDmChannels(ctx context.Context, req *querypb.WatchDmChannelsRequest) (*commonpb.Status, error)
+	UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmChannelRequest) (*commonpb.Status, error)
+	WatchDeltaChannels(ctx context.Context, req *querypb.WatchDeltaChannelsRequest) (*commonpb.Status, error)
 	// LoadSegments notifies QueryNode to load the sealed segments from storage. The load tasks are sync to this
 	// rpc, QueryNode will return after all the sealed segments are loaded.
 	//
@@ -1255,6 +1257,7 @@ type QueryNode interface {
 	ShowConfigurations(ctx context.Context, req *internalpb.ShowConfigurationsRequest) (*internalpb.ShowConfigurationsResponse, error)
 	// GetMetrics gets the metrics about QueryNode.
 	GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error)
+	GetDataDistribution(context.Context, *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionResponse, error)
 }
 
 // QueryNodeComponent is used by grpc server of QueryNode

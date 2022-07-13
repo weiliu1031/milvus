@@ -1,0 +1,344 @@
+package querycoordv2
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/milvus-io/milvus/internal/allocator"
+	"github.com/milvus-io/milvus/internal/common"
+	"github.com/milvus-io/milvus/internal/kv"
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
+	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
+	"github.com/milvus-io/milvus/internal/querycoordv2/job"
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/querycoordv2/observers"
+	"github.com/milvus-io/milvus/internal/querycoordv2/params"
+	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/dependency"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/tsoutil"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
+)
+
+var (
+	// Only for re-export
+	Params = &params.Params
+)
+
+type Server struct {
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	status              atomic.Value
+	etcdCli             *clientv3.Client
+	session             *sessionutil.Session
+	kv                  kv.TxnKV
+	idAllocator         func() (int64, error)
+	factory             dependency.Factory
+	metricsCacheManager *metricsinfo.MetricsCacheManager
+	chunkManager        storage.ChunkManager
+
+	// Coordinators
+	dataCoord  types.DataCoord
+	rootCoord  types.RootCoord
+	indexCoord types.IndexCoord
+
+	// Meta
+	meta      *meta.Meta
+	dist      *meta.DistributionManager
+	targetMgr *meta.TargetManager
+	broker    *meta.CoordinatorBroker
+
+	// Session
+	cluster *session.Cluster
+	nodeMgr *session.NodeManager
+
+	// Schedulers
+	jobScheduler *job.JobScheduler
+	scheduler    *task.Scheduler
+
+	// Checkers
+	checkerController *checkers.CheckerController
+
+	// Observers
+	collectionObserver *observers.CollectionObserver
+	leaderObserver     *observers.LeaderObserver
+
+	balancer balance.Balance
+}
+
+func NewQueryCoord(ctx context.Context, factory dependency.Factory) (*Server, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	server := &Server{
+		ctx:     ctx,
+		cancel:  cancel,
+		factory: factory,
+	}
+	server.UpdateStateCode(internalpb.StateCode_Abnormal)
+	return server, nil
+}
+
+func (s *Server) Register() error {
+	s.session.Register()
+	go s.session.LivenessCheck(s.ctx, func() {
+		log.Error("QueryCoord disconnected from etcd, process will exit", zap.Int64("server-id", s.session.ServerID))
+		if err := s.Stop(); err != nil {
+			log.Fatal("failed to stop server", zap.Error(err))
+		}
+		// manually send signal to starter goroutine
+		if s.session.TriggerKill {
+			if p, err := os.FindProcess(os.Getpid()); err == nil {
+				p.Signal(syscall.SIGINT)
+			}
+		}
+	})
+	return nil
+}
+
+func (s *Server) Init() error {
+	log.Info("QueryCoord start init",
+		zap.String("meta-root-path", Params.EtcdCfg.MetaRootPath),
+		zap.String("address", Params.QueryCoordCfg.Address))
+
+	// Init QueryCoord session
+	s.session = sessionutil.NewSession(s.ctx, Params.EtcdCfg.MetaRootPath, s.etcdCli)
+	if s.session == nil {
+		return fmt.Errorf("failed to create session")
+	}
+	s.session.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, true)
+	Params.QueryCoordCfg.SetNodeID(s.session.ServerID)
+	Params.SetLogger(s.session.ServerID)
+	s.factory.Init(Params)
+
+	// Init KV
+	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath)
+	s.kv = etcdKV
+	log.Debug("query coordinator try to connect etcd success")
+
+	// Init ID allocator
+	idAllocatorKV := tsoutil.NewTSOKVBase(s.etcdCli, Params.EtcdCfg.KvRootPath, "querycoord-id-allocator")
+	idAllocator := allocator.NewGlobalIDAllocator("id-timestamp", idAllocatorKV)
+	err := idAllocator.Initialize()
+	if err != nil {
+		log.Error("query coordinator id allocator initialize failed", zap.Error(err))
+		return err
+	}
+	s.idAllocator = func() (int64, error) {
+		return idAllocator.AllocOne()
+	}
+
+	// Init metrics cache manager
+	s.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
+
+	// Init chunk manager
+	s.chunkManager, err = s.factory.NewVectorStorageChunkManager(s.ctx)
+	if err != nil {
+		log.Error("failed to init chunk manager", zap.Error(err))
+		return err
+	}
+
+	// Init meta
+	log.Debug("init meta")
+	store := meta.NewMetaStore(s.kv)
+	s.meta = &meta.Meta{
+		CollectionManager: meta.NewCollectionManager(store),
+		ReplicaManager:    meta.NewReplicaManager(s.idAllocator, store),
+	}
+	err = s.meta.CollectionManager.Recover()
+	if err != nil {
+		log.Error("failed to recover collections")
+		return err
+	}
+	err = s.meta.ReplicaManager.Recover()
+	if err != nil {
+		log.Error("failed to recover replicas")
+		return err
+	}
+	s.dist = &meta.DistributionManager{
+		SegmentDistManager: meta.NewSegmentDistManager(),
+		ChannelDistManager: meta.NewChannelDistManager(),
+		LeaderViewManager:  meta.NewLeaderViewManager(),
+	}
+	s.targetMgr = meta.NewTargetManager()
+	s.broker = meta.NewCoordinatorBroker(
+		s.dataCoord,
+		s.rootCoord,
+		s.indexCoord,
+		s.chunkManager,
+	)
+
+	// Init session
+	log.Debug("init session")
+	s.nodeMgr = session.NewNodeManager()
+	s.cluster = session.NewCluster(s.nodeMgr)
+
+	// Init schedulers
+	log.Debug("init schedulers")
+	s.jobScheduler = job.NewJobScheduler()
+	s.scheduler = task.NewScheduler(
+		s.ctx,
+		s.meta,
+		s.dist,
+		s.targetMgr,
+		s.broker,
+		s.cluster,
+		s.nodeMgr,
+	)
+
+	// Init checker controller
+	log.Debug("init checker controller")
+	s.checkerController = checkers.NewCheckerController(
+		s.meta,
+		s.dist,
+		s.targetMgr,
+		s.broker,
+		s.nodeMgr,
+		s.scheduler,
+	)
+	s.checkerController.Start(s.ctx)
+
+	// Init observers
+	log.Debug("init observers")
+	s.collectionObserver = observers.NewCollectionObserver(
+		s.dist,
+		s.meta,
+		s.targetMgr,
+	)
+	s.leaderObserver = observers.NewLeaderObserver()
+
+	// Init balancer
+	log.Debug("init balancer")
+	s.balancer = balance.NewRowCountBasedBalancer(
+		s.scheduler,
+		s.nodeMgr, 
+		s.dist,
+	)
+
+	log.Info("QueryCoord init success")
+	return err
+}
+
+func (s *Server) Start() error {
+	log.Info("start job scheduler...")
+	s.jobScheduler.Start(s.ctx)
+
+	log.Info("start checker controller...")
+	s.checkerController.Start(s.ctx)
+
+	log.Info("start observers...")
+	s.collectionObserver.Start(s.ctx)
+	s.leaderObserver.Start(s.ctx)
+
+	return nil
+}
+
+func (s *Server) Stop() error {
+	s.cancel()
+
+	log.Info("stop job scheduler...")
+	s.jobScheduler.Stop()
+
+	log.Info("stop checker controller...")
+	s.checkerController.Stop()
+
+	log.Info("stop observers...")
+	s.collectionObserver.Stop()
+	s.leaderObserver.Stop()
+
+	s.session.Revoke(time.Second)
+	return nil
+}
+
+// UpdateStateCode updates the status of the coord, including healthy, unhealthy
+func (s *Server) UpdateStateCode(code internalpb.StateCode) {
+	s.status.Store(code)
+}
+
+func (s *Server) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
+	nodeID := common.NotRegisteredID
+	if s.session != nil && s.session.Registered() {
+		nodeID = s.session.ServerID
+	}
+	serviceComponentInfo := &internalpb.ComponentInfo{
+		// NodeID:    Params.QueryCoordID, // will race with QueryCoord.Register()
+		NodeID:    nodeID,
+		StateCode: s.status.Load().(internalpb.StateCode),
+	}
+
+	return &internalpb.ComponentStates{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+		State: serviceComponentInfo,
+		//SubcomponentStates: subComponentInfos,
+	}, nil
+}
+
+func (s *Server) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+	return &milvuspb.StringResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+	}, nil
+}
+
+func (s *Server) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+	return &milvuspb.StringResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		Value: Params.CommonCfg.QueryCoordTimeTick,
+	}, nil
+}
+
+// SetEtcdClient sets etcd's client
+func (s *Server) SetEtcdClient(etcdClient *clientv3.Client) {
+	s.etcdCli = etcdClient
+}
+
+// SetRootCoord sets root coordinator's client
+func (s *Server) SetRootCoord(rootCoord types.RootCoord) error {
+	if rootCoord == nil {
+		return errors.New("null RootCoord interface")
+	}
+
+	s.rootCoord = rootCoord
+	return nil
+}
+
+// SetDataCoord sets data coordinator's client
+func (s *Server) SetDataCoord(dataCoord types.DataCoord) error {
+	if dataCoord == nil {
+		return errors.New("null DataCoord interface")
+	}
+
+	s.dataCoord = dataCoord
+	return nil
+}
+
+// SetIndexCoord sets index coordinator's client
+func (s *Server) SetIndexCoord(indexCoord types.IndexCoord) error {
+	if indexCoord == nil {
+		return errors.New("null IndexCoord interface")
+	}
+
+	s.indexCoord = indexCoord
+	return nil
+}

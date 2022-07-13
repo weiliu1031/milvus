@@ -152,6 +152,34 @@ func (c *Client) WatchDmChannels(ctx context.Context, req *querypb.WatchDmChanne
 	return ret.(*commonpb.Status), err
 }
 
+// UnsubDmChannel unsubscribes the channels about data manipulation.
+func (c *Client) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmChannelRequest) (*commonpb.Status, error) {
+	ret, err := c.grpcClient.ReCall(ctx, func(client interface{}) (interface{}, error) {
+		if !funcutil.CheckCtxValid(ctx) {
+			return nil, ctx.Err()
+		}
+		return client.(querypb.QueryNodeClient).UnsubDmChannel(ctx, req)
+	})
+	if err != nil || ret == nil {
+		return nil, err
+	}
+	return ret.(*commonpb.Status), err
+}
+
+// WatchDeltaChannels watches the channels about data manipulation.
+func (c *Client) WatchDeltaChannels(ctx context.Context, req *querypb.WatchDeltaChannelsRequest) (*commonpb.Status, error) {
+	ret, err := c.grpcClient.ReCall(ctx, func(client interface{}) (interface{}, error) {
+		if !funcutil.CheckCtxValid(ctx) {
+			return nil, ctx.Err()
+		}
+		return client.(querypb.QueryNodeClient).WatchDeltaChannels(ctx, req)
+	})
+	if err != nil || ret == nil {
+		return nil, err
+	}
+	return ret.(*commonpb.Status), err
+}
+
 // LoadSegments loads the segments to search.
 func (c *Client) LoadSegments(ctx context.Context, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
 	ret, err := c.grpcClient.ReCall(ctx, func(client interface{}) (interface{}, error) {
@@ -304,4 +332,17 @@ func (c *Client) GetStatistics(ctx context.Context, request *querypb.GetStatisti
 		return nil, err
 	}
 	return ret.(*internalpb.GetStatisticsResponse), err
+}
+
+func (c *Client) GetDataDistribution(ctx context.Context, req *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionResponse, error) {
+	ret, err := c.grpcClient.Call(ctx, func(client interface{}) (interface{}, error) {
+		if !funcutil.CheckCtxValid(ctx) {
+			return nil, ctx.Err()
+		}
+		return client.(querypb.QueryNodeClient).GetDataDistribution(ctx, req)
+	})
+	if err != nil || ret == nil {
+		return nil, err
+	}
+	return ret.(*querypb.GetDataDistributionResponse), err
 }

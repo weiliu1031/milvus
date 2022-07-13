@@ -17,3 +17,11 @@ func MapReduce(results []map[string]string, method map[string]func(string) error
 	}
 	return nil
 }
+
+func Extract[K comparable, V any](data map[K]V, keys ...K) []V {
+	slice := make([]V, 0, len(keys))
+	for _, key := range keys {
+		slice = append(slice, data[key])
+	}
+	return slice
+}

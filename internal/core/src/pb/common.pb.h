@@ -318,6 +318,7 @@ enum MsgType : int {
   WatchDeltaChannels = 513,
   GetShardLeaders = 514,
   GetReplicas = 515,
+  UnsubDmChannel = 516,
   SegmentInfo = 600,
   SystemInfo = 601,
   GetRecoveryInfo = 602,
