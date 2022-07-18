@@ -16,11 +16,13 @@ type SegmentManager struct {
 	rwmutex sync.RWMutex
 
 	segments map[UniqueID]*Segment
+	target   UniqueSet
 }
 
 func NewSegmentManager() *SegmentManager {
 	return &SegmentManager{
 		segments: make(map[int64]*Segment),
+		target:   make(UniqueSet),
 	}
 }
 
@@ -29,6 +31,10 @@ func (m *SegmentManager) Get(id UniqueID) *Segment {
 	defer m.rwmutex.RUnlock()
 
 	return m.segments[id]
+}
+
+func (m *SegmentManager) ContainTarget(id UniqueID) bool {
+	return m.target.Contain(id)
 }
 
 func (m *SegmentManager) Put(segments ...*Segment) {
