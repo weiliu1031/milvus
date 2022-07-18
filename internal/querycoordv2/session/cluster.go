@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	grpcquerynodeclient "github.com/milvus-io/milvus/internal/distributed/querynode/client"
 	"github.com/milvus-io/milvus/internal/log"
@@ -11,6 +12,8 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"go.uber.org/zap"
 )
+
+const updateTickerDuration = 1 * time.Minute
 
 type ErrNodeNotFound struct {
 	nodeID int64
@@ -29,11 +32,31 @@ var IsErrNodeNotFound = func(err error) bool {
 	return ok
 }
 
-// FIXME: remove useless clients
 // Cluster is used to send requests to QueryNodes and manage connections
 type Cluster struct {
-	clients
+	*clients
 	nodeManager *NodeManager
+	wg          sync.WaitGroup
+	ch          chan struct{}
+}
+
+func (c *Cluster) updateLoop() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(updateTickerDuration)
+	for {
+		select {
+		case <-c.ch:
+			log.Info("cluster closed")
+			return
+		case <-ticker.C:
+			nodes := c.clients.getAllNodeIDs()
+			for _, id := range nodes {
+				if c.nodeManager.Get(id) == nil {
+					c.clients.close(id)
+				}
+			}
+		}
+	}
 }
 
 func (c *Cluster) LoadSegments(ctx context.Context, nodeID int64, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
@@ -137,18 +160,35 @@ func (c *Cluster) send(ctx context.Context, nodeID int64, fn func(cli *grpcquery
 
 func (c *Cluster) Close() {
 	c.clients.closeAll()
+	close(c.ch)
+	c.wg.Wait()
 }
 
-func NewCluster(nodeManager *NodeManager) Cluster {
-	return Cluster{
+func NewCluster(nodeManager *NodeManager) *Cluster {
+	c := &Cluster{
 		clients:     newClients(),
 		nodeManager: nodeManager,
+		ch:          make(chan struct{}),
 	}
+	c.wg.Add(1)
+	go c.updateLoop()
+	return c
 }
 
 type clients struct {
 	sync.RWMutex
 	clients map[int64]*grpcquerynodeclient.Client // nodeID -> client
+}
+
+func (c *clients) getAllNodeIDs() []int64 {
+	c.RLock()
+	defer c.RUnlock()
+
+	ret := make([]int64, 0, len(c.clients))
+	for k := range c.clients {
+		ret = append(ret, k)
+	}
+	return ret
 }
 
 func (c *clients) getOrCreate(ctx context.Context, node *NodeInfo) (*grpcquerynodeclient.Client, error) {
@@ -218,6 +258,6 @@ func (c *clients) closeAll() {
 	}
 }
 
-func newClients() clients {
-	return clients{clients: make(map[int64]*grpcquerynodeclient.Client)}
+func newClients() *clients {
+	return &clients{clients: make(map[int64]*grpcquerynodeclient.Client)}
 }
