@@ -143,6 +143,18 @@ func (c *Cluster) SyncReplicaSegments(ctx context.Context, nodeID int64, req *qu
 	return status, err
 }
 
+func (c *Cluster) GetDataDistribution(ctx context.Context, nodeID int64, req *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionResponse, error) {
+	var resp *querypb.GetDataDistributionResponse
+	var err error
+	err1 := c.send(ctx, nodeID, func(cli *grpcquerynodeclient.Client) {
+		resp, err = cli.GetDataDistribution(ctx, req)
+	})
+	if err1 != nil {
+		return nil, err1
+	}
+	return resp, err
+}
+
 func (c *Cluster) send(ctx context.Context, nodeID int64, fn func(cli *grpcquerynodeclient.Client)) error {
 	node := c.nodeManager.Get(nodeID)
 	if node == nil {

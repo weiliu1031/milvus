@@ -403,9 +403,10 @@ message GetDataDistributionRequest {
 }
 
 message GetDataDistributionResponse {
-  int64 nodeID = 1;
-  repeated int64 growing_segmentIDs = 2;
-  repeated int64 segmentIDs = 3;
-  repeated string channels = 4;
-  int64 version = 5;
+  common.Status status = 1;
+  int64 nodeID = 2;
+  repeated int64 growing_segmentIDs = 3;
+  repeated int64 segmentIDs = 4;
+  repeated string channels = 5;
+  int64 version = 6;
 }
