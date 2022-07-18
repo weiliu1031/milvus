@@ -76,6 +76,53 @@ func (_c *MockQueryNodeServer_GetComponentStates_Call) Return(_a0 *internalpb.Co
 	return _c
 }
 
+// GetDataDistribution provides a mock function with given fields: _a0, _a1
+func (_m *MockQueryNodeServer) GetDataDistribution(_a0 context.Context, _a1 *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionResponse, error) {
+	ret := _m.Called(_a0, _a1)
+
+	var r0 *querypb.GetDataDistributionResponse
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetDataDistributionRequest) *querypb.GetDataDistributionResponse); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*querypb.GetDataDistributionResponse)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(context.Context, *querypb.GetDataDistributionRequest) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockQueryNodeServer_GetDataDistribution_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDataDistribution'
+type MockQueryNodeServer_GetDataDistribution_Call struct {
+	*mock.Call
+}
+
+// GetDataDistribution is a helper method to define mock.On call
+//  - _a0 context.Context
+//  - _a1 *querypb.GetDataDistributionRequest
+func (_e *MockQueryNodeServer_Expecter) GetDataDistribution(_a0 interface{}, _a1 interface{}) *MockQueryNodeServer_GetDataDistribution_Call {
+	return &MockQueryNodeServer_GetDataDistribution_Call{Call: _e.mock.On("GetDataDistribution", _a0, _a1)}
+}
+
+func (_c *MockQueryNodeServer_GetDataDistribution_Call) Run(run func(_a0 context.Context, _a1 *querypb.GetDataDistributionRequest)) *MockQueryNodeServer_GetDataDistribution_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*querypb.GetDataDistributionRequest))
+	})
+	return _c
+}
+
+func (_c *MockQueryNodeServer_GetDataDistribution_Call) Return(_a0 *querypb.GetDataDistributionResponse, _a1 error) *MockQueryNodeServer_GetDataDistribution_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
 // GetMetrics provides a mock function with given fields: _a0, _a1
 func (_m *MockQueryNodeServer) GetMetrics(_a0 context.Context, _a1 *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	ret := _m.Called(_a0, _a1)
