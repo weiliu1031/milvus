@@ -54,6 +54,8 @@ service QueryNode {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
+
+  rpc GetDataDistribution(GetDataDistributionRequest) returns (GetDataDistributionResponse) {}
 }
 
 //--------------------QueryCoord grpc request and response proto------------------
@@ -385,4 +387,16 @@ message SegmentChangeInfo {
 message SealedSegmentsChangeInfo {
   common.MsgBase base = 1;
   repeated SegmentChangeInfo infos = 2;
+}
+
+message GetDataDistributionRequest {
+  common.MsgBase base = 1;
+}
+
+message GetDataDistributionResponse {
+  int64 nodeID = 1;
+  repeated int64 growing_segmentIDs = 2;
+  repeated int64 segmentIDs = 3;
+  repeated string channels = 4;
+  int64 version = 5;
 }

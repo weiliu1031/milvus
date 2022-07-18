@@ -20,7 +20,7 @@ type ClusterTestSuite struct {
 	suite.Suite
 	svrs     []*grpc.Server
 	listners []net.Listener
-	cluster  Cluster
+	cluster  *Cluster
 }
 
 func (suite *ClusterTestSuite) SetupSuite() {
