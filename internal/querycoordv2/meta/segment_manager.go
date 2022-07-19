@@ -33,10 +33,6 @@ func (m *SegmentManager) Get(id UniqueID) *Segment {
 	return m.segments[id]
 }
 
-func (m *SegmentManager) ContainTarget(id UniqueID) bool {
-	return m.target.Contain(id)
-}
-
 func (m *SegmentManager) Put(segments ...*Segment) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()

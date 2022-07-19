@@ -141,14 +141,14 @@ func (scheduler *Scheduler) checkStale(task Task) bool {
 		}
 
 		switch action.(type) {
-		case SegmentAction:
-			segmentID := action.(SegmentAction).SegmentID()
-			if !scheduler.segmentMgr.ContainTarget(segmentID) {
-				log.Warn("the task is stale, the target segment doesn't exist",
-					zap.Int64("segment-id", segmentID))
+		case *SegmentAction:
+			// segmentID := action.(*SegmentAction).SegmentID()
+			// if !scheduler.segmentMgr.ContainTarget(segmentID) {
+			// 	log.Warn("the task is stale, the target segment doesn't exist",
+			// 		zap.Int64("segment-id", segmentID))
 
-				return true
-			}
+			// 	return true
+			// }
 		}
 	}
 
