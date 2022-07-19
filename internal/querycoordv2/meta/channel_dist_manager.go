@@ -8,11 +8,12 @@ import (
 )
 
 type DmChannel struct {
-	CollectionID UniqueID
-	Channel      string
+	datapb.VchannelInfo
 }
 
-type DeltaChannel []*datapb.VchannelInfo
+type DeltaChannel struct {
+	datapb.VchannelInfo
+}
 
 type DmChannelContainer struct {
 	channels []*DmChannel
