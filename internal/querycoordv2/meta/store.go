@@ -3,6 +3,8 @@ package meta
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/milvus-io/milvus/internal/kv"
 )
@@ -17,13 +19,14 @@ const loadInfoPrefix = "querycoord-load-info"
 
 var (
 	ErrEmptyPartitions = errors.New("partitions can not be empty")
+	ErrInvalidKey      = errors.New("invalid load info key")
 )
 
 type MetaStore struct {
 	cli kv.TxnKV
 }
 
-func (s *MetaStore) Load(collection int64, partitions []int64) error {
+func (s MetaStore) Load(collection int64, partitions []int64) error {
 	if len(partitions) == 0 {
 		return ErrEmptyPartitions
 	}
@@ -37,7 +40,7 @@ func (s *MetaStore) Load(collection int64, partitions []int64) error {
 	return s.cli.MultiSave(res)
 }
 
-func (s *MetaStore) Release(collection int64, partitions []int64) error {
+func (s MetaStore) Release(collection int64, partitions []int64) error {
 	if len(partitions) == 0 {
 		return ErrEmptyPartitions
 	}
@@ -51,12 +54,13 @@ func (s *MetaStore) Release(collection int64, partitions []int64) error {
 	return s.cli.MultiRemove(res)
 }
 
-func (s *MetaStore) GetPartitions() (map[int64][]int64, error) {
+func (s MetaStore) GetPartitions() (map[int64][]int64, error) {
 	keys, _, err := s.cli.LoadWithPrefix(loadInfoPrefix)
 	if err != nil {
 		return nil, err
 	}
 
+	fmt.Println("len keys", len(keys))
 	ret := make(map[int64][]int64)
 	for _, key := range keys {
 		coll, part, err := decodeLoadInfoKey(key)
@@ -77,7 +81,21 @@ func encodeLoadInfoKey(collection int64, partition int64) string {
 }
 
 func decodeLoadInfoKey(key string) (collection int64, partition int64, err error) {
-	var tmp string
-	_, err = fmt.Sscanf(key, "%s/%d/%d", &tmp, &collection, &partition)
+	items := strings.Split(key, "/")
+	if len(items) != 3 || items[0] != loadInfoPrefix {
+		err = ErrInvalidKey
+	}
+	if err == nil {
+		collection, err = strconv.ParseInt(items[1], 10, 64)
+	}
+	if err == nil {
+		partition, err = strconv.ParseInt(items[2], 10, 64)
+	}
 	return
+}
+
+func NewMetaStore(cli kv.TxnKV) MetaStore {
+	return MetaStore{
+		cli: cli,
+	}
 }
