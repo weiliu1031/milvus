@@ -40,6 +40,7 @@ type Scheduler struct {
 
 	ticker       *time.Ticker
 	segmentTasks map[UniqueID]Task
+	channelTasks map[string]Task
 }
 
 func NewScheduler(ctx context.Context,
@@ -75,6 +76,15 @@ func (scheduler *Scheduler) Add(task Task) error {
 	}
 
 	task.SetID(scheduler.idAllocator())
+
+	switch task.(type) {
+	case *SegmentTask:
+		scheduler.segmentTasks[task.(*SegmentTask).segmentID] = task
+
+	case *ChannelTask:
+		scheduler.channelTasks[task.(*ChannelTask).channel] = task
+	}
+
 	return nil
 }
 
@@ -86,6 +96,16 @@ func (scheduler *Scheduler) preAdd(task Task) error {
 		segmentID := task.(*SegmentTask).segmentID
 		if old, ok := scheduler.segmentTasks[segmentID]; ok {
 			log.Warn("failed to add task, a task processing the same segment existed",
+				zap.Int64("old-id", old.ID()),
+				zap.Int32("old-status", old.Status()))
+
+			return ErrConflictTaskExisted
+		}
+
+	case *ChannelTask:
+		channel := task.(*ChannelTask).channel
+		if old, ok := scheduler.channelTasks[channel]; ok {
+			log.Warn("failed to add task, a task processing the same channel existed",
 				zap.Int64("old-id", old.ID()),
 				zap.Int32("old-status", old.Status()))
 
@@ -125,6 +145,7 @@ func (scheduler *Scheduler) schedule() {
 
 		isStale := scheduler.checkStale(task)
 		if isStale {
+			log.Warn("task is stale, set the status to failed")
 			task.SetStatus(TaskStatusFailed)
 			task.SetErr(ErrTaskStale)
 		}
