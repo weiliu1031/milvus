@@ -1,6 +1,8 @@
 package task
 
 import (
+	"fmt"
+
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/util/concurrency"
@@ -21,14 +23,53 @@ func NewExecutor(workNum int) *Executor {
 
 func (ex *Executor) Execute(action Action) {
 	ex.works.Submit(func() (interface{}, error) {
-		switch action.(type) {
-		case *LoadSegmentAction:
-			action := action.(*LoadSegmentAction)
+		err := action.Execute(ex.cluster)
 
-			req := &querypb.LoadSegmentsRequest{}
-			ex.cluster.LoadSegments(action.ctx, action.Node(), req)
-		}
-
-		return nil, nil
+		return nil, err
 	})
+}
+
+func (ex *Executor) executeSegmentAction(action *SegmentAction) {
+	switch action.Type() {
+	case ActionTypeGrow:
+		req := &querypb.LoadSegmentsRequest{}
+		ex.cluster.LoadSegments(action.Context(), action.Node(), req)
+
+	case ActionTypeReduce:
+		req := &querypb.ReleaseSegmentsRequest{}
+		ex.cluster.ReleaseSegments(action.Context(), action.Node(), req)
+
+	default:
+		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
+	}
+}
+
+func (ex *Executor) executeDmChannelAction(action *DmChannelAction) {
+	switch action.Type() {
+	case ActionTypeGrow:
+		req := &querypb.LoadSegmentsRequest{}
+		ex.cluster.LoadSegments(action.Context(), action.Node(), req)
+
+	case ActionTypeReduce:
+		req := &querypb.ReleaseSegmentsRequest{}
+		ex.cluster.ReleaseSegments(action.Context(), action.Node(), req)
+
+	default:
+		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
+	}
+}
+
+func (ex *Executor) executeDeltaChannelAction(action *DeltaChannelAction) {
+	switch action.Type() {
+	case ActionTypeGrow:
+		req := &querypb.LoadSegmentsRequest{}
+		ex.cluster.LoadSegments(action.Context(), action.Node(), req)
+
+	case ActionTypeReduce:
+		req := &querypb.ReleaseSegmentsRequest{}
+		ex.cluster.ReleaseSegments(action.Context(), action.Node(), req)
+
+	default:
+		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
+	}
 }
