@@ -13,11 +13,12 @@ type Executor struct {
 	works   *concurrency.Pool
 }
 
-func NewExecutor(workNum int) *Executor {
+func NewExecutor(workNum int, cluster *session.Cluster) *Executor {
 	works, _ := concurrency.NewPool(workNum)
 
 	return &Executor{
-		works: works,
+		cluster: cluster,
+		works:   works,
 	}
 }
 
