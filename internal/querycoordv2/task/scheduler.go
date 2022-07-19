@@ -14,6 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	executorWorkerPoolSize = 64
+	scheduleDuration       = 200 * time.Millisecond
+)
+
 var (
 	ErrConflictTaskExisted = errors.New("ConflictTaskExisted")
 
@@ -29,16 +34,35 @@ type Scheduler struct {
 	executor    *Executor
 	idAllocator func() UniqueID
 
-	// Dist
-	distMgr *meta.DistributionManager
-
+	distMgr   *meta.DistributionManager
 	targetMgr *meta.TargetManager
-
-	// Session
-	nodeMgr *session.NodeManager
+	nodeMgr   *session.NodeManager
 
 	ticker       *time.Ticker
 	segmentTasks map[UniqueID]Task
+}
+
+func NewScheduler(ctx context.Context,
+	distMgr *meta.DistributionManager,
+	targetMgr *meta.TargetManager,
+	nodeMgr *session.NodeManager,
+	cluster *session.Cluster) *Scheduler {
+	id := int64(0)
+	return &Scheduler{
+		ctx:      ctx,
+		executor: NewExecutor(executorWorkerPoolSize, cluster),
+		idAllocator: func() UniqueID {
+			id++
+			return id
+		},
+
+		distMgr:   distMgr,
+		targetMgr: targetMgr,
+		nodeMgr:   nodeMgr,
+
+		ticker:       time.NewTicker(scheduleDuration),
+		segmentTasks: make(map[int64]Task),
+	}
 }
 
 func (scheduler *Scheduler) Add(task Task) error {
