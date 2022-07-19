@@ -130,10 +130,56 @@ func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
 	}
 
 	base.actions = actions
-
 	return &SegmentTask{
 		BaseTask: base,
 
 		segmentID: segmentID,
+	}
+}
+
+type ChannelTask struct {
+	*BaseTask
+
+	channel string
+}
+
+// NewChannelTask creates a ChannelTask with actions,
+// all actions must process the same channel, and the same type of channel
+// empty actions is not allowed
+func NewChannelTask(base *BaseTask, actions ...Action) *ChannelTask {
+	if len(actions) == 0 {
+		panic("empty actions is not allowed")
+	}
+
+	_, isDmChannel := actions[0].(*DmChannelAction)
+	var (
+		channel string
+		ok      bool
+	)
+	for _, action := range actions {
+		if isDmChannel {
+			action, ok = action.(*DmChannelAction)
+		} else {
+			action, ok = action.(*DeltaChannelAction)
+		}
+
+		if !ok {
+			panic("ChannelTask can only contain actions of the same type channels")
+		}
+
+		channelAction := action.(interface{ ChannelName() string })
+
+		if channel == "" {
+			channel = channelAction.ChannelName()
+		} else if channel != channelAction.ChannelName() {
+			panic("all actions must process the same channel")
+		}
+	}
+
+	base.actions = actions
+	return &ChannelTask{
+		BaseTask: base,
+
+		channel: channel,
 	}
 }

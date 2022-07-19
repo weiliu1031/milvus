@@ -176,7 +176,7 @@ func (action *DmChannelAction) IsFinished(distMgr *meta.DistributionManager) boo
 
 	hasChannel := false
 	for _, channel := range channels {
-		if channel.Channel == action.ChannelName() {
+		if channel.ChannelName == action.ChannelName() {
 			hasChannel = true
 			break
 		}
@@ -231,4 +231,20 @@ func (action *DeltaChannelAction) Execute(cluster *session.Cluster) error {
 	}
 
 	return nil
+}
+
+func (action *DeltaChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
+	channels := distMgr.GetDeltaChannelByNode(action.nodeID)
+
+	hasChannel := false
+	for _, channel := range channels {
+		if channel.ChannelName == action.ChannelName() {
+			hasChannel = true
+			break
+		}
+	}
+
+	isGrow := action.Type() == ActionTypeGrow
+
+	return hasChannel == isGrow
 }

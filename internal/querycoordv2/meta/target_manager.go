@@ -86,7 +86,7 @@ func (mgr *TargetManager) AddDmChannel(channels ...*DmChannel) {
 	defer mgr.rwmutex.Unlock()
 
 	for _, channel := range channels {
-		mgr.dmChannels[channel.Channel] = channel
+		mgr.dmChannels[channel.ChannelName] = channel
 	}
 }
 
