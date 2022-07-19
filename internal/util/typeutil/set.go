@@ -21,6 +21,12 @@ package typeutil
 // Create a UniqueSet instance with make(UniqueSet) like creating a map instance.
 type UniqueSet map[UniqueID]struct{}
 
+func NewUniqueSet(ids ...UniqueID) UniqueSet {
+	set := make(UniqueSet)
+	set.Insert(ids...)
+	return set
+}
+
 // Insert elements into the set,
 // do nothing if the id existed
 func (set UniqueSet) Insert(ids ...UniqueID) {

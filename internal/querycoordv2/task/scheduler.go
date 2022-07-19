@@ -26,7 +26,7 @@ type Scheduler struct {
 	idAllocator func() UniqueID
 
 	// Meta
-	segmentMgr *meta.SegmentManager
+	segmentMgr *meta.SegmentDistManager
 
 	// Session
 	nodeMgr *session.NodeManager
@@ -126,8 +126,8 @@ func (scheduler *Scheduler) schedule() {
 }
 
 func (scheduler *Scheduler) checkStale(task Task) bool {
-	actions, step := task.ActionsAndStep()
-	for step, action := range actions[step:] {
+	actions, _ := task.ActionsAndStep()
+	for step, action := range actions {
 		log := log.With(
 			zap.Int64("msg-id", task.MsgID()),
 			zap.Int64("task-id", task.ID()),

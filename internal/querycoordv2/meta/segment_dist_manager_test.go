@@ -12,12 +12,11 @@ func TestSegmentManager(t *testing.T) {
 	var (
 		CollectionID UniqueID = 20220707
 		PartitionID  UniqueID = 14585896
-		ReplicaID    UniqueID = 4309831
 		Channel               = "insert_channel"
 		Nodes                 = []UniqueID{1, 2, 3}
 	)
 
-	mgr := NewSegmentManager()
+	mgr := NewSegmentDistManager()
 
 	segments := make([]*Segment, 3)
 	for i := range segments {
@@ -28,15 +27,15 @@ func TestSegmentManager(t *testing.T) {
 				ID:            UniqueID(i + 1),
 				InsertChannel: Channel,
 			},
-			Nodes: map[int64]int64{ReplicaID: Nodes[i]},
 		}
 	}
 
-	mgr.Put(segments...)
+	for i, node := range Nodes {
+		mgr.Update(node, segments[i])
+	}
 
 	for i := range segments {
 		segment := segments[i]
-		assert.Equal(t, segment, mgr.Get(segment.ID))
 
 		results := mgr.GetByNode(Nodes[i])
 		assert.Equal(t, 1, len(results))
