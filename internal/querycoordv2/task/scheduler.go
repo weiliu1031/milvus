@@ -184,11 +184,21 @@ func (scheduler *Scheduler) schedule() {
 }
 
 func (scheduler *Scheduler) checkStale(task Task) bool {
+	log := log.With(
+		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("task-id", task.ID()))
+
+	select {
+	case <-task.Context().Done():
+		log.Warn("the task is stale, task is canceled or timeout")
+		return true
+
+	default:
+	}
+
 	actions, _ := task.ActionsAndStep()
 	for step, action := range actions {
 		log := log.With(
-			zap.Int64("msg-id", task.MsgID()),
-			zap.Int64("task-id", task.ID()),
 			zap.Int64("node-id", action.Node()),
 			zap.Int("step", step))
 

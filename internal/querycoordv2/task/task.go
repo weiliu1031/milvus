@@ -19,6 +19,7 @@ type Task interface {
 	ActionsAndStep() ([]Action, int)
 	StepUp() int
 
+	Context() context.Context
 	MsgID() UniqueID
 	ID() UniqueID
 	ReplicaID() UniqueID
@@ -67,6 +68,10 @@ func (task *BaseTask) ActionsAndStep() ([]Action, int) {
 func (task *BaseTask) StepUp() int {
 	task.step++
 	return task.step
+}
+
+func (task *BaseTask) Context() context.Context {
+	return task.ctx
 }
 
 func (task *BaseTask) MsgID() UniqueID {
