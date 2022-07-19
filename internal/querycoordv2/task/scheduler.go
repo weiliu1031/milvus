@@ -145,7 +145,6 @@ func (scheduler *Scheduler) schedule() {
 
 		isStale := scheduler.checkStale(task)
 		if isStale {
-			log.Warn("task is stale, set the status to failed")
 			task.SetStatus(TaskStatusFailed)
 			task.SetErr(ErrTaskStale)
 		}
@@ -203,7 +202,7 @@ func (scheduler *Scheduler) checkStale(task Task) bool {
 		case *SegmentAction:
 			segmentID := action.(*SegmentAction).SegmentID()
 			if !scheduler.targetMgr.ContainSegment(segmentID) {
-				log.Warn("failed to add task, the task's segment not exists",
+				log.Warn("the task is stale, the task's segment not exists",
 					zap.Int64("segment-id", segmentID))
 
 				return true
@@ -212,7 +211,7 @@ func (scheduler *Scheduler) checkStale(task Task) bool {
 		case *DmChannelAction:
 			channel := action.(*DmChannelAction).ChannelName()
 			if !scheduler.targetMgr.ContainDmChannel(channel) {
-				log.Warn("failed to add task, the task's channel not exists",
+				log.Warn("the task is stale, the task's channel not exists",
 					zap.String("channel-name", channel))
 
 				return true
