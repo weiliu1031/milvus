@@ -11,18 +11,19 @@ type Segment struct {
 	datapb.SegmentInfo
 }
 
-type SegmentMap map[UniqueID]*Segment
+type SegmentContainer struct {
+	segments []*Segment
+}
 
 type SegmentDistManager struct {
 	rwmutex sync.RWMutex
 
-	// NodeID ->
-	segments map[UniqueID][]*Segment
+	segments map[UniqueID]*SegmentContainer
 }
 
 func NewSegmentDistManager() *SegmentDistManager {
 	return &SegmentDistManager{
-		segments: make(map[int64][]*Segment),
+		segments: make(map[int64]*SegmentContainer),
 	}
 }
 
@@ -30,7 +31,7 @@ func (m *SegmentDistManager) Update(nodeID UniqueID, segments ...*Segment) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	m.segments[nodeID] = segments
+	m.segments[nodeID] = &SegmentContainer{segments}
 }
 
 // func (m *SegmentDistManager) Get(id UniqueID) *Segment {
@@ -45,8 +46,8 @@ func (m *SegmentDistManager) GetAll() []*Segment {
 	defer m.rwmutex.RUnlock()
 
 	segments := make([]*Segment, 0, len(m.segments))
-	for _, v := range m.segments {
-		segments = append(segments, v...)
+	for _, container := range m.segments {
+		segments = append(segments, container.segments...)
 	}
 
 	return segments
@@ -65,17 +66,21 @@ func (m *SegmentDistManager) GetByNode(nodeID UniqueID) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	return m.segments[nodeID]
+	container, ok := m.segments[nodeID]
+	if !ok {
+		return nil
+	}
+	return container.segments
 }
 
 func (m *SegmentDistManager) GetByCollectionAndNode(collectionID, nodeID UniqueID) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	segments := m.segments[nodeID]
+	container := m.segments[nodeID]
 
 	result := make([]*Segment, 0)
-	for _, segment := range segments {
+	for _, segment := range container.segments {
 		if segment.CollectionID == collectionID {
 			result = append(result, segment)
 		}

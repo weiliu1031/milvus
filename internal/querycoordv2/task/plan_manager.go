@@ -66,7 +66,7 @@ type PlanManager struct {
 	executor    *Executor
 
 	segmentManager *meta.SegmentDistManager
-	channelManager *meta.ChannelManager
+	channelManager *meta.ChannelDistManager
 	replicaManager *meta.ReplicaManager
 
 	// Auxiliary map for seek plans
