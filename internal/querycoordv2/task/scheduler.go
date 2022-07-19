@@ -150,16 +150,18 @@ func (scheduler *Scheduler) schedule() {
 		}
 
 		actions, step := task.ActionsAndStep()
-		for step < len(actions) {
-			if actions[step].IsFinished(scheduler.distMgr) {
-				step = task.StepUp()
-			} else {
-				break
+		if task.Status() == TaskStatusStarted {
+			for step < len(actions) {
+				if actions[step].IsFinished(scheduler.distMgr) {
+					step = task.StepUp()
+				} else {
+					break
+				}
 			}
-		}
 
-		if step >= len(actions) {
-			task.SetStatus(TaskStatusSucceeded)
+			if step >= len(actions) {
+				task.SetStatus(TaskStatusSucceeded)
+			}
 		}
 
 		switch task.Status() {
