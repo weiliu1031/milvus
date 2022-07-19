@@ -65,7 +65,7 @@ type PlanManager struct {
 	idAllocator IdAllocator
 	executor    *Executor
 
-	segmentManager *meta.SegmentManager
+	segmentManager *meta.SegmentDistManager
 	channelManager *meta.ChannelManager
 	replicaManager *meta.ReplicaManager
 
