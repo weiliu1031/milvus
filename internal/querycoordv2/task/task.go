@@ -17,6 +17,7 @@ const (
 
 type Task interface {
 	ActionsAndStep() ([]Action, int)
+	StepUp() int
 
 	MsgID() UniqueID
 	ID() UniqueID
@@ -63,6 +64,11 @@ func (task *BaseTask) ActionsAndStep() ([]Action, int) {
 	return task.actions, task.step
 }
 
+func (task *BaseTask) StepUp() int {
+	task.step++
+	return task.step
+}
+
 func (task *BaseTask) MsgID() UniqueID {
 	return task.msgID
 }
@@ -101,7 +107,28 @@ type SegmentTask struct {
 	segmentID UniqueID
 }
 
-func NewSegmentTask(base *BaseTask, segmentID UniqueID, actions ...Action) *SegmentTask {
+// NewSegmentTask creates a SegmentTask with actions,
+// all actions must process the same segment,
+// empty actions is not allowed
+func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
+	if len(actions) == 0 {
+		panic("empty actions is not allowed")
+	}
+
+	segmentID := int64(-1)
+	for _, action := range actions {
+		segmentAction, ok := action.(*SegmentAction)
+		if !ok {
+			panic("SegmentTask can only contain SegmentActions")
+		}
+
+		if segmentID < 0 {
+			segmentID = segmentAction.SegmentID()
+		} else if segmentID != segmentAction.SegmentID() {
+			panic("all actions must process the same segment")
+		}
+	}
+
 	base.actions = actions
 
 	return &SegmentTask{

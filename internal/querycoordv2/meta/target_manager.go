@@ -90,6 +90,14 @@ func (mgr *TargetManager) AddDmChannel(channels ...*DmChannel) {
 	}
 }
 
+func (mgr *TargetManager) ContainDmChannel(channel string) bool {
+	mgr.rwmutex.RLock()
+	defer mgr.rwmutex.RUnlock()
+
+	_, ok := mgr.dmChannels[channel]
+	return ok
+}
+
 // func (mgr *TargetManager) AddDeltaChannel(channels ...*DeltaChannel) {
 // 	mgr.rwmutex.Lock()
 // 	defer mgr.rwmutex.Unlock()

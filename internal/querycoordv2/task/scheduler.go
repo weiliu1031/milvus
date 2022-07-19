@@ -16,7 +16,11 @@ import (
 
 var (
 	ErrConflictTaskExisted = errors.New("ConflictTaskExisted")
-	ErrTaskStale           = errors.New("TaskStale")
+
+	// The target node is offline,
+	// or the target segment is not in TargetManager
+	// or the target channel is not in TargetManager
+	ErrTaskStale = errors.New("TaskStale")
 )
 
 type Scheduler struct {
@@ -25,8 +29,10 @@ type Scheduler struct {
 	executor    *Executor
 	idAllocator func() UniqueID
 
-	// Meta
-	segmentMgr *meta.SegmentDistManager
+	// Dist
+	distMgr *meta.DistributionManager
+
+	targetMgr *meta.TargetManager
 
 	// Session
 	nodeMgr *session.NodeManager
@@ -62,8 +68,6 @@ func (scheduler *Scheduler) preAdd(task Task) error {
 			return ErrConflictTaskExisted
 		}
 
-		// todo(yah01): check whether the segment exists
-
 	default:
 		panic(fmt.Sprintf("forget to process task type: %+v", task))
 	}
@@ -82,10 +86,10 @@ func (scheduler *Scheduler) Schedule() {
 	}
 }
 
-// schedule selects some tasks to execute,
-// PreExecute() for checks,
-// Execute() for processing
-// PostExecute() for callback
+// schedule selects some tasks to execute, follow these steps for each started selected tasks:
+// 1. check whether this task is stale, set status to failed if stale
+// 2. step up the task's actions, set status to succeeded if all actions finished
+// 3. execute the current action of task
 func (scheduler *Scheduler) schedule() {
 	scheduler.rwmutex.Lock()
 	defer scheduler.rwmutex.Unlock()
@@ -103,6 +107,16 @@ func (scheduler *Scheduler) schedule() {
 
 		switch task.Status() {
 		case TaskStatusStarted:
+			// Step up actions
+			for {
+				actions, step := task.ActionsAndStep()
+				if step < len(actions) && actions[step].IsFinished(scheduler.distMgr) {
+					task.StepUp()
+				} else {
+					break
+				}
+			}
+
 			actions, step := task.ActionsAndStep()
 			if step >= len(actions) {
 				task.SetStatus(TaskStatusSucceeded)
@@ -142,13 +156,22 @@ func (scheduler *Scheduler) checkStale(task Task) bool {
 
 		switch action.(type) {
 		case *SegmentAction:
-			// segmentID := action.(*SegmentAction).SegmentID()
-			// if !scheduler.segmentMgr.ContainTarget(segmentID) {
-			// 	log.Warn("the task is stale, the target segment doesn't exist",
-			// 		zap.Int64("segment-id", segmentID))
+			segmentID := action.(*SegmentAction).SegmentID()
+			if !scheduler.targetMgr.ContainSegment(segmentID) {
+				log.Warn("failed to add task, the task's segment not exists",
+					zap.Int64("segment-id", segmentID))
 
-			// 	return true
-			// }
+				return true
+			}
+
+		case *DmChannelAction:
+			channel := action.(*DmChannelAction).ChannelName()
+			if !scheduler.targetMgr.ContainDmChannel(channel) {
+				log.Warn("failed to add task, the task's channel not exists",
+					zap.String("channel-name", channel))
+
+				return true
+			}
 		}
 	}
 

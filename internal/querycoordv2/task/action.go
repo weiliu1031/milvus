@@ -7,6 +7,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -28,6 +29,7 @@ type Action interface {
 	Context() context.Context
 	Node() UniqueID
 	Type() ActionType
+	IsFinished(distMgr *meta.DistributionManager) bool
 	Execute(cluster *session.Cluster) error
 }
 
@@ -107,6 +109,22 @@ func (action *SegmentAction) Execute(cluster *session.Cluster) error {
 	return nil
 }
 
+func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
+	segments := distMgr.GetByNode(action.nodeID)
+
+	hasSegment := false
+	for _, segment := range segments {
+		if segment.GetID() == action.SegmentID() {
+			hasSegment = true
+			break
+		}
+	}
+
+	isGrow := action.Type() == ActionTypeGrow
+
+	return hasSegment == isGrow
+}
+
 type DmChannelAction struct {
 	*BaseAction
 	channelName string
@@ -151,6 +169,22 @@ func (action *DmChannelAction) Execute(cluster *session.Cluster) error {
 	}
 
 	return nil
+}
+
+func (action *DmChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
+	channels := distMgr.GetDmChannelByNode(action.nodeID)
+
+	hasChannel := false
+	for _, channel := range channels {
+		if channel.Channel == action.ChannelName() {
+			hasChannel = true
+			break
+		}
+	}
+
+	isGrow := action.Type() == ActionTypeGrow
+
+	return hasChannel == isGrow
 }
 
 type DeltaChannelAction struct {
