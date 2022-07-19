@@ -149,24 +149,24 @@ func (scheduler *Scheduler) schedule() {
 			task.SetErr(ErrTaskStale)
 		}
 
+		actions, step := task.ActionsAndStep()
+		for step < len(actions) {
+			if actions[step].IsFinished(scheduler.distMgr) {
+				step = task.StepUp()
+			} else {
+				break
+			}
+		}
+
+		if step >= len(actions) {
+			task.SetStatus(TaskStatusSucceeded)
+		}
+
 		switch task.Status() {
 		case TaskStatusStarted:
-			// Step up actions
-			for {
-				actions, step := task.ActionsAndStep()
-				if step < len(actions) && actions[step].IsFinished(scheduler.distMgr) {
-					task.StepUp()
-				} else {
-					break
-				}
-			}
-
-			actions, step := task.ActionsAndStep()
-			if step >= len(actions) {
-				task.SetStatus(TaskStatusSucceeded)
-			} else {
-				scheduler.executor.Execute(actions[step])
-			}
+			log.Debug("execute task",
+				zap.Int("step", step))
+			scheduler.executor.Execute(actions[step])
 
 		case TaskStatusSucceeded:
 			log.Debug("task succeeded")
