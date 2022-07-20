@@ -26,68 +26,57 @@ const (
 )
 
 type Action interface {
-	Context() context.Context
-	Node() UniqueID
-	Type() ActionType
 	IsFinished(distMgr *meta.DistributionManager) bool
-	Execute(cluster *session.Cluster) error
+
+	setContext(ctx context.Context)
 }
 
 type BaseAction struct {
-	replicaID UniqueID
-	nodeID    UniqueID
-	typ       ActionType
+	NodeID UniqueID
+	Type   ActionType
 
-	ctx context.Context
+	ctx context.Context // Set by executor
 }
 
-func NewBaseAction(ctx context.Context, nodeID UniqueID, typ ActionType) *BaseAction {
+func NewBaseAction(nodeID UniqueID, typ ActionType) *BaseAction {
 	return &BaseAction{
-		nodeID: nodeID,
-		typ:    typ,
-
-		ctx: ctx,
+		NodeID: nodeID,
+		Type:   typ,
 	}
 }
 
-func (action *BaseAction) Context() context.Context {
-	return action.ctx
-}
-
-func (action *BaseAction) Node() UniqueID {
-	return action.nodeID
-}
-
-func (action *BaseAction) Type() ActionType {
-	return action.typ
+func (action *BaseAction) setContext(ctx context.Context) {
+	action.ctx = ctx
 }
 
 type SegmentAction struct {
 	*BaseAction
-	segmentID UniqueID
+	SegmentID UniqueID
 }
 
-func NewSegmentAction(ctx context.Context, nodeID UniqueID, typ ActionType, segmentID UniqueID) *SegmentAction {
+func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID) *SegmentAction {
 	return &SegmentAction{
-		BaseAction: NewBaseAction(ctx, nodeID, typ),
+		BaseAction: NewBaseAction(nodeID, typ),
 
-		segmentID: segmentID,
+		SegmentID: segmentID,
 	}
 }
 
-func (action *SegmentAction) SegmentID() UniqueID {
-	return action.segmentID
-}
-
-func (action *SegmentAction) Execute(cluster *session.Cluster) error {
+func (action *SegmentAction) Execute(broker *meta.CoordinatorBroker, cluster *session.Cluster) error {
 	var (
 		status *commonpb.Status
 		err    error
 	)
 
-	switch action.Type() {
+	switch action.Type {
 	case ActionTypeGrow:
-		req := &querypb.LoadSegmentsRequest{}
+		broker.GetRecoveryInfo(action.ctx)
+		req := &querypb.LoadSegmentsRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_LoadSegments,
+				MsgID:   action.MsgID(),
+			},
+		}
 		status, err = cluster.LoadSegments(action.Context(), action.Node(), req)
 
 	case ActionTypeReduce:
@@ -192,7 +181,7 @@ type DeltaChannelAction struct {
 	channelName string
 }
 
-func NewDeltaChannelAction(ctx context.Context, nodeID UniqueID, typ ActionType, channelName string) *DeltaChannelAction {
+func NewDeltaChannelAction(nodeID UniqueID, typ ActionType, channelName string) *DeltaChannelAction {
 	return &DeltaChannelAction{
 		BaseAction: NewBaseAction(ctx, nodeID, typ),
 
