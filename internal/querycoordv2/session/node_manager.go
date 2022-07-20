@@ -49,6 +49,8 @@ func NewNodeManager() NodeManager {
 }
 
 type NodeInfo struct {
+	stats
+	mu   sync.RWMutex
 	id   int64
 	addr string
 }
@@ -61,6 +63,54 @@ func (n *NodeInfo) Addr() string {
 	return n.addr
 }
 
+func (n *NodeInfo) UpdateStats(opts ...StatsOption) {
+	n.mu.Lock()
+	for _, opt := range opts {
+		opt(n)
+	}
+	n.mu.Unlock()
+}
+
+// PreAllocate allocates space and return the result and cleaner.
+// Caller should call the cleaner after the related task completes.
+func (n *NodeInfo) PreAllocate(space int64) (bool, func()) {
+	n.mu.Lock()
+	succ := n.preAllocate(space)
+	n.mu.Unlock()
+	return succ, func() { n.releaseAllocation(space) }
+}
+
+func (n *NodeInfo) releaseAllocation(space int64) {
+	n.mu.Lock()
+	n.release(space)
+	n.mu.Unlock()
+}
+
+// GetScore return the score calculated by the current stats.
+// The higher score means the node has lighter load.
+func (n *NodeInfo) GetScore() int {
+	// TODO: impl
+	return -1
+}
+
 func NewNodeInfo(id int64, addr string) NodeInfo {
-	return NodeInfo{id: id, addr: addr}
+	return NodeInfo{
+		stats: newStats(),
+		id:    id,
+		addr:  addr,
+	}
+}
+
+type StatsOption func(*NodeInfo)
+
+func WithCapacity(cap int64) StatsOption {
+	return func(n *NodeInfo) {
+		n.setCapacity(cap)
+	}
+}
+
+func WithAvailable(available int64) StatsOption {
+	return func(n *NodeInfo) {
+		n.setAvailable(available)
+	}
 }

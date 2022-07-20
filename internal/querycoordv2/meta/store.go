@@ -60,7 +60,6 @@ func (s MetaStore) GetPartitions() (map[int64][]int64, error) {
 		return nil, err
 	}
 
-	fmt.Println("len keys", len(keys))
 	ret := make(map[int64][]int64)
 	for _, key := range keys {
 		coll, part, err := decodeLoadInfoKey(key)
