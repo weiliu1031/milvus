@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	executorWorkerPoolSize = 64
-	scheduleDuration       = 200 * time.Millisecond
+	executorWorkerPoolSize   = 64
+	scheduleDuration         = 200 * time.Millisecond
+	scheduleSegmentTaskLimit = 60
+	scheduleChannelTaskLimit = executorWorkerPoolSize - scheduleSegmentTaskLimit
 )
 
 var (
@@ -138,50 +140,76 @@ func (scheduler *Scheduler) schedule() {
 	scheduler.rwmutex.Lock()
 	defer scheduler.rwmutex.Unlock()
 
-	for segmentID, task := range scheduler.segmentTasks {
-		log := log.With(
-			zap.Int64("msg-id", task.MsgID()),
-			zap.Int64("task-id", task.ID()))
-
-		isStale := scheduler.checkStale(task)
-		if isStale {
-			task.SetStatus(TaskStatusFailed)
-			task.SetErr(ErrTaskStale)
-		}
-
-		actions, step := task.ActionsAndStep()
-		if task.Status() == TaskStatusStarted {
-			for step < len(actions) {
-				if actions[step].IsFinished(scheduler.distMgr) {
-					step = task.StepUp()
-				} else {
-					break
-				}
-			}
-
-			if step >= len(actions) {
-				task.SetStatus(TaskStatusSucceeded)
+	scheduledSegmentTaskCnt := 0
+	for _, task := range scheduler.segmentTasks {
+		isProcessing := scheduler.process(task)
+		if isProcessing {
+			scheduledSegmentTaskCnt++
+			if scheduledSegmentTaskCnt >= scheduleSegmentTaskLimit {
+				break
 			}
 		}
+	}
+}
 
-		switch task.Status() {
-		case TaskStatusStarted:
-			log.Debug("execute task",
-				zap.Int("step", step))
-			scheduler.executor.Execute(actions[step])
+// process processes the given task,
+// return true if the task is started
+func (scheduler *Scheduler) process(task Task) bool {
+	log := log.With(
+		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("task-id", task.ID()))
 
-		case TaskStatusSucceeded:
-			log.Debug("task succeeded")
-			delete(scheduler.segmentTasks, segmentID)
+	isStale := scheduler.checkStale(task)
+	if isStale {
+		task.SetStatus(TaskStatusFailed)
+		task.SetErr(ErrTaskStale)
+	}
 
-		case TaskStatusFailed:
-			log.Warn("failed to execute task",
-				zap.Error(task.Err()))
-			delete(scheduler.segmentTasks, segmentID)
-
-		default:
-			panic(fmt.Sprintf("invalid task status: %v", task.Status()))
+	actions, step := task.ActionsAndStep()
+	if task.Status() == TaskStatusStarted {
+		for step < len(actions) {
+			if actions[step].IsFinished(scheduler.distMgr) {
+				step = task.StepUp()
+			} else {
+				break
+			}
 		}
+
+		if step >= len(actions) {
+			task.SetStatus(TaskStatusSucceeded)
+		}
+	}
+
+	switch task.Status() {
+	case TaskStatusStarted:
+		log.Debug("execute task",
+			zap.Int("step", step))
+		scheduler.executor.Execute(actions[step])
+		return true
+
+	case TaskStatusSucceeded:
+		log.Debug("task succeeded")
+		scheduler.remove(task)
+
+	case TaskStatusFailed:
+		log.Warn("failed to execute task",
+			zap.Error(task.Err()))
+		scheduler.remove(task)
+
+	default:
+		panic(fmt.Sprintf("invalid task status: %v", task.Status()))
+	}
+
+	return false
+}
+
+func (scheduler *Scheduler) remove(task Task) {
+	switch task.(type) {
+	case *SegmentTask:
+		delete(scheduler.segmentTasks, task.(*SegmentTask).segmentID)
+
+	case *ChannelTask:
+		delete(scheduler.channelTasks, task.(*ChannelTask).channel)
 	}
 }
 

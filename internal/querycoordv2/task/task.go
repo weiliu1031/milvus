@@ -41,9 +41,10 @@ type Task interface {
 type BaseTask struct {
 	ctx context.Context
 
-	msgID     UniqueID // RequestID
-	id        UniqueID // Set by scheduler
-	replicaID UniqueID
+	msgID        UniqueID // RequestID
+	id           UniqueID // Set by scheduler
+	collectionID UniqueID
+	replicaID    UniqueID
 
 	status  TaskStatus
 	err     error
