@@ -4,21 +4,33 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 type TaskStatus = int32
+type TaskPriority = int32
 
 const (
-	TaskStatusStarted TaskStatus = iota + 1
+	TaskStatusCreated TaskStatus = iota + 1
+	TaskStatusStarted
 	TaskStatusSucceeded
-	TaskStatusFailed
+	TaskStatusCanceled
+	TaskStatusStale
+)
+
+const (
+	TaskPriorityLow = iota
+	TaskPriorityNormal
+	TaskPriorityHigh
+)
+
+var (
+	// All task priorities from low to high
+	TaskPriorities = []TaskPriority{TaskPriorityLow, TaskPriorityNormal, TaskPriorityHigh}
 )
 
 type Task interface {
-	ActionsAndStep() ([]Action, int)
-	StepUp() int
-
 	Context() context.Context
 	MsgID() UniqueID
 	ID() UniqueID
@@ -28,47 +40,43 @@ type Task interface {
 	SetStatus(status TaskStatus)
 	Err() error
 	SetErr(err error)
+	Priority() TaskPriority
+	SetPriority(priority TaskPriority)
 
-	// SetOnSucceeded(func())
-	// SetOnFailed(func())
-	// SetOnTimeout(func())
-
-	// onSucceeded()
-	// onFailed()
-	// onTimeout()
+	Cancel()
+	Actions() []Action
+	Step() int
+	IsFinished(dist *meta.DistributionManager) bool
 }
 
 type BaseTask struct {
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	msgID        UniqueID // RequestID
 	id           UniqueID // Set by scheduler
 	collectionID UniqueID
 	replicaID    UniqueID
 
-	status  TaskStatus
-	err     error
-	actions []Action
-	step    int
+	status   TaskStatus
+	priority TaskPriority
+	err      error
+	actions  []Action
+	step     int
 }
 
 func NewBaseTask(ctx context.Context, msgID, replicaID UniqueID) *BaseTask {
+	ctx, cancel := context.WithCancel(ctx)
+
 	return &BaseTask{
 		msgID:     msgID,
 		replicaID: replicaID,
 
-		status: TaskStatusStarted,
-		ctx:    ctx,
+		status:   TaskStatusStarted,
+		priority: TaskPriorityNormal,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
-}
-
-func (task *BaseTask) ActionsAndStep() ([]Action, int) {
-	return task.actions, task.step
-}
-
-func (task *BaseTask) StepUp() int {
-	task.step++
-	return task.step
 }
 
 func (task *BaseTask) Context() context.Context {
@@ -99,12 +107,45 @@ func (task *BaseTask) SetStatus(status TaskStatus) {
 	atomic.StoreInt32(&task.status, status)
 }
 
+func (task *BaseTask) Priority() TaskPriority {
+	return task.priority
+}
+
+func (task *BaseTask) SetPriority(priority TaskPriority) {
+	task.priority = priority
+}
+
 func (task *BaseTask) Err() error {
 	return task.err
 }
 
 func (task *BaseTask) SetErr(err error) {
 	task.err = err
+}
+
+func (task *BaseTask) Cancel() {
+	task.cancel()
+}
+
+func (task *BaseTask) Actions() []Action {
+	return task.actions
+}
+
+func (task *BaseTask) Step() int {
+	return task.step
+}
+
+func (task *BaseTask) IsFinished(distMgr *meta.DistributionManager) bool {
+	if task.Status() != TaskStatusStarted {
+		return false
+	}
+
+	actions, step := task.Actions(), task.Step()
+	for step < len(actions) && actions[step].IsFinished(distMgr) {
+		task.step++
+	}
+
+	return task.Step() >= len(actions)
 }
 
 type SegmentTask struct {
@@ -123,15 +164,9 @@ func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
 
 	segmentID := int64(-1)
 	for _, action := range actions {
-		segmentAction, ok := action.(*SegmentAction)
+		_, ok := action.(*SegmentAction)
 		if !ok {
 			panic("SegmentTask can only contain SegmentActions")
-		}
-
-		if segmentID < 0 {
-			segmentID = segmentAction.SegmentID()
-		} else if segmentID != segmentAction.SegmentID() {
-			panic("all actions must process the same segment")
 		}
 	}
 
