@@ -26,23 +26,32 @@ const (
 )
 
 type Action interface {
+	Node() int64
 	IsFinished(distMgr *meta.DistributionManager) bool
 
 	setContext(ctx context.Context)
 }
 
 type BaseAction struct {
-	NodeID UniqueID
-	Type   ActionType
+	nodeID UniqueID
+	typ    ActionType
 
 	ctx context.Context // Set by executor
 }
 
 func NewBaseAction(nodeID UniqueID, typ ActionType) *BaseAction {
 	return &BaseAction{
-		NodeID: nodeID,
-		Type:   typ,
+		nodeID: nodeID,
+		typ:    typ,
 	}
+}
+
+func (action *BaseAction) Node() int64 {
+	return action.nodeID
+}
+
+func (action *BaseAction) Type() ActionType {
+	return action.typ
 }
 
 func (action *BaseAction) setContext(ctx context.Context) {
@@ -62,48 +71,48 @@ func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID) *Segm
 	}
 }
 
-func (action *SegmentAction) Execute(broker *meta.CoordinatorBroker, cluster *session.Cluster) error {
-	var (
-		status *commonpb.Status
-		err    error
-	)
+// func (action *SegmentAction) Execute(broker *meta.CoordinatorBroker, cluster *session.Cluster) error {
+// 	var (
+// 		status *commonpb.Status
+// 		err    error
+// 	)
 
-	switch action.Type {
-	case ActionTypeGrow:
-		broker.GetRecoveryInfo(action.ctx)
-		req := &querypb.LoadSegmentsRequest{
-			Base: &commonpb.MsgBase{
-				MsgType: commonpb.MsgType_LoadSegments,
-				MsgID:   action.MsgID(),
-			},
-		}
-		status, err = cluster.LoadSegments(action.Context(), action.Node(), req)
+// 	switch action.Type {
+// 	case ActionTypeGrow:
+// 		broker.GetRecoveryInfo(action.ctx)
+// 		req := &querypb.LoadSegmentsRequest{
+// 			Base: &commonpb.MsgBase{
+// 				MsgType: commonpb.MsgType_LoadSegments,
+// 				MsgID:   action.MsgID(),
+// 			},
+// 		}
+// 		status, err = cluster.LoadSegments(action.Context(), action.Node(), req)
 
-	case ActionTypeReduce:
-		req := &querypb.ReleaseSegmentsRequest{}
-		status, err = cluster.ReleaseSegments(action.Context(), action.Node(), req)
+// 	case ActionTypeReduce:
+// 		req := &querypb.ReleaseSegmentsRequest{}
+// 		status, err = cluster.ReleaseSegments(action.Context(), action.Node(), req)
 
-	default:
-		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
-	}
+// 	default:
+// 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
+// 	}
 
-	if err != nil {
-		return err
-	}
+// 	if err != nil {
+// 		return err
+// 	}
 
-	if status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(status.Reason)
-	}
+// 	if status.ErrorCode != commonpb.ErrorCode_Success {
+// 		return errors.New(status.Reason)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	segments := distMgr.GetByNode(action.nodeID)
+	segments := distMgr.GetByNode(action.Node())
 
 	hasSegment := false
 	for _, segment := range segments {
-		if segment.GetID() == action.SegmentID() {
+		if segment.GetID() == action.SegmentID {
 			hasSegment = true
 			break
 		}
@@ -121,7 +130,7 @@ type DmChannelAction struct {
 
 func NewDmChannelAction(ctx context.Context, nodeID UniqueID, typ ActionType, channelName string) *DmChannelAction {
 	return &DmChannelAction{
-		BaseAction: NewBaseAction(ctx, nodeID, typ),
+		BaseAction: NewBaseAction(nodeID, typ),
 
 		channelName: channelName,
 	}
@@ -140,7 +149,7 @@ func (action *DmChannelAction) Execute(cluster *session.Cluster) error {
 	switch action.Type() {
 	case ActionTypeGrow:
 		req := &querypb.WatchDmChannelsRequest{}
-		status, err = cluster.WatchDmChannels(action.Context(), action.Node(), req)
+		status, err = cluster.WatchDmChannels(action.ctx, action.Node(), req)
 
 	case ActionTypeReduce:
 		// todo(yah01): Add unsub dm channel?
@@ -183,7 +192,7 @@ type DeltaChannelAction struct {
 
 func NewDeltaChannelAction(nodeID UniqueID, typ ActionType, channelName string) *DeltaChannelAction {
 	return &DeltaChannelAction{
-		BaseAction: NewBaseAction(ctx, nodeID, typ),
+		BaseAction: NewBaseAction(nodeID, typ),
 
 		channelName: channelName,
 	}
@@ -202,7 +211,7 @@ func (action *DeltaChannelAction) Execute(cluster *session.Cluster) error {
 	switch action.Type() {
 	case ActionTypeGrow:
 		req := &querypb.WatchDeltaChannelsRequest{}
-		status, err = cluster.WatchDeltaChannels(action.Context(), action.Node(), req)
+		status, err = cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
 
 	case ActionTypeReduce:
 		// todo(yah01): Add unsub delta channel?
