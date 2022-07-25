@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -51,4 +52,28 @@ func (broker *CoordinatorBroker) GetRecoveryInfo(ctx context.Context, collection
 		zap.Int("num segments", len(recoveryInfo.Binlogs)))
 
 	return recoveryInfo.Channels, recoveryInfo.Binlogs, nil
+}
+
+func (broker *CoordinatorBroker) GetSegmentInfo(ctx context.Context, segmentID UniqueID) (*datapb.SegmentInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, brokerRpcTimeout)
+	defer cancel()
+
+	req := &datapb.GetSegmentInfoRequest{
+		SegmentIDs: []int64{segmentID},
+	}
+	resp, err := broker.dataCoord.GetSegmentInfo(ctx, req)
+	if err != nil {
+		log.Error("failed to get segment info from DataCoord",
+			zap.Int64("segment-id", segmentID),
+			zap.Error(err))
+		return nil, err
+	}
+
+	if len(resp.Infos) == 0 {
+		log.Warn("No such segment in DataCoord",
+			zap.Int64("segment-id", segmentID))
+		return nil, fmt.Errorf("no such segment in DataCoord")
+	}
+
+	return resp.GetInfos()[0], nil
 }
