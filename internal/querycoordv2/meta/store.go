@@ -26,6 +26,12 @@ type MetaStore struct {
 	cli kv.TxnKV
 }
 
+func NewMetaStore(cli kv.TxnKV) MetaStore {
+	return MetaStore{
+		cli: cli,
+	}
+}
+
 func (s MetaStore) Load(collection int64, partitions []int64) error {
 	if len(partitions) == 0 {
 		return ErrEmptyPartitions
@@ -91,10 +97,4 @@ func decodeLoadInfoKey(key string) (collection int64, partition int64, err error
 		partition, err = strconv.ParseInt(items[2], 10, 64)
 	}
 	return
-}
-
-func NewMetaStore(cli kv.TxnKV) MetaStore {
-	return MetaStore{
-		cli: cli,
-	}
 }
