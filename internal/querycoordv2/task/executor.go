@@ -78,7 +78,7 @@ func (ex *Executor) Execute(task Task, step int, action Action) bool {
 func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentAction) {
 	switch action.Type() {
 	case ActionTypeGrow:
-		_, segmentBinlogs, err := ex.broker.GetRecoveryInfo(task.Context())
+		segment, err := ex.broker.GetSegmentInfo(task.ctx, task.segmentID)
 
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
