@@ -18,9 +18,10 @@ type TargetManager struct {
 
 func NewTargetManager() *TargetManager {
 	return &TargetManager{
-		segments:      make(map[int64]*Segment),
-		dmChannels:    make(map[string]*DmChannel),
-		deltaChannels: make(map[string]*DeltaChannel),
+		segments:        make(map[int64]*Segment),
+		growingSegments: make(typeutil.UniqueSet),
+		dmChannels:      make(map[string]*DmChannel),
+		deltaChannels:   make(map[string]*DeltaChannel),
 	}
 }
 
@@ -64,20 +65,26 @@ func (mgr *TargetManager) GetSegments(collectionID int64, partitionIDs ...int64)
 	return segments
 }
 
+func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions ...int64) []*Segment {
+	mgr.rwmutex.RLock()
+	defer mgr.rwmutex.RUnlock()
+
+	segments := make([]*Segment, 0)
+	for _, segment := range mgr.segments {
+		if segment.CollectionID == collection &&
+			(len(partitions) == 0 || funcutil.SliceContain(partitions, segment.PartitionID)) {
+			segments = append(segments, segment)
+		}
+	}
+
+	return segments
+}
+
 func (mgr *TargetManager) HandoffSegment(dest *Segment, sources ...int64) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
 
-	for _, src := range sources {
-		if mgr.containSegment(src) {
-			delete(mgr.segments, src)
-		} else { // This segment is a growing segment,
-			mgr.growingSegments.Insert(src)
-		}
-	}
-
-	// Must add dest segment after handling source segments,
-	// For flushing segment, the dest and sources are the same
+	dest.CompactionFrom = sources
 	mgr.addSegment(dest)
 }
 
