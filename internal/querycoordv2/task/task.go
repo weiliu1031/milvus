@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -34,6 +35,7 @@ type Task interface {
 	Context() context.Context
 	MsgID() UniqueID
 	ID() UniqueID
+	CollectionID() UniqueID
 	ReplicaID() UniqueID
 	SetID(id UniqueID)
 	Status() TaskStatus
@@ -95,6 +97,10 @@ func (task *BaseTask) SetID(id UniqueID) {
 	task.id = id
 }
 
+func (task *BaseTask) CollectionID() UniqueID {
+	return task.collectionID
+}
+
 func (task *BaseTask) ReplicaID() UniqueID {
 	return task.replicaID
 }
@@ -152,6 +158,7 @@ type SegmentTask struct {
 	*BaseTask
 
 	segmentID UniqueID
+	loadType  querypb.LoadType
 }
 
 // NewSegmentTask creates a SegmentTask with actions,

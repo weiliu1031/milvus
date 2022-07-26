@@ -20,6 +20,7 @@ type actionIndex struct {
 type Executor struct {
 	cluster *session.Cluster
 	broker  *meta.CoordinatorBroker
+	meta    *meta.Meta
 
 	executingActions sync.Map
 }
@@ -76,17 +77,61 @@ func (ex *Executor) Execute(task Task, step int, action Action) bool {
 }
 
 func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentAction) {
+	log := log.With(
+		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("task-id", task.ID()),
+		zap.Int64("collection-id", task.collectionID),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.Int64("segment-id", task.segmentID),
+	)
+
 	switch action.Type() {
 	case ActionTypeGrow:
-		segment, err := ex.broker.GetSegmentInfo(task.ctx, task.segmentID)
+		collection := ex.meta.CollectionManager.Get(task.CollectionID())
+		if collection == nil {
+			log.Warn("failed to get collection")
+			return
+		}
 
+		segment, err := ex.broker.GetSegmentInfo(task.ctx, task.segmentID)
+		if err != nil {
+			log.Warn("failed to get segment info from DataCoord", zap.Error(err))
+			return
+		}
+
+		loadInfo := &querypb.SegmentLoadInfo{
+			SegmentID:     segment.ID,
+			PartitionID:   segment.PartitionID,
+			CollectionID:  segment.CollectionID,
+			BinlogPaths:   segment.Binlogs,
+			NumOfRows:     segment.NumOfRows,
+			Statslogs:     segment.Statslogs,
+			Deltalogs:     segment.Deltalogs,
+			InsertChannel: segment.InsertChannel,
+		}
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
 				MsgType: commonpb.MsgType_LoadSegments,
 				MsgID:   task.MsgID(),
 			},
+			Infos:  []*querypb.SegmentLoadInfo{loadInfo},
+			Schema: collection.Schema,
+			LoadMeta: &querypb.LoadMetaInfo{
+				LoadType:     task.loadType,
+				CollectionID: task.CollectionID(),
+				PartitionIDs: []int64{segment.PartitionID},
+			},
+			ReplicaID: task.ReplicaID(),
 		}
-		ex.cluster.LoadSegments(action.ctx, action.Node(), req)
+		status, err := ex.cluster.LoadSegments(action.ctx, action.Node(), req)
+		if err != nil {
+			log.Warn("failed to load segment, it may be a false failure", zap.Error(err))
+			return
+		}
+		if status.ErrorCode != commonpb.ErrorCode_Success {
+			log.Warn("failed to load segment", zap.String("reason", status.Reason))
+			return
+		}
 
 	case ActionTypeReduce:
 		req := &querypb.ReleaseSegmentsRequest{}
