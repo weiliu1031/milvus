@@ -6,6 +6,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
@@ -144,10 +145,17 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 	}
 }
 
-func (ex *Executor) executeDmChannelAction(action *DmChannelAction) {
+func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelAction) {
 	switch action.Type() {
 	case ActionTypeGrow:
-		req := &querypb.LoadSegmentsRequest{}
+		req := &querypb.WatchDmChannelsRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_WatchDmChannels,
+				MsgID:   task.MsgID(),
+			},
+			CollectionID: task.CollectionID(),
+			Infos:        &datapb.VchannelInfo{},
+		}
 		ex.cluster.LoadSegments(action.ctx, action.Node(), req)
 
 	case ActionTypeReduce:

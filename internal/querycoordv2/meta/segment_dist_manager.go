@@ -11,19 +11,16 @@ type Segment struct {
 	datapb.SegmentInfo
 }
 
-type SegmentContainer struct {
-	segments []*Segment
-}
-
 type SegmentDistManager struct {
 	rwmutex sync.RWMutex
 
-	segments map[UniqueID]*SegmentContainer
+	// shard, nodeID -> []*Segment
+	segments map[string]map[UniqueID][]*Segment
 }
 
 func NewSegmentDistManager() *SegmentDistManager {
 	return &SegmentDistManager{
-		segments: make(map[int64]*SegmentContainer),
+		segments: make(map[string]map[UniqueID][]*Segment),
 	}
 }
 
@@ -31,7 +28,14 @@ func (m *SegmentDistManager) Update(nodeID UniqueID, segments ...*Segment) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	m.segments[nodeID] = &SegmentContainer{segments}
+	shardSegments := make(map[string][]*Segment)
+	for _, segment := range segments {
+		shardSegments[segment.InsertChannel] = append(shardSegments[segment.InsertChannel], segment)
+	}
+
+	for shard, segments := range shardSegments {
+		m.segments[shard][nodeID] = segments
+	}
 }
 
 // func (m *SegmentDistManager) Get(id UniqueID) *Segment {
@@ -46,8 +50,10 @@ func (m *SegmentDistManager) GetAll() []*Segment {
 	defer m.rwmutex.RUnlock()
 
 	segments := make([]*Segment, 0, len(m.segments))
-	for _, container := range m.segments {
-		segments = append(segments, container.segments...)
+	for _, shardSegments := range m.segments {
+		for _, nodeSegments := range shardSegments {
+			segments = append(segments, nodeSegments...)
+		}
 	}
 
 	return segments
@@ -66,25 +72,24 @@ func (m *SegmentDistManager) GetByNode(nodeID UniqueID) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	container, ok := m.segments[nodeID]
-	if !ok {
-		return nil
+	segments := make([]*Segment, 0)
+	for _, shardSegments := range m.segments {
+		segments = append(segments, shardSegments[nodeID]...)
 	}
-	return container.segments
+	return segments
 }
 
 func (m *SegmentDistManager) GetByCollectionAndNode(collectionID, nodeID UniqueID) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	container := m.segments[nodeID]
-
 	result := make([]*Segment, 0)
-	for _, segment := range container.segments {
-		if segment.CollectionID == collectionID {
-			result = append(result, segment)
+	for _, shardSegments := range m.segments {
+		for _, segment := range shardSegments[nodeID] {
+			if segment.CollectionID == collectionID {
+				result = append(result, segment)
+			}
 		}
 	}
-
 	return result
 }
