@@ -27,14 +27,14 @@ type ChannelDistManager struct {
 	rwmutex sync.RWMutex
 
 	// NodeID -> Channels
-	dmChannels    map[UniqueID]*DmChannelContainer
-	deltaChannels map[UniqueID]*DeltaChannelContainer
+	dmChannels    map[UniqueID][]*DmChannel
+	deltaChannels map[UniqueID][]*DeltaChannel
 }
 
 func NewChannelDistManager() *ChannelDistManager {
 	return &ChannelDistManager{
-		dmChannels:    make(map[UniqueID]*DmChannelContainer),
-		deltaChannels: make(map[UniqueID]*DeltaChannelContainer),
+		dmChannels:    make(map[UniqueID][]*DmChannel),
+		deltaChannels: make(map[UniqueID][]*DeltaChannel),
 	}
 }
 
@@ -46,12 +46,30 @@ func (m *ChannelDistManager) GetDmChannelByNode(nodeID UniqueID) []*DmChannel {
 }
 
 func (m *ChannelDistManager) getDmChannelByNode(nodeID UniqueID) []*DmChannel {
-	container, ok := m.dmChannels[nodeID]
+	channels, ok := m.dmChannels[nodeID]
 	if !ok {
 		return nil
 	}
 
-	return container.channels
+	return channels
+}
+
+// GetShardLeader returns the node whthin the given replicaNodes and subscribing the given shard,
+// returns (0, false) if not found.
+func (m *ChannelDistManager) GetShardLeader(replicaNodes []UniqueID, shard string) (int64, bool) {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	for _, node := range replicaNodes {
+		channels := m.dmChannels[node]
+		for _, dmc := range channels {
+			if dmc.ChannelName == shard {
+				return node, true
+			}
+		}
+	}
+
+	return 0, false
 }
 
 func (m *ChannelDistManager) GetDmChannelByNodeAndCollection(nodeID, collectionID UniqueID) []*DmChannel {
@@ -72,9 +90,7 @@ func (m *ChannelDistManager) UpdateDmChannels(nodeID UniqueID, channels ...*DmCh
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	m.dmChannels[nodeID] = &DmChannelContainer{
-		channels: channels,
-	}
+	m.dmChannels[nodeID] = channels
 }
 
 func (m *ChannelDistManager) GetDeltaChannelByNode(nodeID UniqueID) []*DeltaChannel {
@@ -85,19 +101,17 @@ func (m *ChannelDistManager) GetDeltaChannelByNode(nodeID UniqueID) []*DeltaChan
 }
 
 func (m *ChannelDistManager) getDeltaChannelByNode(nodeID UniqueID) []*DeltaChannel {
-	container, ok := m.deltaChannels[nodeID]
+	channels, ok := m.deltaChannels[nodeID]
 	if !ok {
 		return nil
 	}
 
-	return container.channels
+	return channels
 }
 
 func (m *ChannelDistManager) UpdateDeltaChannels(nodeID UniqueID, channels ...*DeltaChannel) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	m.deltaChannels[nodeID] = &DeltaChannelContainer{
-		channels: channels,
-	}
+	m.deltaChannels[nodeID] = channels
 }

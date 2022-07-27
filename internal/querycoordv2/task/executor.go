@@ -18,6 +18,7 @@ type actionIndex struct {
 }
 
 type Executor struct {
+	distMgr *meta.DistributionManager
 	cluster *session.Cluster
 	broker  *meta.CoordinatorBroker
 	meta    *meta.Meta
@@ -25,8 +26,9 @@ type Executor struct {
 	executingActions sync.Map
 }
 
-func NewExecutor(cluster *session.Cluster, broker *meta.CoordinatorBroker) *Executor {
+func NewExecutor(distMgr *meta.DistributionManager, cluster *session.Cluster, broker *meta.CoordinatorBroker) *Executor {
 	return &Executor{
+		distMgr: distMgr,
 		cluster: cluster,
 		broker:  broker,
 
@@ -80,9 +82,10 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 	log := log.With(
 		zap.Int64("msg-id", task.MsgID()),
 		zap.Int64("task-id", task.ID()),
-		zap.Int64("collection-id", task.collectionID),
+		zap.Int64("collection-id", task.CollectionID()),
 		zap.Int64("replica-id", task.ReplicaID()),
 		zap.Int64("segment-id", task.segmentID),
+		zap.Int64("node-id", action.Node()),
 	)
 
 	switch action.Type() {
@@ -99,31 +102,30 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 			return
 		}
 
-		loadInfo := &querypb.SegmentLoadInfo{
-			SegmentID:     segment.ID,
-			PartitionID:   segment.PartitionID,
-			CollectionID:  segment.CollectionID,
-			BinlogPaths:   segment.Binlogs,
-			NumOfRows:     segment.NumOfRows,
-			Statslogs:     segment.Statslogs,
-			Deltalogs:     segment.Deltalogs,
-			InsertChannel: segment.InsertChannel,
+		// Get shard leader for the given replica and segment
+		replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
+		leader, ok := ex.distMgr.GetShardLeader(replica.Nodes.Collect(), segment.GetInsertChannel())
+		if !ok {
+			log.Warn("no shard leader for the segment to execute loading", zap.String("shard", segment.InsertChannel))
 		}
+		log = log.With(zap.Int64("shard-leader", leader))
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
 				MsgType: commonpb.MsgType_LoadSegments,
 				MsgID:   task.MsgID(),
 			},
-			Infos:  []*querypb.SegmentLoadInfo{loadInfo},
+			Infos:  []*querypb.SegmentLoadInfo{packSegmentLoadInfo(segment)},
 			Schema: collection.Schema,
 			LoadMeta: &querypb.LoadMetaInfo{
 				LoadType:     task.loadType,
 				CollectionID: task.CollectionID(),
 				PartitionIDs: []int64{segment.PartitionID},
 			},
-			ReplicaID: task.ReplicaID(),
+			CollectionID: task.CollectionID(),
+			ReplicaID:    task.ReplicaID(),
+			DstNodeID:    action.Node(),
 		}
-		status, err := ex.cluster.LoadSegments(action.ctx, action.Node(), req)
+		status, err := ex.cluster.LoadSegments(action.ctx, leader, req)
 		if err != nil {
 			log.Warn("failed to load segment, it may be a false failure", zap.Error(err))
 			return
