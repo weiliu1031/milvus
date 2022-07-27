@@ -78,6 +78,19 @@ func (m *ReplicaManager) GetByNode(nodeID UniqueID) []*Replica {
 	return replicas
 }
 
+func (m *ReplicaManager) GetByCollectionAndNode(collectionID, nodeID UniqueID) *Replica {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	for _, replica := range m.replicas {
+		if replica.CollectionID == collectionID && replica.Nodes.Contain(nodeID) {
+			return replica
+		}
+	}
+
+	return nil
+}
+
 func (m *ReplicaManager) AddNode(replicaID UniqueID, nodes ...UniqueID) bool {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
