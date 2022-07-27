@@ -71,42 +71,6 @@ func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID) *Segm
 	}
 }
 
-// func (action *SegmentAction) Execute(broker *meta.CoordinatorBroker, cluster *session.Cluster) error {
-// 	var (
-// 		status *commonpb.Status
-// 		err    error
-// 	)
-
-// 	switch action.Type {
-// 	case ActionTypeGrow:
-// 		broker.GetRecoveryInfo(action.ctx)
-// 		req := &querypb.LoadSegmentsRequest{
-// 			Base: &commonpb.MsgBase{
-// 				MsgType: commonpb.MsgType_LoadSegments,
-// 				MsgID:   action.MsgID(),
-// 			},
-// 		}
-// 		status, err = cluster.LoadSegments(action.Context(), action.Node(), req)
-
-// 	case ActionTypeReduce:
-// 		req := &querypb.ReleaseSegmentsRequest{}
-// 		status, err = cluster.ReleaseSegments(action.Context(), action.Node(), req)
-
-// 	default:
-// 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
-// 	}
-
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	if status.ErrorCode != commonpb.ErrorCode_Success {
-// 		return errors.New(status.Reason)
-// 	}
-
-// 	return nil
-// }
-
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
 	segments := distMgr.GetByNode(action.Node())
 
