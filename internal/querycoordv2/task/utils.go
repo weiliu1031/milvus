@@ -4,7 +4,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 )
 
 // packSegmentLoadInfo packs SegmentLoadInfo for given segment,
@@ -25,18 +25,18 @@ func packSegmentLoadInfo(segment *datapb.SegmentInfo, indexes []*querypb.FieldIn
 	return loadInfo
 }
 
-func packLoadSegmentRequest(task *SegmentTask, action Action, schema *schemapb.CollectionSchema, loadInfo *querypb.SegmentLoadInfo) *querypb.LoadSegmentsRequest {
+func packLoadSegmentRequest(task *SegmentTask, action Action, collection *meta.Collection, loadInfo *querypb.SegmentLoadInfo) *querypb.LoadSegmentsRequest {
 	return &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadSegments,
 			MsgID:   task.MsgID(),
 		},
 		Infos:  []*querypb.SegmentLoadInfo{loadInfo},
-		Schema: schema,
+		Schema: collection.Schema,
 		LoadMeta: &querypb.LoadMetaInfo{
-			LoadType:     task.loadType,
-			CollectionID: task.CollectionID(),
-			PartitionIDs: []int64{loadInfo.PartitionID},
+			LoadType:     collection.LoadType,
+			CollectionID: collection.CollectionID,
+			PartitionIDs: collection.Partitions,
 		},
 		CollectionID: task.CollectionID(),
 		ReplicaID:    task.ReplicaID(),
@@ -84,4 +84,57 @@ func getFieldSizeFromBinlog(fieldBinlog *datapb.FieldBinlog) int64 {
 	}
 
 	return fieldSize
+}
+
+func packReleaseSegmentRequest(task *SegmentTask, action Action) *querypb.ReleaseSegmentsRequest {
+	return &querypb.ReleaseSegmentsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_ReleaseSegments,
+			MsgID:   task.MsgID(),
+		},
+
+		NodeID:       action.Node(),
+		CollectionID: task.CollectionID(),
+		SegmentIDs:   []int64{task.SegmentID()},
+		Scope:        querypb.DataScope_All,
+	}
+}
+
+func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.Collection, channel *datapb.VchannelInfo) *querypb.WatchDmChannelsRequest {
+	return &querypb.WatchDmChannelsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_WatchDmChannels,
+			MsgID:   task.MsgID(),
+		},
+		NodeID:       action.Node(),
+		CollectionID: task.CollectionID(),
+		Infos:        []*datapb.VchannelInfo{channel},
+		Schema:       collection.Schema,
+		LoadMeta: &querypb.LoadMetaInfo{
+			LoadType:     collection.LoadType,
+			CollectionID: collection.CollectionID,
+			PartitionIDs: collection.Partitions,
+		},
+		ReplicaID: task.ReplicaID(),
+	}
+}
+
+func mergeDmChannelInfo(infos []*datapb.VchannelInfo) *datapb.VchannelInfo {
+	var dmChannel *datapb.VchannelInfo
+
+	for _, info := range infos {
+		if dmChannel == nil {
+			dmChannel = info
+			continue
+		}
+
+		if info.SeekPosition.GetTimestamp() < dmChannel.SeekPosition.GetTimestamp() {
+			dmChannel.SeekPosition = info.SeekPosition
+		}
+		dmChannel.DroppedSegmentIds = append(dmChannel.DroppedSegmentIds, info.DroppedSegmentIds...)
+		dmChannel.UnflushedSegmentIds = append(dmChannel.UnflushedSegmentIds, info.UnflushedSegmentIds...)
+		dmChannel.FlushedSegmentIds = append(dmChannel.FlushedSegmentIds, info.FlushedSegmentIds...)
+	}
+
+	return dmChannel
 }

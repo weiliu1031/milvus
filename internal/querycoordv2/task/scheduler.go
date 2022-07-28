@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	taskPoolSize             = 128
-	scheduleSegmentTaskLimit = 60
+	taskPoolSize = 128
 )
 
 var (
@@ -253,7 +252,9 @@ func (scheduler *Scheduler) schedule(node int64) {
 	// Process tasks
 	toRemove := make([]Task, 0)
 	scheduler.processQueue.Range(func(task Task) bool {
-		scheduler.process(task)
+		if task.IsRelatedTo(node) {
+			scheduler.process(task)
+		}
 
 		if task.Status() != TaskStatusStarted {
 			toRemove = append(toRemove, task)
