@@ -110,6 +110,7 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 			return
 		}
 		indexes, err := ex.broker.GetIndexInfo(task.Context(), collection.Schema, collection.CollectionID, segment.ID)
+		loadInfo := packSegmentLoadInfo(segment, indexes)
 
 		// Get shard leader for the given replica and segment
 		replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
@@ -120,13 +121,21 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 		}
 		log = log.With(zap.Int64("shard-leader", leader))
 
+		// Pre-allocate memory for loading segment
 		node := ex.nodeMgr.Get(action.Node())
 		if node == nil {
-			log.Warn("failed to get node, this task may be stale")
+			log.Warn("failed to get node, the task may be stale")
 			return
 		}
+		ok, release := node.PreAllocate(loadInfo.SegmentSize)
+		if !ok {
+			log.Warn("no enough memory to pre-allocate for loading segment",
+				zap.Int64("segment-size", loadInfo.SegmentSize))
+			return
+		}
+		defer release()
 
-		req := packLoadSegmentRequest(task, action, collection.Schema, segment, indexes)
+		req := packLoadSegmentRequest(task, action, collection.Schema, loadInfo)
 		status, err := ex.cluster.LoadSegments(action.ctx, leader, req)
 		if err != nil {
 			log.Warn("failed to load segment, it may be a false failure", zap.Error(err))

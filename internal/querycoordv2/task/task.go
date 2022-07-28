@@ -49,6 +49,15 @@ type Task interface {
 	Actions() []Action
 	Step() int
 	IsFinished(dist *meta.DistributionManager) bool
+
+	// OnSuccess registers a callback for task succeeded
+	OnSuccess(func())
+	// OnFailure registers a callback for task failed (canceled, stale)
+	OnFailure(func())
+	// OnDone is equal to call both of OnSuccess and OnFailure
+	OnDone(func())
+	// callbacks() returns registered callbacks of OnSuccess and OnFailure
+	callbacks() ([]func(), []func())
 }
 
 type BaseTask struct {
@@ -65,6 +74,9 @@ type BaseTask struct {
 	err      error
 	actions  []Action
 	step     int
+
+	successCallbacks []func()
+	failureCallbacks []func()
 }
 
 func NewBaseTask(ctx context.Context, msgID, replicaID UniqueID) *BaseTask {
@@ -152,6 +164,27 @@ func (task *BaseTask) IsFinished(distMgr *meta.DistributionManager) bool {
 	}
 
 	return task.Step() >= len(actions)
+}
+
+func (task *BaseTask) PreExecute() error {
+	return nil
+}
+
+func (task *BaseTask) OnSuccess(fn func()) {
+	task.successCallbacks = append(task.successCallbacks, fn)
+}
+
+func (task *BaseTask) OnFailure(fn func()) {
+	task.failureCallbacks = append(task.failureCallbacks, fn)
+}
+
+func (task *BaseTask) OnDone(fn func()) {
+	task.OnSuccess(fn)
+	task.OnFailure(fn)
+}
+
+func (task *BaseTask) callbacks() ([]func(), []func()) {
+	return task.successCallbacks, task.failureCallbacks
 }
 
 type SegmentTask struct {

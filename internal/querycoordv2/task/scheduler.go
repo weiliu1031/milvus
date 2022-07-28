@@ -28,6 +28,11 @@ var (
 	// or the target segment is not in TargetManager,
 	// or the target channel is not in TargetManager
 	ErrTaskStale = errors.New("TaskStale")
+
+	// No enough memory to load segment
+	ErrResourceNotEnough = errors.New("ResourceNotEnough")
+
+	ErrTaskQueueFull = errors.New("TaskQueueFull")
 )
 
 type replicaSegmentIndex struct {
@@ -202,10 +207,22 @@ func (scheduler *Scheduler) preAdd(task Task) error {
 	return nil
 }
 
+func (scheduler *Scheduler) promote(task Task) error {
+	err := scheduler.prePromote(task)
+	if err != nil {
+		return err
+	}
+
+	if scheduler.processQueue.Add(task) {
+		task.SetStatus(TaskStatusStarted)
+		return nil
+	}
+
+	return ErrTaskQueueFull
+}
+
 func (scheduler *Scheduler) prePromote(task Task) error {
-	if !scheduler.tasks.Contain(task.ID()) {
-		return ErrTaskCanceled
-	} else if scheduler.checkTimeout(task) {
+	if !scheduler.tasks.Contain(task.ID()) || scheduler.checkTimeout(task) {
 		return ErrTaskCanceled
 	} else if scheduler.checkStale(task) {
 		return ErrTaskStale
@@ -246,30 +263,21 @@ func (scheduler *Scheduler) schedule(node int64) {
 	})
 
 	for _, task := range toRemove {
-		scheduler.processQueue.Remove(task)
 		scheduler.remove(task)
 	}
 
 	// Promote waiting tasks
 	toRemove = toRemove[:0]
 	scheduler.waitQueue.Range(func(task Task) bool {
-		err := scheduler.prePromote(task)
-		if err != nil {
+		err := scheduler.promote(task)
+		if err != nil && !errors.Is(err, ErrTaskQueueFull) {
 			toRemove = append(toRemove, task)
 		}
 
-		if scheduler.processQueue.Add(task) {
-			task.SetStatus(TaskStatusStarted)
-			toRemove = append(toRemove, task)
-
-			return true
-		}
-
-		return false
+		return err == nil
 	})
 
 	for _, task := range toRemove {
-		scheduler.waitQueue.Remove(task)
 		scheduler.remove(task)
 	}
 }
@@ -298,9 +306,10 @@ func (scheduler *Scheduler) process(task Task) bool {
 	}
 
 	actions, step := task.Actions(), task.Step()
+	log = log.With(zap.Int("step", step))
 	switch task.Status() {
 	case TaskStatusStarted:
-		log.Debug("execute task", zap.Int("step", step))
+		log.Debug("execute task")
 		if scheduler.executor.Execute(task, step, actions[step]) {
 			return true
 		}
@@ -309,9 +318,7 @@ func (scheduler *Scheduler) process(task Task) bool {
 		log.Debug("task succeeded")
 
 	case TaskStatusCanceled, TaskStatusStale:
-		log.Warn("failed to execute task",
-			zap.Int("step", step),
-			zap.Error(task.Err()))
+		log.Warn("failed to execute task", zap.Error(task.Err()))
 
 	default:
 		panic(fmt.Sprintf("invalid task status: %v", task.Status()))
@@ -321,12 +328,21 @@ func (scheduler *Scheduler) process(task Task) bool {
 }
 
 func (scheduler *Scheduler) remove(task Task) {
-	switch task.Status() {
-	case TaskStatusCanceled:
-		// Do nothing here
+	task.Cancel()
+	scheduler.tasks.Remove(task.ID())
+	scheduler.waitQueue.Remove(task)
+	scheduler.processQueue.Remove(task)
 
-	default:
-		task.Cancel()
+	// Call callbacks
+	onSuccess, onFailure := task.callbacks()
+	if task.Status() == TaskStatusSucceeded {
+		for _, fn := range onSuccess {
+			fn()
+		}
+	} else {
+		for _, fn := range onFailure {
+			fn()
+		}
 	}
 
 	switch task := task.(type) {
@@ -338,6 +354,7 @@ func (scheduler *Scheduler) remove(task Task) {
 		index := replicaChannelIndex{task.ReplicaID(), task.channel}
 		delete(scheduler.channelTasks, index)
 	}
+
 }
 
 func (scheduler *Scheduler) checkTimeout(task Task) bool {

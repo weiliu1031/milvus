@@ -25,18 +25,18 @@ func packSegmentLoadInfo(segment *datapb.SegmentInfo, indexes []*querypb.FieldIn
 	return loadInfo
 }
 
-func packLoadSegmentRequest(task *SegmentTask, action Action, schema *schemapb.CollectionSchema, segment *datapb.SegmentInfo, indexes []*querypb.FieldIndexInfo) *querypb.LoadSegmentsRequest {
+func packLoadSegmentRequest(task *SegmentTask, action Action, schema *schemapb.CollectionSchema, loadInfo *querypb.SegmentLoadInfo) *querypb.LoadSegmentsRequest {
 	return &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadSegments,
 			MsgID:   task.MsgID(),
 		},
-		Infos:  []*querypb.SegmentLoadInfo{packSegmentLoadInfo(segment, indexes)},
+		Infos:  []*querypb.SegmentLoadInfo{loadInfo},
 		Schema: schema,
 		LoadMeta: &querypb.LoadMetaInfo{
 			LoadType:     task.loadType,
 			CollectionID: task.CollectionID(),
-			PartitionIDs: []int64{segment.PartitionID},
+			PartitionIDs: []int64{loadInfo.PartitionID},
 		},
 		CollectionID: task.CollectionID(),
 		ReplicaID:    task.ReplicaID(),
