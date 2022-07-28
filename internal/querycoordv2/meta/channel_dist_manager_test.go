@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/milvus-io/milvus/internal/proto/datapb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -20,10 +19,8 @@ func TestChannelManager(t *testing.T) {
 	dmcs := make([]*DmChannel, 3)
 	for i := range dmcs {
 		dmcs[i] = &DmChannel{
-			VchannelInfo: datapb.VchannelInfo{
-				CollectionID: CollectionID,
-				ChannelName:  "dmc" + fmt.Sprint(i),
-			},
+			CollectionID: CollectionID,
+			ChannelName:  "dmc" + fmt.Sprint(i),
 		}
 	}
 

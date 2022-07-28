@@ -1,10 +1,13 @@
 package task
 
 import (
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 )
 
 // packSegmentLoadInfo packs SegmentLoadInfo for given segment,
@@ -100,7 +103,7 @@ func packReleaseSegmentRequest(task *SegmentTask, action Action) *querypb.Releas
 	}
 }
 
-func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.Collection, channel *datapb.VchannelInfo) *querypb.WatchDmChannelsRequest {
+func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.Collection, channel *meta.DmChannel) *querypb.WatchDmChannelsRequest {
 	return &querypb.WatchDmChannelsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_WatchDmChannels,
@@ -119,8 +122,8 @@ func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.
 	}
 }
 
-func mergeDmChannelInfo(infos []*datapb.VchannelInfo) *datapb.VchannelInfo {
-	var dmChannel *datapb.VchannelInfo
+func mergeDmChannelInfo(infos []*datapb.VchannelInfo) *meta.DmChannel {
+	var dmChannel *meta.DmChannel
 
 	for _, info := range infos {
 		if dmChannel == nil {
@@ -137,4 +140,43 @@ func mergeDmChannelInfo(infos []*datapb.VchannelInfo) *datapb.VchannelInfo {
 	}
 
 	return dmChannel
+}
+
+func packSubDeltaChannelRequest(task *ChannelTask, action Action, collection *meta.Collection, channel *meta.DeltaChannel) *querypb.WatchDeltaChannelsRequest {
+	return &querypb.WatchDeltaChannelsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_WatchDeltaChannels,
+			MsgID:   task.MsgID(),
+		},
+
+		CollectionID: task.CollectionID(),
+		Infos:        []*datapb.VchannelInfo{channel},
+		ReplicaId:    task.ReplicaID(),
+		NodeID:       action.Node(),
+	}
+}
+
+func spawnDeltaChannel(channel *datapb.VchannelInfo) (*meta.DeltaChannel, error) {
+	channelName, err := funcutil.ConvertChannelName(channel.ChannelName, utils.Params.CommonCfg.RootCoordDml, utils.Params.CommonCfg.RootCoordDelta)
+	if err != nil {
+		return nil, err
+	}
+	deltaChannel := proto.Clone(channel).(*datapb.VchannelInfo)
+	deltaChannel.ChannelName = channelName
+	deltaChannel.UnflushedSegmentIds = nil
+	deltaChannel.FlushedSegmentIds = nil
+	deltaChannel.DroppedSegmentIds = nil
+	return deltaChannel, nil
+}
+
+func mergeDeltaChannelInfo(infos []*datapb.VchannelInfo) *meta.DeltaChannel {
+	var deltaChannel *meta.DeltaChannel
+
+	for _, info := range infos {
+		if deltaChannel == nil || deltaChannel.SeekPosition.GetTimestamp() > info.SeekPosition.GetTimestamp() {
+			deltaChannel = info
+		}
+	}
+
+	return deltaChannel
 }
