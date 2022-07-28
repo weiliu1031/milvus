@@ -56,11 +56,11 @@ func (m *ChannelDistManager) getDmChannelByNode(nodeID UniqueID) []*DmChannel {
 
 // GetShardLeader returns the node whthin the given replicaNodes and subscribing the given shard,
 // returns (0, false) if not found.
-func (m *ChannelDistManager) GetShardLeader(replicaNodes []UniqueID, shard string) (int64, bool) {
+func (m *ChannelDistManager) GetShardLeader(replica *Replica, shard string) (int64, bool) {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	for _, node := range replicaNodes {
+	for node := range replica.Nodes {
 		channels := m.dmChannels[node]
 		for _, dmc := range channels {
 			if dmc.ChannelName == shard {

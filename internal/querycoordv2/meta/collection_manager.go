@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -14,6 +15,7 @@ type Collection struct {
 	Schema             *schemapb.CollectionSchema
 	InMemoryPercentage int32
 	ReplicaNumber      int32
+	LoadType           querypb.LoadType
 }
 
 type CollectionManager struct {

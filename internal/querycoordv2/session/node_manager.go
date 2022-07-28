@@ -63,6 +63,13 @@ func (n *NodeInfo) Addr() string {
 	return n.addr
 }
 
+func (n *NodeInfo) Remaining() int64 {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	return n.stats.getRemaining()
+}
+
 func (n *NodeInfo) UpdateStats(opts ...StatsOption) {
 	n.mu.Lock()
 	for _, opt := range opts {

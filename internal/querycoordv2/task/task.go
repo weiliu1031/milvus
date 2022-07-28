@@ -49,6 +49,7 @@ type Task interface {
 	Actions() []Action
 	Step() int
 	IsFinished(dist *meta.DistributionManager) bool
+	IsRelatedTo(node UniqueID) bool
 
 	// OnSuccess registers a callback for task succeeded
 	OnSuccess(func())
@@ -68,6 +69,7 @@ type BaseTask struct {
 	id           UniqueID // Set by scheduler
 	collectionID UniqueID
 	replicaID    UniqueID
+	loadType     querypb.LoadType
 
 	status   TaskStatus
 	priority TaskPriority
@@ -79,12 +81,13 @@ type BaseTask struct {
 	failureCallbacks []func()
 }
 
-func NewBaseTask(ctx context.Context, msgID, replicaID UniqueID) *BaseTask {
+func NewBaseTask(ctx context.Context, msgID, collectionID, replicaID UniqueID) *BaseTask {
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &BaseTask{
-		msgID:     msgID,
-		replicaID: replicaID,
+		msgID:        msgID,
+		collectionID: collectionID,
+		replicaID:    replicaID,
 
 		status:   TaskStatusStarted,
 		priority: TaskPriorityNormal,
@@ -115,6 +118,10 @@ func (task *BaseTask) CollectionID() UniqueID {
 
 func (task *BaseTask) ReplicaID() UniqueID {
 	return task.replicaID
+}
+
+func (task *BaseTask) LoadType() querypb.LoadType {
+	return task.loadType
 }
 
 func (task *BaseTask) Status() TaskStatus {
@@ -166,6 +173,16 @@ func (task *BaseTask) IsFinished(distMgr *meta.DistributionManager) bool {
 	return task.Step() >= len(actions)
 }
 
+func (task *BaseTask) IsRelatedTo(node UniqueID) bool {
+	for _, action := range task.actions {
+		if action.Node() == node {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (task *BaseTask) PreExecute() error {
 	return nil
 }
@@ -191,7 +208,6 @@ type SegmentTask struct {
 	*BaseTask
 
 	segmentID UniqueID
-	loadType  querypb.LoadType
 }
 
 // NewSegmentTask creates a SegmentTask with actions,
@@ -216,6 +232,10 @@ func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
 
 		segmentID: segmentID,
 	}
+}
+
+func (task *SegmentTask) SegmentID() UniqueID {
+	return task.segmentID
 }
 
 type ChannelTask struct {
@@ -263,4 +283,8 @@ func NewChannelTask(base *BaseTask, actions ...Action) *ChannelTask {
 
 		channel: channel,
 	}
+}
+
+func (task *ChannelTask) Channel() string {
+	return task.channel
 }

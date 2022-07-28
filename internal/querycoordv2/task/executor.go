@@ -1,8 +1,10 @@
 package task
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -11,6 +13,10 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"go.uber.org/zap"
+)
+
+const (
+	actionTimeout = 10 * time.Second
 )
 
 type actionIndex struct {
@@ -96,6 +102,9 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 		zap.Int64("node-id", action.Node()),
 	)
 
+	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
+	defer cancel()
+
 	switch action.Type() {
 	case ActionTypeGrow:
 		collection := ex.meta.CollectionManager.Get(task.CollectionID())
@@ -104,17 +113,20 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 			return
 		}
 
-		segment, err := ex.broker.GetSegmentInfo(task.ctx, task.segmentID)
+		segment, err := ex.broker.GetSegmentInfo(ctx, task.segmentID)
 		if err != nil {
 			log.Warn("failed to get segment info from DataCoord", zap.Error(err))
 			return
 		}
-		indexes, err := ex.broker.GetIndexInfo(task.Context(), collection.Schema, collection.CollectionID, segment.ID)
+		indexes, err := ex.broker.GetIndexInfo(ctx, collection.Schema, collection.CollectionID, segment.ID)
+		if err != nil {
+			log.Warn("failed to get index of segment, will load without index")
+		}
 		loadInfo := packSegmentLoadInfo(segment, indexes)
 
 		// Get shard leader for the given replica and segment
 		replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
-		leader, ok := ex.dist.GetShardLeader(replica.Nodes.Collect(), segment.GetInsertChannel())
+		leader, ok := ex.dist.GetShardLeader(replica, segment.GetInsertChannel())
 		if !ok {
 			log.Warn("no shard leader for the segment to execute loading", zap.String("shard", segment.InsertChannel))
 			return
@@ -130,25 +142,34 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 		ok, release := node.PreAllocate(loadInfo.SegmentSize)
 		if !ok {
 			log.Warn("no enough memory to pre-allocate for loading segment",
+				zap.Int64("node-memory-remaining", node.Remaining()),
 				zap.Int64("segment-size", loadInfo.SegmentSize))
 			return
 		}
 		defer release()
 
-		req := packLoadSegmentRequest(task, action, collection.Schema, loadInfo)
-		status, err := ex.cluster.LoadSegments(action.ctx, leader, req)
+		req := packLoadSegmentRequest(task, action, collection, loadInfo)
+		status, err := ex.cluster.LoadSegments(ctx, leader, req)
 		if err != nil {
 			log.Warn("failed to load segment, it may be a false failure", zap.Error(err))
 			return
 		}
 		if status.ErrorCode != commonpb.ErrorCode_Success {
-			log.Warn("failed to load segment", zap.String("reason", status.Reason))
+			log.Warn("failed to load segment", zap.String("reason", status.GetReason()))
 			return
 		}
 
 	case ActionTypeReduce:
-		req := &querypb.ReleaseSegmentsRequest{}
-		ex.cluster.ReleaseSegments(action.ctx, action.Node(), req)
+		req := packReleaseSegmentRequest(task, action)
+		status, err := ex.cluster.ReleaseSegments(ctx, action.Node(), req)
+		if err != nil {
+			log.Warn("failed to release segment, it may be a false failure", zap.Error(err))
+			return
+		}
+		if status.ErrorCode != commonpb.ErrorCode_Success {
+			log.Warn("failed to release segment", zap.String("reason", status.GetReason()))
+			return
+		}
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
@@ -156,21 +177,55 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 }
 
 func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelAction) {
+	log := log.With(
+		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("task-id", task.ID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.String("channel", task.Channel()),
+		zap.Int64("node-id", action.Node()),
+	)
+
+	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
+	defer cancel()
+
 	switch action.Type() {
 	case ActionTypeGrow:
-		req := &querypb.WatchDmChannelsRequest{
-			Base: &commonpb.MsgBase{
-				MsgType: commonpb.MsgType_WatchDmChannels,
-				MsgID:   task.MsgID(),
-			},
-			CollectionID: task.CollectionID(),
-			Infos:        []*datapb.VchannelInfo{},
+		collection := ex.meta.CollectionManager.Get(task.CollectionID())
+		if collection == nil {
+			log.Warn("failed to get collection")
+			return
 		}
-		ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
+
+		channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
+		for _, partition := range collection.Partitions {
+			vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
+			if err != nil {
+				log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
+				return
+			}
+
+			for _, channel := range vchannels {
+				if channel.ChannelName == action.ChannelName() {
+					channels = append(channels, channel)
+				}
+			}
+		}
+
+		dmChannel := mergeDmChannelInfo(channels)
+		req := packSubDmChannelRequest(task, action, collection, dmChannel)
+		status, err := ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
+		if err != nil {
+			log.Warn("failed to sub DmChannel, it may be a false failure", zap.Error(err))
+			return
+		}
+		if status.ErrorCode != commonpb.ErrorCode_Success {
+			log.Warn("failed to sub DmChannel", zap.String("reason", status.GetReason()))
+			return
+		}
 
 	case ActionTypeReduce:
-		// req := &querypb.ReleaseSegmentsRequest{}
-		// ex.cluster.ReleaseSegments(action.ctx, action.Node(), req)
+		// TODO(yah01): add Unsub DmChannel interface
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
