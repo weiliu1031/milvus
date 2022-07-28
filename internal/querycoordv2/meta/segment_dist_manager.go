@@ -9,6 +9,7 @@ import (
 
 type Segment struct {
 	datapb.SegmentInfo
+	Version int64 // Version is the timestamp of loading segment
 }
 
 type SegmentDistManager struct {
