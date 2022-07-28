@@ -19,19 +19,26 @@ type actionIndex struct {
 }
 
 type Executor struct {
-	distMgr *meta.DistributionManager
-	cluster *session.Cluster
-	broker  *meta.CoordinatorBroker
 	meta    *meta.Meta
+	dist    *meta.DistributionManager
+	broker  *meta.CoordinatorBroker
+	cluster *session.Cluster
+	nodeMgr *session.NodeManager
 
 	executingActions sync.Map
 }
 
-func NewExecutor(distMgr *meta.DistributionManager, cluster *session.Cluster, broker *meta.CoordinatorBroker) *Executor {
+func NewExecutor(meta *meta.Meta,
+	dist *meta.DistributionManager,
+	broker *meta.CoordinatorBroker,
+	cluster *session.Cluster,
+	nodeMgr *session.NodeManager) *Executor {
 	return &Executor{
-		distMgr: distMgr,
-		cluster: cluster,
+		meta:    meta,
+		dist:    dist,
 		broker:  broker,
+		cluster: cluster,
+		nodeMgr: nodeMgr,
 
 		executingActions: sync.Map{},
 	}
@@ -64,7 +71,7 @@ func (ex *Executor) Execute(task Task, step int, action Action) bool {
 			ex.executeSegmentAction(task.(*SegmentTask), action)
 
 		case *DmChannelAction:
-			ex.executeDmChannelAction(action)
+			ex.executeDmChannelAction(task.(*ChannelTask), action)
 
 		case *DeltaChannelAction:
 			ex.executeDeltaChannelAction(action)
@@ -102,30 +109,24 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, action *SegmentActio
 			log.Warn("failed to get segment info from DataCoord", zap.Error(err))
 			return
 		}
+		indexes, err := ex.broker.GetIndexInfo(task.Context(), collection.Schema, collection.CollectionID, segment.ID)
 
 		// Get shard leader for the given replica and segment
 		replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
-		leader, ok := ex.distMgr.GetShardLeader(replica.Nodes.Collect(), segment.GetInsertChannel())
+		leader, ok := ex.dist.GetShardLeader(replica.Nodes.Collect(), segment.GetInsertChannel())
 		if !ok {
 			log.Warn("no shard leader for the segment to execute loading", zap.String("shard", segment.InsertChannel))
+			return
 		}
 		log = log.With(zap.Int64("shard-leader", leader))
-		req := &querypb.LoadSegmentsRequest{
-			Base: &commonpb.MsgBase{
-				MsgType: commonpb.MsgType_LoadSegments,
-				MsgID:   task.MsgID(),
-			},
-			Infos:  []*querypb.SegmentLoadInfo{packSegmentLoadInfo(segment)},
-			Schema: collection.Schema,
-			LoadMeta: &querypb.LoadMetaInfo{
-				LoadType:     task.loadType,
-				CollectionID: task.CollectionID(),
-				PartitionIDs: []int64{segment.PartitionID},
-			},
-			CollectionID: task.CollectionID(),
-			ReplicaID:    task.ReplicaID(),
-			DstNodeID:    action.Node(),
+
+		node := ex.nodeMgr.Get(action.Node())
+		if node == nil {
+			log.Warn("failed to get node, this task may be stale")
+			return
 		}
+
+		req := packLoadSegmentRequest(task, action, collection.Schema, segment, indexes)
 		status, err := ex.cluster.LoadSegments(action.ctx, leader, req)
 		if err != nil {
 			log.Warn("failed to load segment, it may be a false failure", zap.Error(err))
@@ -154,13 +155,13 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 				MsgID:   task.MsgID(),
 			},
 			CollectionID: task.CollectionID(),
-			Infos:        &datapb.VchannelInfo{},
+			Infos:        []*datapb.VchannelInfo{},
 		}
-		ex.cluster.LoadSegments(action.ctx, action.Node(), req)
+		ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
 
 	case ActionTypeReduce:
-		req := &querypb.ReleaseSegmentsRequest{}
-		ex.cluster.ReleaseSegments(action.ctx, action.Node(), req)
+		// req := &querypb.ReleaseSegmentsRequest{}
+		// ex.cluster.ReleaseSegments(action.ctx, action.Node(), req)
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
@@ -170,8 +171,8 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 func (ex *Executor) executeDeltaChannelAction(action *DeltaChannelAction) {
 	switch action.Type() {
 	case ActionTypeGrow:
-		req := &querypb.LoadSegmentsRequest{}
-		ex.cluster.LoadSegments(action.ctx, action.Node(), req)
+		req := &querypb.WatchDeltaChannelsRequest{}
+		ex.cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
 
 	case ActionTypeReduce:
 		req := &querypb.ReleaseSegmentsRequest{}
