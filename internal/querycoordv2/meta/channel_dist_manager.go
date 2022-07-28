@@ -7,21 +7,10 @@ import (
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
-type DmChannel struct {
-	datapb.VchannelInfo
-}
-
-type DeltaChannel struct {
-	datapb.VchannelInfo
-}
-
-type DmChannelContainer struct {
-	channels []*DmChannel
-}
-
-type DeltaChannelContainer struct {
-	channels []*DeltaChannel
-}
+type (
+	DmChannel    = datapb.VchannelInfo
+	DeltaChannel = datapb.VchannelInfo
+)
 
 type ChannelDistManager struct {
 	rwmutex sync.RWMutex

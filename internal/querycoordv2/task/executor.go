@@ -9,7 +9,6 @@ import (
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
-	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"go.uber.org/zap"
@@ -80,7 +79,7 @@ func (ex *Executor) Execute(task Task, step int, action Action) bool {
 			ex.executeDmChannelAction(task.(*ChannelTask), action)
 
 		case *DeltaChannelAction:
-			ex.executeDeltaChannelAction(action)
+			ex.executeDeltaChannelAction(task.(*ChannelTask), action)
 
 		default:
 			panic(fmt.Sprintf("forget to process action type: %+v", action))
@@ -225,22 +224,69 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 		}
 
 	case ActionTypeReduce:
-		// TODO(yah01): add Unsub DmChannel interface
+		// TODO(yah01): unsub DmChannel
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
 	}
 }
 
-func (ex *Executor) executeDeltaChannelAction(action *DeltaChannelAction) {
+func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaChannelAction) {
+	log := log.With(
+		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("task-id", task.ID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.String("channel", task.Channel()),
+		zap.Int64("node-id", action.Node()),
+	)
+
+	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
+	defer cancel()
+
 	switch action.Type() {
 	case ActionTypeGrow:
-		req := &querypb.WatchDeltaChannelsRequest{}
-		ex.cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
+		collection := ex.meta.CollectionManager.Get(task.CollectionID())
+		if collection == nil {
+			log.Warn("failed to get collection")
+			return
+		}
+
+		channels := make([]*meta.DeltaChannel, 0, len(collection.Partitions))
+		for _, partition := range collection.Partitions {
+			vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
+			if err != nil {
+				log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
+				return
+			}
+
+			for _, channel := range vchannels {
+				deltaChannel, err := spawnDeltaChannel(channel)
+				if err != nil {
+					log.Warn("failed to spawn delta channel from vchannel", zap.Error(err))
+					return
+				}
+
+				if deltaChannel.ChannelName == action.ChannelName() {
+					channels = append(channels, channel)
+				}
+			}
+		}
+
+		deltaChannel := mergeDeltaChannelInfo(channels)
+		req := packSubDeltaChannelRequest(task, action, collection, deltaChannel)
+		status, err := ex.cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
+		if err != nil {
+			log.Warn("failed to sub DmChannel, it may be a false failure", zap.Error(err))
+			return
+		}
+		if status.ErrorCode != commonpb.ErrorCode_Success {
+			log.Warn("failed to sub DmChannel", zap.String("reason", status.GetReason()))
+			return
+		}
 
 	case ActionTypeReduce:
-		req := &querypb.ReleaseSegmentsRequest{}
-		ex.cluster.ReleaseSegments(action.ctx, action.Node(), req)
+		// todo(yah01): unsub delta channel
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
