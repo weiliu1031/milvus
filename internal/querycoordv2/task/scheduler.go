@@ -118,15 +118,16 @@ type Scheduler struct {
 }
 
 func NewScheduler(ctx context.Context,
+	meta *meta.Meta,
 	distMgr *meta.DistributionManager,
 	targetMgr *meta.TargetManager,
 	broker *meta.CoordinatorBroker,
-	nodeMgr *session.NodeManager,
-	cluster *session.Cluster) *Scheduler {
+	cluster *session.Cluster,
+	nodeMgr *session.NodeManager) *Scheduler {
 	id := int64(0)
 	return &Scheduler{
 		ctx:      ctx,
-		executor: NewExecutor(distMgr, cluster, broker),
+		executor: NewExecutor(meta, distMgr, broker, cluster, nodeMgr),
 		idAllocator: func() UniqueID {
 			id++
 			return id
