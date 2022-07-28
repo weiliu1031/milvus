@@ -355,7 +355,6 @@ func (scheduler *Scheduler) remove(task Task) {
 		index := replicaChannelIndex{task.ReplicaID(), task.channel}
 		delete(scheduler.channelTasks, index)
 	}
-
 }
 
 func (scheduler *Scheduler) checkTimeout(task Task) bool {
