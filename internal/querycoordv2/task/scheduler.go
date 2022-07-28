@@ -131,7 +131,7 @@ func NewScheduler(ctx context.Context,
 	id := int64(0)
 	return &Scheduler{
 		ctx:      ctx,
-		executor: NewExecutor(meta, distMgr, broker, cluster, nodeMgr),
+		executor: NewExecutor(meta, distMgr, broker, targetMgr, cluster, nodeMgr),
 		idAllocator: func() UniqueID {
 			id++
 			return id
