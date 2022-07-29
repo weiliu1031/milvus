@@ -1,6 +1,7 @@
 package checkers
 
 import (
+	"context"
 	"sort"
 	"time"
 
@@ -30,7 +31,7 @@ func NewSegmentChecker(dist *meta.DistributionManager, targetMgr *meta.TargetMan
 type segmentSet map[*meta.Segment]struct{}
 type segmentDistribution map[int64]map[int64]segmentSet
 
-func (checker *SegmentChecker) Check(nodeID int64) []task.Task {
+func (checker *SegmentChecker) Check(ctx context.Context) []task.Task {
 	collections := checker.meta.CollectionManager.GetAll()
 	segments := checker.dist.SegmentDistManager.GetAll()
 
@@ -59,24 +60,27 @@ func (checker *SegmentChecker) Check(nodeID int64) []task.Task {
 	}
 
 	tasks := make([]task.Task, 0)
-	tasks = append(tasks, checker.checkLackSegment(collections, segmentDist)...)
-
+	tasks = append(tasks, checker.checkLackSegment(ctx, collections, segmentDist)...)
+	tasks = append(tasks, checker.checkRedundantSegment(ctx, segmentDist)...)
 	return tasks
 }
 
-// checkLackSegment checks whether lacking of segments,
+func (checker *SegmentChecker) Description() string {
+	return "SegmentChecker checks the lack of segments, or some segments are redundant"
+}
+
+// checkLackSegment checks lack of segments,
 // returns tasks that load segments,
 // for each of given collections:
 // 1. Get target segments of the collection,
 // 2. For each target segment, check whether it is loaded within all replicas of the collection,
-// 3. Spawn SegmentTask to load lacked of segments.
-func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, segmentDist segmentDistribution) []task.Task {
+// 3. Spawn SegmentTask to load lacking segments.
+func (checker *SegmentChecker) checkLackSegment(ctx context.Context, collections []*meta.Collection, segmentDist segmentDistribution) []task.Task {
 	const (
 		LackSegmentTaskTimeout = 60 * time.Second
 	)
 
 	tasks := make([]task.Task, 0)
-
 	for _, collection := range collections {
 		log := log.With(
 			zap.Int64("collection-id", collection.CollectionID),
@@ -122,7 +126,7 @@ func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, 
 					continue
 				}
 
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(LackSegmentTaskTimeout, 0, collection.CollectionID, replica),
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, 0, collection.CollectionID, replica),
 					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID))
 				tasks = append(tasks, segmentTask)
 			}
@@ -134,7 +138,7 @@ func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, 
 
 // checkRedundantSegment checks whether redundant segments exist,
 // returns tasks that release segments.
-func (checker *SegmentChecker) checkRedundantSegment(segmentDist segmentDistribution) []task.Task {
+func (checker *SegmentChecker) checkRedundantSegment(ctx context.Context, segmentDist segmentDistribution) []task.Task {
 	const (
 		RedundantSegmentTaskTimeout = 30 * time.Second
 	)
@@ -151,7 +155,7 @@ func (checker *SegmentChecker) checkRedundantSegment(segmentDist segmentDistribu
 					}
 				}
 
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(RedundantSegmentTaskTimeout, 0, toRemove.CollectionID, replicaID),
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, toRemove.CollectionID, replicaID),
 					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
 				tasks = append(tasks, segmentTask)
 			}

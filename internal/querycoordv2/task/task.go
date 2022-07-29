@@ -82,8 +82,8 @@ type BaseTask struct {
 	failureCallbacks []func()
 }
 
-func NewBaseTask(timeout time.Duration, msgID, collectionID, replicaID UniqueID) *BaseTask {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func NewBaseTask(ctx context.Context, timeout time.Duration, msgID, collectionID, replicaID UniqueID) *BaseTask {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 
 	return &BaseTask{
 		msgID:        msgID,
