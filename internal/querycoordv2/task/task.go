@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -81,8 +82,8 @@ type BaseTask struct {
 	failureCallbacks []func()
 }
 
-func NewBaseTask(ctx context.Context, msgID, collectionID, replicaID UniqueID) *BaseTask {
-	ctx, cancel := context.WithCancel(ctx)
+func NewBaseTask(timeout time.Duration, msgID, collectionID, replicaID UniqueID) *BaseTask {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	return &BaseTask{
 		msgID:        msgID,
