@@ -1,7 +1,6 @@
 package checkers
 
 import (
-	"context"
 	"sort"
 	"time"
 
@@ -9,7 +8,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"go.uber.org/zap"
 )
 
@@ -28,7 +27,8 @@ func NewSegmentChecker(dist *meta.DistributionManager, targetMgr *meta.TargetMan
 }
 
 // SegmentID, ReplicaID -> Nodes
-type segmentDistribution map[int64]map[int64]typeutil.UniqueSet
+type segmentSet map[*meta.Segment]struct{}
+type segmentDistribution map[int64]map[int64]segmentSet
 
 func (checker *SegmentChecker) Check(nodeID int64) []task.Task {
 	collections := checker.meta.CollectionManager.GetAll()
@@ -46,16 +46,16 @@ func (checker *SegmentChecker) Check(nodeID int64) []task.Task {
 
 		dist, ok := segmentDist[segment.GetID()]
 		if !ok {
-			dist = make(map[int64]typeutil.UniqueSet, 0)
+			dist = make(map[int64]segmentSet, 0)
 			segmentDist[segment.GetID()] = dist
 		}
 
-		nodes, ok := dist[replica.ID]
+		replicaSegments, ok := dist[replica.ID]
 		if !ok {
-			nodes = make(typeutil.UniqueSet)
-			dist[replica.ID] = nodes
+			replicaSegments = make(segmentSet)
+			dist[replica.ID] = replicaSegments
 		}
-		nodes.Insert(segment.Node)
+		replicaSegments[segment] = struct{}{}
 	}
 
 	tasks := make([]task.Task, 0)
@@ -64,7 +64,17 @@ func (checker *SegmentChecker) Check(nodeID int64) []task.Task {
 	return tasks
 }
 
+// checkLackSegment checks whether lacking of segments,
+// returns tasks that load segments,
+// for each of given collections:
+// 1. Get target segments of the collection,
+// 2. For each target segment, check whether it is loaded within all replicas of the collection,
+// 3. Spawn SegmentTask to load lacked of segments.
 func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, segmentDist segmentDistribution) []task.Task {
+	const (
+		LackSegmentTaskTimeout = 60 * time.Second
+	)
+
 	tasks := make([]task.Task, 0)
 
 	for _, collection := range collections {
@@ -75,18 +85,18 @@ func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, 
 		targets := checker.targetMgr.GetSegmentsByCollection(collection.CollectionID)
 
 		// SegmentID -> Replicas
-		toAdd := make(map[int64][]*meta.Replica)
+		toAdd := make(map[int64][]int64)
 		for _, target := range targets {
 			for _, replica := range replicas {
 				dist, ok := segmentDist[target.ID]
 				if !ok {
-					toAdd[target.ID] = append(toAdd[target.ID], replica)
+					toAdd[target.ID] = append(toAdd[target.ID], replica.ID)
 					continue
 				}
 
-				nodes, ok := dist[replica.ID]
-				if !ok || len(nodes) == 0 {
-					toAdd[target.ID] = append(toAdd[target.ID], replica)
+				replicaSegments, ok := dist[replica.ID]
+				if !ok || len(replicaSegments) == 0 {
+					toAdd[target.ID] = append(toAdd[target.ID], replica.ID)
 				}
 			}
 		}
@@ -96,21 +106,15 @@ func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, 
 			log = log.With(zap.Int64("segment-id", segmentID))
 
 			for _, replica := range replicas {
-				log = log.With(zap.Int64("replica-id", replica.ID))
+				log = log.With(zap.Int64("replica-id", replica))
 
-				nodes, ok := replicaNodes[replica.ID]
+				nodes, ok := replicaNodes[replica]
 				if !ok {
-					nodes = make([]*session.NodeInfo, 0, len(replica.Nodes))
-					for nodeID := range replica.Nodes {
-						node := checker.nodeMgr.Get(nodeID)
-						if node != nil {
-							nodes = append(nodes, node)
-						}
-					}
+					nodes = utils.GetReplicaNodesInfo(checker.meta.ReplicaManager, checker.nodeMgr, replica)
 					sort.Slice(nodes, func(i, j int) bool {
 						return nodes[i].GetScore() < nodes[i].GetScore()
 					})
-					replicaNodes[replica.ID] = nodes
+					replicaNodes[replica] = nodes
 				}
 
 				if len(nodes) == 0 {
@@ -118,9 +122,37 @@ func (checker *SegmentChecker) checkLackSegment(collections []*meta.Collection, 
 					continue
 				}
 
-				ctx, _ := context.WithTimeout(context.Background(), 60*time.Second)
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, 0, collection.CollectionID, replica.ID),
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(LackSegmentTaskTimeout, 0, collection.CollectionID, replica),
 					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID))
+				tasks = append(tasks, segmentTask)
+			}
+		}
+	}
+
+	return tasks
+}
+
+// checkRedundantSegment checks whether redundant segments exist,
+// returns tasks that release segments.
+func (checker *SegmentChecker) checkRedundantSegment(segmentDist segmentDistribution) []task.Task {
+	const (
+		RedundantSegmentTaskTimeout = 30 * time.Second
+	)
+
+	tasks := make([]task.Task, 0)
+	for _, replicaSegments := range segmentDist {
+		for replicaID, segments := range replicaSegments {
+			if len(segments) > 1 {
+				// Release the segment with the minimum version
+				var toRemove *meta.Segment
+				for segment := range segments {
+					if toRemove == nil || toRemove.Version > segment.Version {
+						toRemove = segment
+					}
+				}
+
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(RedundantSegmentTaskTimeout, 0, toRemove.CollectionID, replicaID),
+					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
 				tasks = append(tasks, segmentTask)
 			}
 		}
