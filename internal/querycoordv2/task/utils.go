@@ -180,3 +180,11 @@ func mergeDeltaChannelInfo(infos []*datapb.VchannelInfo) *meta.DeltaChannel {
 
 	return deltaChannel
 }
+
+func getShardLeader(replicaMgr *meta.ReplicaManager, distMgr *meta.DistributionManager, collectionID, nodeID int64, channel string) (int64, bool) {
+	replica := replicaMgr.GetByCollectionAndNode(collectionID, nodeID)
+	if replica == nil {
+		return 0, false
+	}
+	return distMgr.GetShardLeader(replica, channel)
+}

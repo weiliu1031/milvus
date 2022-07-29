@@ -10,6 +10,7 @@ import (
 type Segment struct {
 	datapb.SegmentInfo
 	Version int64 // Version is the timestamp of loading segment
+	Node    int64 // Node the segment is in
 }
 
 type SegmentDistManager struct {
@@ -31,6 +32,7 @@ func (m *SegmentDistManager) Update(nodeID UniqueID, segments ...*Segment) {
 
 	shardSegments := make(map[string][]*Segment)
 	for _, segment := range segments {
+		segment.Node = nodeID
 		shardSegments[segment.InsertChannel] = append(shardSegments[segment.InsertChannel], segment)
 	}
 
@@ -46,6 +48,8 @@ func (m *SegmentDistManager) Update(nodeID UniqueID, segments ...*Segment) {
 // 	return m.segments[id]
 // }
 
+// GetAll returns all segments,
+// group by collection and replica
 func (m *SegmentDistManager) GetAll() []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()

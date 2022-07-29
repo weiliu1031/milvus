@@ -47,6 +47,18 @@ func (m *CollectionManager) Get(id UniqueID) *Collection {
 	return m.collections[id]
 }
 
+func (m *CollectionManager) GetAll() []*Collection {
+	collections := make([]*Collection, 0, len(m.collections))
+
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	for _, collection := range m.collections {
+		collections = append(collections, collection)
+	}
+	return collections
+}
+
 func (m *CollectionManager) Put(collection *Collection) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
