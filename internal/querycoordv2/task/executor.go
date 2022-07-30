@@ -57,7 +57,7 @@ func NewExecutor(meta *meta.Meta,
 // returns true otherwise.
 func (ex *Executor) Execute(task Task, step int, action Action) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("replica-id", task.ReplicaID()),
 		zap.Int64("task-id", task.ID()),
 		zap.Int("step", step),
@@ -113,7 +113,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 	}
 
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()),
 		zap.Int64("collection-id", task.CollectionID()),
 		zap.Int64("replica-id", task.ReplicaID()),
@@ -135,7 +135,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 		log.Warn("failed to get segment info from DataCoord", zap.Error(err))
 		return
 	}
-	indexes, err := ex.broker.GetIndexInfo(ctx, collection.Schema, collection.CollectionID, segment.ID)
+	indexes, err := ex.broker.GetIndexInfo(ctx, collection.Schema, collection.ID, segment.ID)
 	if err != nil {
 		log.Warn("failed to get index of segment, will load without index")
 	}
@@ -187,7 +187,7 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 	}
 
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()),
 		zap.Int64("collection-id", task.CollectionID()),
 		zap.Int64("replica-id", task.ReplicaID()),
@@ -238,7 +238,7 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 
 func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelAction) {
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()),
 		zap.Int64("collection-id", task.CollectionID()),
 		zap.Int64("replica-id", task.ReplicaID()),
@@ -294,7 +294,7 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 
 func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaChannelAction) {
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()),
 		zap.Int64("collection-id", task.CollectionID()),
 		zap.Int64("replica-id", task.ReplicaID()),

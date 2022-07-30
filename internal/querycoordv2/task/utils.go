@@ -32,13 +32,13 @@ func packLoadSegmentRequest(task *SegmentTask, action Action, collection *meta.C
 	return &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadSegments,
-			MsgID:   task.MsgID(),
+			MsgID:   task.SourceID(),
 		},
 		Infos:  []*querypb.SegmentLoadInfo{loadInfo},
 		Schema: collection.Schema,
 		LoadMeta: &querypb.LoadMetaInfo{
 			LoadType:     collection.LoadType,
-			CollectionID: collection.CollectionID,
+			CollectionID: collection.ID,
 			PartitionIDs: collection.Partitions,
 		},
 		CollectionID: task.CollectionID(),
@@ -93,7 +93,7 @@ func packReleaseSegmentRequest(task *SegmentTask, action Action) *querypb.Releas
 	return &querypb.ReleaseSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_ReleaseSegments,
-			MsgID:   task.MsgID(),
+			MsgID:   task.SourceID(),
 		},
 
 		NodeID:       action.Node(),
@@ -107,7 +107,7 @@ func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.
 	return &querypb.WatchDmChannelsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_WatchDmChannels,
-			MsgID:   task.MsgID(),
+			MsgID:   task.SourceID(),
 		},
 		NodeID:       action.Node(),
 		CollectionID: task.CollectionID(),
@@ -115,7 +115,7 @@ func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.
 		Schema:       collection.Schema,
 		LoadMeta: &querypb.LoadMetaInfo{
 			LoadType:     collection.LoadType,
-			CollectionID: collection.CollectionID,
+			CollectionID: collection.ID,
 			PartitionIDs: collection.Partitions,
 		},
 		ReplicaID: task.ReplicaID(),
@@ -146,7 +146,7 @@ func packSubDeltaChannelRequest(task *ChannelTask, action Action, collection *me
 	return &querypb.WatchDeltaChannelsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_WatchDeltaChannels,
-			MsgID:   task.MsgID(),
+			MsgID:   task.SourceID(),
 		},
 
 		CollectionID: task.CollectionID(),

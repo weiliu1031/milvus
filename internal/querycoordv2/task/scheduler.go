@@ -287,7 +287,7 @@ func (scheduler *Scheduler) schedule(node int64) {
 // return true if the task is started and succeeds to commit the current action
 func (scheduler *Scheduler) process(task Task) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("msg-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()))
 
 	if scheduler.checkTimeout(task) {
@@ -359,7 +359,7 @@ func (scheduler *Scheduler) remove(task Task) {
 
 func (scheduler *Scheduler) checkTimeout(task Task) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("msg-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()))
 
 	select {
@@ -374,7 +374,7 @@ func (scheduler *Scheduler) checkTimeout(task Task) bool {
 
 func (scheduler *Scheduler) checkStale(task Task) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.MsgID()),
+		zap.Int64("msg-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()))
 
 	switch task := task.(type) {
