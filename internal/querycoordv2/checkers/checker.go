@@ -7,6 +7,6 @@ import (
 )
 
 type Checker interface {
-	Check(ctx context.Context) []task.Task
 	Description() string
+	Check(ctx context.Context) []task.Task
 }

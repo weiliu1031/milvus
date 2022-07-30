@@ -9,13 +9,21 @@ import (
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+type CollectionStatus int32
+
+const (
+	CollectionStatusLoading CollectionStatus = iota + 1
+	CollectionStatusLoaded
+)
+
 type Collection struct {
-	CollectionID       UniqueID
+	ID                 UniqueID
 	Partitions         []UniqueID
 	Schema             *schemapb.CollectionSchema
 	InMemoryPercentage int32
 	ReplicaNumber      int32
 	LoadType           querypb.LoadType
+	Status             CollectionStatus
 }
 
 type CollectionManager struct {
@@ -63,11 +71,11 @@ func (m *CollectionManager) Put(collection *Collection) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	err := m.store.Load(collection.CollectionID, collection.Partitions)
+	err := m.store.Load(collection.ID, collection.Partitions)
 	if err != nil {
 		return err
 	}
-	m.collections[collection.CollectionID] = collection
+	m.collections[collection.ID] = collection
 
 	return nil
 }
@@ -81,7 +89,7 @@ func (m *CollectionManager) Remove(id UniqueID) error {
 		return nil
 	}
 
-	err := m.store.Release(collection.CollectionID, collection.Partitions)
+	err := m.store.Release(collection.ID, collection.Partitions)
 	if err != nil {
 		return err
 	}

@@ -34,7 +34,7 @@ var (
 
 type Task interface {
 	Context() context.Context
-	MsgID() UniqueID
+	SourceID() UniqueID
 	ID() UniqueID
 	CollectionID() UniqueID
 	ReplicaID() UniqueID
@@ -66,7 +66,7 @@ type BaseTask struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	msgID        UniqueID // RequestID
+	sourceID     UniqueID // RequestID
 	id           UniqueID // Set by scheduler
 	collectionID UniqueID
 	replicaID    UniqueID
@@ -82,11 +82,11 @@ type BaseTask struct {
 	failureCallbacks []func()
 }
 
-func NewBaseTask(ctx context.Context, timeout time.Duration, msgID, collectionID, replicaID UniqueID) *BaseTask {
+func NewBaseTask(ctx context.Context, timeout time.Duration, sourceID, collectionID, replicaID UniqueID) *BaseTask {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 
 	return &BaseTask{
-		msgID:        msgID,
+		sourceID:     sourceID,
 		collectionID: collectionID,
 		replicaID:    replicaID,
 
@@ -101,8 +101,8 @@ func (task *BaseTask) Context() context.Context {
 	return task.ctx
 }
 
-func (task *BaseTask) MsgID() UniqueID {
-	return task.msgID
+func (task *BaseTask) SourceID() UniqueID {
+	return task.sourceID
 }
 
 func (task *BaseTask) ID() UniqueID {

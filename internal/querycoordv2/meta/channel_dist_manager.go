@@ -61,6 +61,22 @@ func (m *ChannelDistManager) GetShardLeader(replica *Replica, shard string) (int
 	return 0, false
 }
 
+func (m *ChannelDistManager) GetDmChannelByCollection(collectionID UniqueID) []*DmChannel {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	channels := make([]*DmChannel, 0)
+	for _, channels := range m.dmChannels {
+		for _, channel := range channels {
+			if channel.CollectionID == collectionID {
+				channels = append(channels, channel)
+			}
+		}
+	}
+
+	return channels
+}
+
 func (m *ChannelDistManager) GetDmChannelByNodeAndCollection(nodeID, collectionID UniqueID) []*DmChannel {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
