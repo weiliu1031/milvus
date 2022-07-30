@@ -5,9 +5,19 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 )
 
 type Server struct {
+	meta      *meta.Meta
+	dist      *meta.DistributionManager
+	targetMgr *meta.TargetManager
+	cluster   *session.Cluster
+	nodeMgr   *session.NodeManager
+
+	scheduler *task.Scheduler
 }
 
 func (s *Server) Init() error {

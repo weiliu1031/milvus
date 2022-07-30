@@ -44,8 +44,10 @@ func NewCollectionManager(txnKV kv.TxnKV, broker *CoordinatorBroker) *Collection
 	}
 }
 
+// Reload recovers collections from kv store,
+// panics if failed
 func (m *CollectionManager) Reload() {
-	// TODO(yah01)
+
 }
 
 func (m *CollectionManager) Get(id UniqueID) *Collection {
