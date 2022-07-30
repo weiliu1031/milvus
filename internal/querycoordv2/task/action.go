@@ -92,7 +92,7 @@ type DmChannelAction struct {
 	channelName string
 }
 
-func NewDmChannelAction(ctx context.Context, nodeID UniqueID, typ ActionType, channelName string) *DmChannelAction {
+func NewDmChannelAction(nodeID UniqueID, typ ActionType, channelName string) *DmChannelAction {
 	return &DmChannelAction{
 		BaseAction: NewBaseAction(nodeID, typ),
 

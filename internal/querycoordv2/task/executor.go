@@ -313,7 +313,7 @@ func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaCh
 			return
 		}
 
-		channels := make([]*meta.DeltaChannel, 0, len(collection.Partitions))
+		channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
 		for _, partition := range collection.Partitions {
 			vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
 			if err != nil {

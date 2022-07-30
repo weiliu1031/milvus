@@ -111,7 +111,7 @@ func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.
 		},
 		NodeID:       action.Node(),
 		CollectionID: task.CollectionID(),
-		Infos:        []*datapb.VchannelInfo{channel},
+		Infos:        []*datapb.VchannelInfo{channel.VchannelInfo},
 		Schema:       collection.Schema,
 		LoadMeta: &querypb.LoadMetaInfo{
 			LoadType:     collection.LoadType,
@@ -127,7 +127,7 @@ func mergeDmChannelInfo(infos []*datapb.VchannelInfo) *meta.DmChannel {
 
 	for _, info := range infos {
 		if dmChannel == nil {
-			dmChannel = info
+			dmChannel = meta.DmChannelFromVChannel(info)
 			continue
 		}
 
@@ -150,23 +150,23 @@ func packSubDeltaChannelRequest(task *ChannelTask, action Action, collection *me
 		},
 
 		CollectionID: task.CollectionID(),
-		Infos:        []*datapb.VchannelInfo{channel},
+		Infos:        []*datapb.VchannelInfo{channel.VchannelInfo},
 		ReplicaId:    task.ReplicaID(),
 		NodeID:       action.Node(),
 	}
 }
 
-func spawnDeltaChannel(channel *datapb.VchannelInfo) (*meta.DeltaChannel, error) {
-	channelName, err := funcutil.ConvertChannelName(channel.ChannelName, utils.Params.CommonCfg.RootCoordDml, utils.Params.CommonCfg.RootCoordDelta)
+func spawnDeltaChannel(info *datapb.VchannelInfo) (*meta.DeltaChannel, error) {
+	channelName, err := funcutil.ConvertChannelName(info.ChannelName, utils.Params.CommonCfg.RootCoordDml, utils.Params.CommonCfg.RootCoordDelta)
 	if err != nil {
 		return nil, err
 	}
-	deltaChannel := proto.Clone(channel).(*datapb.VchannelInfo)
-	deltaChannel.ChannelName = channelName
-	deltaChannel.UnflushedSegmentIds = nil
-	deltaChannel.FlushedSegmentIds = nil
-	deltaChannel.DroppedSegmentIds = nil
-	return deltaChannel, nil
+	channel := proto.Clone(info).(*datapb.VchannelInfo)
+	channel.ChannelName = channelName
+	channel.UnflushedSegmentIds = nil
+	channel.FlushedSegmentIds = nil
+	channel.DroppedSegmentIds = nil
+	return meta.DeltaChannelFromVChannel(channel), nil
 }
 
 func mergeDeltaChannelInfo(infos []*datapb.VchannelInfo) *meta.DeltaChannel {
@@ -174,7 +174,7 @@ func mergeDeltaChannelInfo(infos []*datapb.VchannelInfo) *meta.DeltaChannel {
 
 	for _, info := range infos {
 		if deltaChannel == nil || deltaChannel.SeekPosition.GetTimestamp() > info.SeekPosition.GetTimestamp() {
-			deltaChannel = info
+			deltaChannel = meta.DeltaChannelFromVChannel(info)
 		}
 	}
 

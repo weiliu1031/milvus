@@ -7,10 +7,25 @@ import (
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
-type (
-	DmChannel    = datapb.VchannelInfo
-	DeltaChannel = datapb.VchannelInfo
-)
+type DmChannel struct {
+	*datapb.VchannelInfo
+	Node    int64
+	Version int64
+}
+
+type DeltaChannel DmChannel
+
+func DmChannelFromVChannel(channel *datapb.VchannelInfo) *DmChannel {
+	return &DmChannel{
+		VchannelInfo: channel,
+	}
+}
+
+func DeltaChannelFromVChannel(channel *datapb.VchannelInfo) *DeltaChannel {
+	return &DeltaChannel{
+		VchannelInfo: channel,
+	}
+}
 
 type ChannelDistManager struct {
 	rwmutex sync.RWMutex
@@ -41,6 +56,16 @@ func (m *ChannelDistManager) getDmChannelByNode(nodeID UniqueID) []*DmChannel {
 	}
 
 	return channels
+}
+
+func (m *ChannelDistManager) GetAllDmChannels() []*DmChannel {
+	result := make([]*DmChannel, 0)
+	for _, channels := range m.dmChannels {
+		for _, channel := range channels {
+			result = append(result, channel)
+		}
+	}
+	return result
 }
 
 // GetShardLeader returns the node whthin the given replicaNodes and subscribing the given shard,
