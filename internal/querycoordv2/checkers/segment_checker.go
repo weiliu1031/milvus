@@ -114,10 +114,10 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 
 		replicaNodes := make(map[int64][]*session.NodeInfo)
 		for segmentID, replicas := range toAdd {
-			log = log.With(zap.Int64("segment-id", segmentID))
+			log := log.With(zap.Int64("segment-id", segmentID))
 
 			for _, replica := range replicas {
-				log = log.With(zap.Int64("replica-id", replica))
+				log := log.With(zap.Int64("replica-id", replica))
 
 				nodes, ok := replicaNodes[replica]
 				if !ok {

@@ -21,7 +21,7 @@ func TestSegmentManager(t *testing.T) {
 	segments := make([]*Segment, 3)
 	for i := range segments {
 		segments[i] = &Segment{
-			SegmentInfo: datapb.SegmentInfo{
+			SegmentInfo: &datapb.SegmentInfo{
 				CollectionID:  CollectionID,
 				PartitionID:   PartitionID,
 				ID:            UniqueID(i + 1),

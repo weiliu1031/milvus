@@ -8,7 +8,7 @@ import (
 )
 
 type Segment struct {
-	datapb.SegmentInfo
+	*datapb.SegmentInfo
 	Version int64 // Version is the timestamp of loading segment
 	Node    int64 // Node the segment is in
 }

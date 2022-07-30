@@ -105,6 +105,19 @@ func (mgr *TargetManager) ContainDmChannel(channel string) bool {
 	return ok
 }
 
+func (mgr *TargetManager) GetDmChannelsByCollection(collectionID int64) []*DmChannel {
+	mgr.rwmutex.RLock()
+	defer mgr.rwmutex.RUnlock()
+
+	channels := make([]*DmChannel, 0)
+	for _, channel := range mgr.dmChannels {
+		if channel.GetCollectionID() == collectionID {
+			channels = append(channels, channel)
+		}
+	}
+	return channels
+}
+
 // func (mgr *TargetManager) AddDeltaChannel(channels ...*DeltaChannel) {
 // 	mgr.rwmutex.Lock()
 // 	defer mgr.rwmutex.Unlock()
