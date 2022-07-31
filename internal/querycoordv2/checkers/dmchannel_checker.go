@@ -128,6 +128,7 @@ func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*m
 
 				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDmChannelTaskTimeout, 0, collection.ID, replica),
 					task.NewDmChannelAction(nodes[0].ID(), task.ActionTypeGrow, channel))
+				channelTask.SetPriority(task.TaskPriorityHigh)
 				tasks = append(tasks, channelTask)
 			}
 		}
@@ -148,6 +149,7 @@ func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collection
 				for channel := range channels {
 					channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, channel.CollectionID, replicaID),
 						task.NewDmChannelAction(channel.Node, task.ActionTypeReduce, channel.GetChannelName()))
+					channelTask.SetPriority(task.TaskPriorityNormal)
 					tasks = append(tasks, channelTask)
 				}
 			} else if len(channels) > 1 {
@@ -160,6 +162,7 @@ func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collection
 				}
 				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, toRemove.CollectionID, replicaID),
 					task.NewDmChannelAction(toRemove.Node, task.ActionTypeReduce, toRemove.GetChannelName()))
+				channelTask.SetPriority(task.TaskPriorityHigh)
 				tasks = append(tasks, channelTask)
 			}
 		}
