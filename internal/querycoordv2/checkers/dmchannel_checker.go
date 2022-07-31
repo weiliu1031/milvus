@@ -70,8 +70,8 @@ func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
 		replicaChannels[channel] = struct{}{}
 	}
 
-	tasks := make([]task.Task, 0)
-	tasks = append(tasks, checker.checkLack(ctx, collections, channelDist)...)
+	tasks := checker.checkLack(ctx, collections, channelDist)
+	tasks = append(tasks, checker.checkRedundancy(ctx, collections, channelDist)...)
 	return tasks
 }
 

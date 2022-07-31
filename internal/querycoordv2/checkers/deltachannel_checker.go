@@ -70,14 +70,14 @@ func (checker *DeltaChannelChecker) Check(ctx context.Context) []task.Task {
 		replicaChannels[channel] = struct{}{}
 	}
 
-	tasks := make([]task.Task, 0)
-	tasks = append(tasks, checker.checkLack(ctx, collections, channelDist)...)
+	tasks := checker.checkLack(ctx, collections, channelDist)
+	tasks = append(tasks, checker.checkRedundancy(ctx, collections, channelDist)...)
 	return tasks
 }
 
 func (checker *DeltaChannelChecker) checkLack(ctx context.Context, collections []*meta.Collection, channelDist deltaChannelDistribution) []task.Task {
 	const (
-		LackDmChannelTaskTimeout = 60 * time.Second
+		LackDeltaChannelTaskTimeout = 60 * time.Second
 	)
 
 	tasks := make([]task.Task, 0)
@@ -126,7 +126,7 @@ func (checker *DeltaChannelChecker) checkLack(ctx context.Context, collections [
 					continue
 				}
 
-				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDmChannelTaskTimeout, 0, collection.ID, replica),
+				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDeltaChannelTaskTimeout, 0, collection.ID, replica),
 					task.NewDeltaChannelAction(nodes[0].ID(), task.ActionTypeGrow, channel))
 				if collection.Status == meta.CollectionStatusLoading {
 					channelTask.SetPriority(task.TaskPriorityNormal)
