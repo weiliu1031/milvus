@@ -14,6 +14,7 @@ import (
 )
 
 type DeltaChannelChecker struct {
+	baseChecker
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
@@ -126,7 +127,7 @@ func (checker *DeltaChannelChecker) checkLack(ctx context.Context, collections [
 					continue
 				}
 
-				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDeltaChannelTaskTimeout, 0, collection.ID, replica),
+				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDeltaChannelTaskTimeout, checker.ID(), collection.ID, replica),
 					task.NewDeltaChannelAction(nodes[0].ID(), task.ActionTypeGrow, channel))
 				if collection.Status == meta.CollectionStatusLoading {
 					channelTask.SetPriority(task.TaskPriorityNormal)
@@ -151,7 +152,7 @@ func (checker *DeltaChannelChecker) checkRedundancy(ctx context.Context, collect
 		for replicaID, channels := range replicaChannels {
 			if !checker.targetMgr.ContainDmChannel(channelName) {
 				for channel := range channels {
-					channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, channel.CollectionID, replicaID),
+					channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, checker.ID(), channel.CollectionID, replicaID),
 						task.NewDeltaChannelAction(channel.Node, task.ActionTypeReduce, channel.GetChannelName()))
 					channelTask.SetPriority(task.TaskPriorityNormal)
 					tasks = append(tasks, channelTask)
@@ -164,7 +165,7 @@ func (checker *DeltaChannelChecker) checkRedundancy(ctx context.Context, collect
 						toRemove = channel
 					}
 				}
-				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, toRemove.CollectionID, replicaID),
+				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
 					task.NewDeltaChannelAction(toRemove.Node, task.ActionTypeReduce, toRemove.GetChannelName()))
 				channelTask.SetPriority(task.TaskPriorityNormal)
 				tasks = append(tasks, channelTask)

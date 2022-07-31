@@ -14,6 +14,7 @@ import (
 )
 
 type SegmentChecker struct {
+	baseChecker
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
@@ -132,7 +133,7 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 					continue
 				}
 
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, 0, collection.ID, replica),
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, checker.ID(), collection.ID, replica),
 					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID))
 				if collection.Status == meta.CollectionStatusLoading {
 					segmentTask.SetPriority(task.TaskPriorityNormal)
@@ -159,7 +160,7 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 		for replicaID, segments := range replicaSegments {
 			if !checker.targetMgr.ContainSegment(segmentID) { // The segment is compacted or the collection/partition has been released
 				for segment := range segments {
-					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, segment.CollectionID, replicaID),
+					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), segment.CollectionID, replicaID),
 						task.NewSegmentAction(segment.Node, task.ActionTypeReduce, segment.ID))
 					segmentTask.SetPriority(task.TaskPriorityNormal)
 					tasks = append(tasks, segmentTask)
@@ -172,7 +173,7 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 						toRemove = segment
 					}
 				}
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, toRemove.CollectionID, replicaID),
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
 					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
 				segmentTask.SetPriority(task.TaskPriorityNormal)
 				tasks = append(tasks, segmentTask)
