@@ -11,6 +11,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"go.uber.org/zap"
 )
 
@@ -272,7 +273,7 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 			}
 		}
 
-		dmChannel := mergeDmChannelInfo(channels)
+		dmChannel := utils.MergeDmChannelInfo(channels)
 		req := packSubDmChannelRequest(task, action, collection, dmChannel)
 		status, err := ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
 		if err != nil {
@@ -322,7 +323,7 @@ func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaCh
 			}
 
 			for _, channel := range vchannels {
-				deltaChannel, err := spawnDeltaChannel(channel)
+				deltaChannel, err := utils.SpawnDeltaChannel(channel)
 				if err != nil {
 					log.Warn("failed to spawn delta channel from vchannel", zap.Error(err))
 					return
@@ -334,7 +335,7 @@ func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaCh
 			}
 		}
 
-		deltaChannel := mergeDeltaChannelInfo(channels)
+		deltaChannel := utils.MergeDeltaChannelInfo(channels)
 		req := packSubDeltaChannelRequest(task, action, collection, deltaChannel)
 		status, err := ex.cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
 		if err != nil {

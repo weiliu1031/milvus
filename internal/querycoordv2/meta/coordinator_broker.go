@@ -11,6 +11,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
+	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
@@ -32,6 +33,31 @@ type CoordinatorBroker struct {
 	indexCoord types.IndexCoord
 
 	cm storage.ChunkManager
+}
+
+func (broker *CoordinatorBroker) GetPartitions(ctx context.Context, collectionID UniqueID) ([]UniqueID, error) {
+	ctx, cancel := context.WithTimeout(ctx, brokerRpcTimeout)
+	defer cancel()
+	req := &milvuspb.ShowPartitionsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_ShowPartitions,
+		},
+		CollectionID: collectionID,
+	}
+	resp, err := broker.rootCoord.ShowPartitions(ctx, req)
+	if err != nil {
+		log.Error("showPartition failed", zap.Int64("collectionID", collectionID), zap.Error(err))
+		return nil, err
+	}
+
+	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
+		err = errors.New(resp.Status.Reason)
+		log.Error("showPartition failed", zap.Int64("collectionID", collectionID), zap.Error(err))
+		return nil, err
+	}
+	log.Info("show partition successfully", zap.Int64("collectionID", collectionID), zap.Int64s("partitionIDs", resp.PartitionIDs))
+
+	return resp.PartitionIDs, nil
 }
 
 func (broker *CoordinatorBroker) GetRecoveryInfo(ctx context.Context, collectionID UniqueID, partitionID UniqueID) ([]*datapb.VchannelInfo, []*datapb.SegmentBinlogs, error) {
