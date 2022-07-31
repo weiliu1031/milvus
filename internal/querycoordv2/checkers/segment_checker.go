@@ -151,17 +151,22 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 	)
 
 	tasks := make([]task.Task, 0)
-	for _, replicaSegments := range segmentDist {
+	for segmentID, replicaSegments := range segmentDist {
 		for replicaID, segments := range replicaSegments {
-			if len(segments) > 1 {
-				// Release the segment with the minimum version
+			if !checker.targetMgr.ContainSegment(segmentID) { // The segment is compacted or the collection/partition has been released
+				for segment := range segments {
+					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, segment.CollectionID, replicaID),
+						task.NewSegmentAction(segment.Node, task.ActionTypeReduce, segment.ID))
+					tasks = append(tasks, segmentTask)
+				}
+			} else if len(segments) > 1 { // Redundant segments exist
+				// Release the segment with minimum version
 				var toRemove *meta.Segment
 				for segment := range segments {
 					if toRemove == nil || toRemove.Version > segment.Version {
 						toRemove = segment
 					}
 				}
-
 				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, toRemove.CollectionID, replicaID),
 					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
 				tasks = append(tasks, segmentTask)
