@@ -135,6 +135,11 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 
 				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, 0, collection.ID, replica),
 					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID))
+				if collection.Status == meta.CollectionStatusLoading {
+					segmentTask.SetPriority(task.TaskPriorityNormal)
+				} else {
+					segmentTask.SetPriority(task.TaskPriorityHigh)
+				}
 				tasks = append(tasks, segmentTask)
 			}
 		}
@@ -157,6 +162,7 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 				for segment := range segments {
 					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, segment.CollectionID, replicaID),
 						task.NewSegmentAction(segment.Node, task.ActionTypeReduce, segment.ID))
+					segmentTask.SetPriority(task.TaskPriorityNormal)
 					tasks = append(tasks, segmentTask)
 				}
 			} else if len(segments) > 1 { // Redundant segments exist
@@ -169,6 +175,7 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 				}
 				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, 0, toRemove.CollectionID, replicaID),
 					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
+				segmentTask.SetPriority(task.TaskPriorityNormal)
 				tasks = append(tasks, segmentTask)
 			}
 		}
