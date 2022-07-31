@@ -135,3 +135,30 @@ func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*m
 
 	return tasks
 }
+
+func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collections []*meta.Collection, channelDist channelDistribution) []task.Task {
+	const (
+		RedundantChannelTaskTimeout = 60 * time.Second
+	)
+
+	tasks := make([]task.Task, 0)
+	for _, replicaChannels := range channelDist {
+		for replicaID, channels := range replicaChannels {
+			if len(channels) > 1 {
+				// Release the channel with the minimum version
+				var toRemove *meta.DmChannel
+				for channel := range channels {
+					if toRemove == nil || toRemove.Version > channel.Version {
+						toRemove = channel
+					}
+				}
+
+				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, toRemove.CollectionID, replicaID),
+					task.NewDmChannelAction(toRemove.Node, task.ActionTypeReduce, toRemove.GetChannelName()))
+				tasks = append(tasks, channelTask)
+			}
+		}
+	}
+
+	return tasks
+}
