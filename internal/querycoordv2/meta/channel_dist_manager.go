@@ -59,6 +59,9 @@ func (m *ChannelDistManager) getDmChannelByNode(nodeID UniqueID) []*DmChannel {
 }
 
 func (m *ChannelDistManager) GetAllDmChannels() []*DmChannel {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
 	result := make([]*DmChannel, 0)
 	for _, channels := range m.dmChannels {
 		for _, channel := range channels {
@@ -137,6 +140,19 @@ func (m *ChannelDistManager) getDeltaChannelByNode(nodeID UniqueID) []*DeltaChan
 	}
 
 	return channels
+}
+
+func (m *ChannelDistManager) GetAllDeltaChannels() []*DeltaChannel {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	result := make([]*DeltaChannel, 0)
+	for _, channels := range m.deltaChannels {
+		for _, channel := range channels {
+			result = append(result, channel)
+		}
+	}
+	return result
 }
 
 func (m *ChannelDistManager) UpdateDeltaChannels(nodeID UniqueID, channels ...*DeltaChannel) {

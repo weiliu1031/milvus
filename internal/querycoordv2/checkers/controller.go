@@ -38,6 +38,7 @@ func NewCheckerController(ctx context.Context,
 	checkers := []Checker{
 		NewDmChannelChecker(meta, dist, targetMgr, nodeMgr),
 		NewSegmentChecker(meta, dist, targetMgr, nodeMgr),
+		NewDeltaChannelChecker(meta, dist, targetMgr, nodeMgr),
 	}
 
 	return &CheckerController{
