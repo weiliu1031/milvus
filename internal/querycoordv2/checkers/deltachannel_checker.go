@@ -13,20 +13,20 @@ import (
 	"go.uber.org/zap"
 )
 
-type DmChannelChecker struct {
+type DeltaChannelChecker struct {
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
 	nodeMgr   *session.NodeManager
 }
 
-func NewDmChannelChecker(
+func NewDeltaChannelChecker(
 	meta *meta.Meta,
 	dist *meta.DistributionManager,
 	targetMgr *meta.TargetManager,
 	nodeMgr *session.NodeManager,
-) *DmChannelChecker {
-	return &DmChannelChecker{
+) *DeltaChannelChecker {
+	return &DeltaChannelChecker{
 		meta:      meta,
 		dist:      dist,
 		targetMgr: targetMgr,
@@ -34,19 +34,19 @@ func NewDmChannelChecker(
 	}
 }
 
-func (checker *DmChannelChecker) Description() string {
-	return "DmChannelChecker checks the lack of DmChannels, or some DmChannels are redundant"
+func (checker *DeltaChannelChecker) Description() string {
+	return "DeltaChannelChecker checks the lack of DmChannels, or some DmChannels are redundant"
 }
 
 // ChannelName, ReplicaID -> Nodes
-type dmChannelSet map[*meta.DmChannel]struct{}
-type dmChannelDistribution map[string]map[int64]dmChannelSet
+type deltaChannelSet map[*meta.DeltaChannel]struct{}
+type deltaChannelDistribution map[string]map[int64]deltaChannelSet
 
-func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
+func (checker *DeltaChannelChecker) Check(ctx context.Context) []task.Task {
 	collections := checker.meta.CollectionManager.GetAll()
-	channels := checker.dist.ChannelDistManager.GetAllDmChannels()
+	channels := checker.dist.ChannelDistManager.GetAllDeltaChannels()
 
-	channelDist := make(dmChannelDistribution)
+	channelDist := make(deltaChannelDistribution)
 	for _, channel := range channels {
 		replica := checker.meta.ReplicaManager.GetByCollectionAndNode(channel.GetCollectionID(), channel.Node)
 		if replica == nil {
@@ -58,13 +58,13 @@ func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
 
 		dist, ok := channelDist[channel.GetChannelName()]
 		if !ok {
-			dist = make(map[int64]dmChannelSet, 0)
+			dist = make(map[int64]deltaChannelSet, 0)
 			channelDist[channel.GetChannelName()] = dist
 		}
 
 		replicaChannels, ok := dist[replica.ID]
 		if !ok {
-			replicaChannels = make(dmChannelSet)
+			replicaChannels = make(deltaChannelSet)
 			dist[replica.ID] = replicaChannels
 		}
 		replicaChannels[channel] = struct{}{}
@@ -75,7 +75,7 @@ func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
 	return tasks
 }
 
-func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*meta.Collection, channelDist dmChannelDistribution) []task.Task {
+func (checker *DeltaChannelChecker) checkLack(ctx context.Context, collections []*meta.Collection, channelDist deltaChannelDistribution) []task.Task {
 	const (
 		LackDmChannelTaskTimeout = 60 * time.Second
 	)
@@ -122,13 +122,17 @@ func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*m
 				}
 
 				if len(nodes) == 0 {
-					log.Warn("no node to assign channel")
+					log.Warn("no node to assign delta channel")
 					continue
 				}
 
 				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDmChannelTaskTimeout, 0, collection.ID, replica),
-					task.NewDmChannelAction(nodes[0].ID(), task.ActionTypeGrow, channel))
-				channelTask.SetPriority(task.TaskPriorityHigh)
+					task.NewDeltaChannelAction(nodes[0].ID(), task.ActionTypeGrow, channel))
+				if collection.Status == meta.CollectionStatusLoading {
+					channelTask.SetPriority(task.TaskPriorityNormal)
+				} else {
+					channelTask.SetPriority(task.TaskPriorityHigh)
+				}
 				tasks = append(tasks, channelTask)
 			}
 		}
@@ -137,7 +141,7 @@ func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*m
 	return tasks
 }
 
-func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collections []*meta.Collection, channelDist dmChannelDistribution) []task.Task {
+func (checker *DeltaChannelChecker) checkRedundancy(ctx context.Context, collections []*meta.Collection, channelDist deltaChannelDistribution) []task.Task {
 	const (
 		RedundantChannelTaskTimeout = 60 * time.Second
 	)
@@ -148,21 +152,21 @@ func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collection
 			if !checker.targetMgr.ContainDmChannel(channelName) {
 				for channel := range channels {
 					channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, channel.CollectionID, replicaID),
-						task.NewDmChannelAction(channel.Node, task.ActionTypeReduce, channel.GetChannelName()))
+						task.NewDeltaChannelAction(channel.Node, task.ActionTypeReduce, channel.GetChannelName()))
 					channelTask.SetPriority(task.TaskPriorityNormal)
 					tasks = append(tasks, channelTask)
 				}
 			} else if len(channels) > 1 {
 				// Unsub the channel with the minimum version
-				var toRemove *meta.DmChannel
+				var toRemove *meta.DeltaChannel
 				for channel := range channels {
 					if toRemove == nil || toRemove.Version > channel.Version {
 						toRemove = channel
 					}
 				}
 				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, toRemove.CollectionID, replicaID),
-					task.NewDmChannelAction(toRemove.Node, task.ActionTypeReduce, toRemove.GetChannelName()))
-				channelTask.SetPriority(task.TaskPriorityHigh)
+					task.NewDeltaChannelAction(toRemove.Node, task.ActionTypeReduce, toRemove.GetChannelName()))
+				channelTask.SetPriority(task.TaskPriorityNormal)
 				tasks = append(tasks, channelTask)
 			}
 		}
