@@ -73,6 +73,10 @@ func (m *CollectionManager) Put(collection *Collection) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
+	return m.put(collection)
+}
+
+func (m *CollectionManager) put(collection *Collection) error {
 	err := m.store.Load(collection.ID, collection.Partitions)
 	if err != nil {
 		return err
@@ -80,6 +84,23 @@ func (m *CollectionManager) Put(collection *Collection) error {
 	m.collections[collection.ID] = collection
 
 	return nil
+}
+
+func (m *CollectionManager) GetOrPut(collectionID UniqueID, collection *Collection) (*Collection, bool, error) {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	old, ok := m.collections[collectionID]
+	if ok {
+		return old, true, nil
+	}
+
+	err := m.put(collection)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return collection, false, nil
 }
 
 func (m *CollectionManager) Remove(id UniqueID) error {

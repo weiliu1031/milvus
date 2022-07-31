@@ -25,6 +25,27 @@ func NewTargetManager() *TargetManager {
 	}
 }
 
+func (mgr *TargetManager) RemoveCollection(collectionID int64) {
+	mgr.rwmutex.Lock()
+	defer mgr.rwmutex.Unlock()
+
+	for _, segment := range mgr.segments {
+		if segment.CollectionID == collectionID {
+			delete(mgr.segments, segment.ID)
+		}
+	}
+	for _, dmChannel := range mgr.dmChannels {
+		if dmChannel.CollectionID == collectionID {
+			delete(mgr.dmChannels, dmChannel.ChannelName)
+		}
+	}
+	for _, deltaChannel := range mgr.deltaChannels {
+		if deltaChannel.CollectionID == collectionID {
+			delete(mgr.deltaChannels, deltaChannel.ChannelName)
+		}
+	}
+}
+
 func (mgr *TargetManager) AddSegment(segments ...*Segment) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
@@ -118,11 +139,11 @@ func (mgr *TargetManager) GetDmChannelsByCollection(collectionID int64) []*DmCha
 	return channels
 }
 
-// func (mgr *TargetManager) AddDeltaChannel(channels ...*DeltaChannel) {
-// 	mgr.rwmutex.Lock()
-// 	defer mgr.rwmutex.Unlock()
+func (mgr *TargetManager) AddDeltaChannel(channels ...*DeltaChannel) {
+	mgr.rwmutex.Lock()
+	defer mgr.rwmutex.Unlock()
 
-// 	for _, channel := range channels {
-// 		mgr.deltaChannels[channel.] = channel
-// 	}
-// }
+	for _, channel := range channels {
+		mgr.deltaChannels[channel.GetChannelName()] = channel
+	}
+}

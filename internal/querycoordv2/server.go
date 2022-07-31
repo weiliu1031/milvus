@@ -14,6 +14,7 @@ type Server struct {
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
+	broker    *meta.CoordinatorBroker
 	cluster   *session.Cluster
 	nodeMgr   *session.NodeManager
 
