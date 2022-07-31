@@ -70,8 +70,7 @@ func (checker *SegmentChecker) Check(ctx context.Context) []task.Task {
 		replicaSegments[segment] = struct{}{}
 	}
 
-	tasks := make([]task.Task, 0)
-	tasks = append(tasks, checker.checkLack(ctx, collections, segmentDist)...)
+	tasks := checker.checkLack(ctx, collections, segmentDist)
 	tasks = append(tasks, checker.checkRedundancy(ctx, segmentDist)...)
 	return tasks
 }
