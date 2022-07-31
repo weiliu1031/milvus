@@ -40,6 +40,9 @@ func NewCheckerController(ctx context.Context,
 		NewSegmentChecker(meta, dist, targetMgr, nodeMgr),
 		NewDeltaChannelChecker(meta, dist, targetMgr, nodeMgr),
 	}
+	for i, checker := range checkers {
+		checker.SetID(int64(i + 1))
+	}
 
 	return &CheckerController{
 		ctx: ctx,
