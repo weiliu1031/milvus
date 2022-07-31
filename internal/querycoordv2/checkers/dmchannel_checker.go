@@ -142,17 +142,22 @@ func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collection
 	)
 
 	tasks := make([]task.Task, 0)
-	for _, replicaChannels := range channelDist {
+	for channelName, replicaChannels := range channelDist {
 		for replicaID, channels := range replicaChannels {
-			if len(channels) > 1 {
-				// Release the channel with the minimum version
+			if !checker.targetMgr.ContainDmChannel(channelName) {
+				for channel := range channels {
+					channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, channel.CollectionID, replicaID),
+						task.NewDmChannelAction(channel.Node, task.ActionTypeReduce, channel.GetChannelName()))
+					tasks = append(tasks, channelTask)
+				}
+			} else if len(channels) > 1 {
+				// Unsub the channel with the minimum version
 				var toRemove *meta.DmChannel
 				for channel := range channels {
 					if toRemove == nil || toRemove.Version > channel.Version {
 						toRemove = channel
 					}
 				}
-
 				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, RedundantChannelTaskTimeout, 0, toRemove.CollectionID, replicaID),
 					task.NewDmChannelAction(toRemove.Node, task.ActionTypeReduce, toRemove.GetChannelName()))
 				tasks = append(tasks, channelTask)
