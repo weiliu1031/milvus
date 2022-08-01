@@ -57,9 +57,25 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		return status, nil
 	}
 
+	// Create replicas
+	replicas, err := s.meta.ReplicaManager.Put(collection.ReplicaNumber, collection.ID, collection.Partitions...)
+	if err != nil {
+		msg := "failed to spawn replica for collection"
+		log.Error(msg, zap.Error(err))
+		status = utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+		return status, nil
+	}
+
+	// Clear collection, replicas, segments and channels if failed
 	defer func() {
 		if status.ErrorCode != commonpb.ErrorCode_Success {
+			replicaIDs := make([]int64, collection.ReplicaNumber)
+			for i := range replicaIDs {
+				replicaIDs[i] = replicas[i].ID
+			}
+
 			s.meta.CollectionManager.Remove(collection.ID)
+			s.meta.ReplicaManager.Remove(replicaIDs...)
 			s.targetMgr.RemoveCollection(collection.ID)
 		}
 	}()
