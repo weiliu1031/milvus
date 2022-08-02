@@ -150,6 +150,8 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 }
 
 // checkRedundantSegment checks whether redundant segments exist,
+// 1. Remove all segments not in target manager
+// 2. Remove the segment with minimum version if it's not hold by any leader
 // returns tasks that release segments.
 func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist segmentDistribution) []task.Task {
 	const (
