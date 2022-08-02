@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 )
 
@@ -173,10 +174,14 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 						toRemove = segment
 					}
 				}
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
-					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
-				segmentTask.SetPriority(task.TaskPriorityNormal)
-				tasks = append(tasks, segmentTask)
+
+				if !lo.Contains(checker.dist.LeaderDistribution.SegmentDistManager.GetByNode(toRemove.Node),
+					toRemove) {
+					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
+						task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
+					segmentTask.SetPriority(task.TaskPriorityNormal)
+					tasks = append(tasks, segmentTask)
+				}
 			}
 		}
 	}
