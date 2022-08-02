@@ -1,6 +1,8 @@
 package task
 
 import (
+	"time"
+
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
@@ -41,6 +43,7 @@ func packLoadSegmentRequest(task *SegmentTask, action Action, collection *meta.C
 		CollectionID: task.CollectionID(),
 		ReplicaID:    task.ReplicaID(),
 		DstNodeID:    action.Node(),
+		Version:      time.Now().UnixNano(),
 	}
 }
 
