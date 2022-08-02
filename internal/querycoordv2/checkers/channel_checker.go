@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type DmChannelChecker struct {
+type ChannelChecker struct {
 	baseChecker
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
@@ -21,13 +21,13 @@ type DmChannelChecker struct {
 	nodeMgr   *session.NodeManager
 }
 
-func NewDmChannelChecker(
+func NewChannelChecker(
 	meta *meta.Meta,
 	dist *meta.DistributionManager,
 	targetMgr *meta.TargetManager,
 	nodeMgr *session.NodeManager,
-) *DmChannelChecker {
-	return &DmChannelChecker{
+) *ChannelChecker {
+	return &ChannelChecker{
 		meta:      meta,
 		dist:      dist,
 		targetMgr: targetMgr,
@@ -35,19 +35,19 @@ func NewDmChannelChecker(
 	}
 }
 
-func (checker *DmChannelChecker) Description() string {
+func (checker *ChannelChecker) Description() string {
 	return "DmChannelChecker checks the lack of DmChannels, or some DmChannels are redundant"
 }
 
 // ChannelName, ReplicaID -> Nodes
-type dmChannelSet map[*meta.DmChannel]struct{}
-type dmChannelDistribution map[string]map[int64]dmChannelSet
+type channelSet map[*meta.DmChannel]struct{}
+type channelDistribution map[string]map[int64]channelSet
 
-func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
+func (checker *ChannelChecker) Check(ctx context.Context) []task.Task {
 	collections := checker.meta.CollectionManager.GetAll()
 	channels := checker.dist.ChannelDistManager.GetAllDmChannels()
 
-	channelDist := make(dmChannelDistribution)
+	channelDist := make(channelDistribution)
 	for _, channel := range channels {
 		replica := checker.meta.ReplicaManager.GetByCollectionAndNode(channel.GetCollectionID(), channel.Node)
 		if replica == nil {
@@ -59,13 +59,13 @@ func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
 
 		dist, ok := channelDist[channel.GetChannelName()]
 		if !ok {
-			dist = make(map[int64]dmChannelSet, 0)
+			dist = make(map[int64]channelSet, 0)
 			channelDist[channel.GetChannelName()] = dist
 		}
 
 		replicaChannels, ok := dist[replica.ID]
 		if !ok {
-			replicaChannels = make(dmChannelSet)
+			replicaChannels = make(channelSet)
 			dist[replica.ID] = replicaChannels
 		}
 		replicaChannels[channel] = struct{}{}
@@ -76,7 +76,7 @@ func (checker *DmChannelChecker) Check(ctx context.Context) []task.Task {
 	return tasks
 }
 
-func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*meta.Collection, channelDist dmChannelDistribution) []task.Task {
+func (checker *ChannelChecker) checkLack(ctx context.Context, collections []*meta.Collection, channelDist channelDistribution) []task.Task {
 	const (
 		LackDmChannelTaskTimeout = 60 * time.Second
 	)
@@ -138,7 +138,7 @@ func (checker *DmChannelChecker) checkLack(ctx context.Context, collections []*m
 	return tasks
 }
 
-func (checker *DmChannelChecker) checkRedundancy(ctx context.Context, collections []*meta.Collection, channelDist dmChannelDistribution) []task.Task {
+func (checker *ChannelChecker) checkRedundancy(ctx context.Context, collections []*meta.Collection, channelDist channelDistribution) []task.Task {
 	const (
 		RedundantChannelTaskTimeout = 60 * time.Second
 	)

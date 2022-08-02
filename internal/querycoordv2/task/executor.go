@@ -79,11 +79,8 @@ func (ex *Executor) Execute(task Task, step int, action Action) bool {
 		case *SegmentAction:
 			ex.executeSegmentAction(task.(*SegmentTask), action)
 
-		case *DmChannelAction:
+		case *ChannelAction:
 			ex.executeDmChannelAction(task.(*ChannelTask), action)
-
-		case *DeltaChannelAction:
-			ex.executeDeltaChannelAction(task.(*ChannelTask), action)
 
 		default:
 			panic(fmt.Sprintf("forget to process action type: %+v", action))
@@ -237,7 +234,7 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 	}
 }
 
-func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelAction) {
+func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *ChannelAction) {
 	log := log.With(
 		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()),
@@ -287,68 +284,6 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 
 	case ActionTypeReduce:
 		// TODO(yah01): unsub DmChannel
-
-	default:
-		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
-	}
-}
-
-func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaChannelAction) {
-	log := log.With(
-		zap.Int64("source-id", task.SourceID()),
-		zap.Int64("task-id", task.ID()),
-		zap.Int64("collection-id", task.CollectionID()),
-		zap.Int64("replica-id", task.ReplicaID()),
-		zap.String("channel", task.Channel()),
-		zap.Int64("node-id", action.Node()),
-	)
-
-	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
-	defer cancel()
-
-	switch action.Type() {
-	case ActionTypeGrow:
-		collection := ex.meta.CollectionManager.Get(task.CollectionID())
-		if collection == nil {
-			log.Warn("failed to get collection")
-			return
-		}
-
-		channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
-		for _, partition := range collection.Partitions {
-			vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
-			if err != nil {
-				log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
-				return
-			}
-
-			for _, channel := range vchannels {
-				deltaChannel, err := utils.SpawnDeltaChannel(channel)
-				if err != nil {
-					log.Warn("failed to spawn delta channel from vchannel", zap.Error(err))
-					return
-				}
-
-				if deltaChannel.ChannelName == action.ChannelName() {
-					channels = append(channels, channel)
-				}
-			}
-		}
-
-		deltaChannel := utils.MergeDeltaChannelInfo(channels)
-		req := packSubDeltaChannelRequest(task, action, collection, deltaChannel)
-		status, err := ex.cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
-		if err != nil {
-			log.Warn("failed to sub DmChannel, it may be a false failure", zap.Error(err))
-			return
-		}
-		if status.ErrorCode != commonpb.ErrorCode_Success {
-			log.Warn("failed to sub DmChannel", zap.String("reason", status.GetReason()))
-			return
-		}
-
-	case ActionTypeReduce:
-		// todo(yah01): unsub delta channel
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))

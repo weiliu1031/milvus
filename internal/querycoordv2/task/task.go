@@ -221,9 +221,14 @@ func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
 
 	segmentID := int64(-1)
 	for _, action := range actions {
-		_, ok := action.(*SegmentAction)
+		action, ok := action.(*SegmentAction)
 		if !ok {
 			panic("SegmentTask can only contain SegmentActions")
+		}
+		if segmentID == -1 {
+			segmentID = action.segmentID
+		} else if segmentID != action.SegmentID() {
+			panic("all actions must process the same segment")
 		}
 	}
 
@@ -253,24 +258,12 @@ func NewChannelTask(base *BaseTask, actions ...Action) *ChannelTask {
 		panic("empty actions is not allowed")
 	}
 
-	_, isDmChannel := actions[0].(*DmChannelAction)
-	var (
-		channel string
-		ok      bool
-	)
+	channel := ""
 	for _, action := range actions {
-		if isDmChannel {
-			action, ok = action.(*DmChannelAction)
-		} else {
-			action, ok = action.(*DeltaChannelAction)
-		}
-
+		channelAction, ok := action.(interface{ ChannelName() string })
 		if !ok {
-			panic("ChannelTask can only contain actions of the same type channels")
+			panic("ChannelTask must contain only ChannelAction")
 		}
-
-		channelAction := action.(interface{ ChannelName() string })
-
 		if channel == "" {
 			channel = channelAction.ChannelName()
 		} else if channel != channelAction.ChannelName() {

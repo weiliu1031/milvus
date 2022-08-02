@@ -36,9 +36,8 @@ func NewCheckerController(ctx context.Context,
 	// CheckerController runs checkers with the order,
 	// the former checker has higher priority
 	checkers := []Checker{
-		NewDmChannelChecker(meta, dist, targetMgr, nodeMgr),
+		NewChannelChecker(meta, dist, targetMgr, nodeMgr),
 		NewSegmentChecker(meta, dist, targetMgr, nodeMgr),
-		NewDeltaChannelChecker(meta, dist, targetMgr, nodeMgr),
 	}
 	for i, checker := range checkers {
 		checker.SetID(int64(i + 1))
