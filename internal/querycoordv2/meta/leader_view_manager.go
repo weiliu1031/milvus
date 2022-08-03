@@ -31,7 +31,6 @@ func (mgr *LeaderViewManager) GetSegmentByNode(nodeID int64) []int64 {
 			}
 		}
 	}
-
 	return segments
 }
 
