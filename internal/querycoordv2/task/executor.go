@@ -158,6 +158,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 		log.Warn("failed to get node, the task may be stale")
 		return
 	}
+	// TODO(yah01): move to checker
 	ok, release := node.PreAllocate(loadInfo.SegmentSize)
 	if !ok {
 		log.Warn("no enough memory to pre-allocate for loading segment",
@@ -165,6 +166,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 			zap.Int64("segment-size", loadInfo.SegmentSize))
 		return
 	}
+	//TODO(yah01): move to OnStepDone
 	defer release()
 
 	req := packLoadSegmentRequest(task, action, collection, loadInfo)

@@ -1,27 +1,15 @@
 package meta
 
-type distributionManager struct {
-	*SegmentDistManager
-	*ChannelDistManager
-}
-
-func newDistributionManager() *distributionManager {
-	return &distributionManager{
-		SegmentDistManager: NewSegmentDistManager(),
-		ChannelDistManager: NewChannelDistManager(),
-	}
-}
-
 type DistributionManager struct {
 	*SegmentDistManager
 	*ChannelDistManager
-	LeaderDistribution *distributionManager
+	*LeaderViewManager
 }
 
 func NewDistributionManager() *DistributionManager {
 	return &DistributionManager{
 		SegmentDistManager: NewSegmentDistManager(),
 		ChannelDistManager: NewChannelDistManager(),
-		LeaderDistribution: newDistributionManager(),
+		LeaderViewManager:  NewLeaderViewManager(),
 	}
 }

@@ -12,22 +12,18 @@ import (
 )
 
 func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection) *commonpb.Status {
-	log = log.With(
-		zap.Int64("collection-id",collection.ID),
+	log := log.With(
+		zap.Int64("collection-id", collection.ID),
 	)
 	// Create replicas
 	_, err := s.meta.ReplicaManager.Put(collection.ReplicaNumber, collection.ID, collection.Partitions...)
 	if err != nil {
 		msg := "failed to spawn replica for collection"
-		log.Error(msg, zap.Error(err))	
+		log.Error(msg, zap.Error(err))
 		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
 	}
 
-	var (
-		dmChannels    map[string][]*datapb.VchannelInfo
-		deltaChannels map[string][]*datapb.VchannelInfo
-	)
-
+	var dmChannels map[string][]*datapb.VchannelInfo
 	// Fetch channels and segments from DataCoord
 	partitions, err := s.broker.GetPartitions(ctx, collection.ID)
 	if err != nil {
@@ -55,16 +51,6 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 		for _, info := range vChannelInfos {
 			channelName := info.GetChannelName()
 			dmChannels[channelName] = append(dmChannels[channelName], info)
-			deltaChannel, err := utils.SpawnDeltaChannel(info)
-			if err != nil {
-				msg := "failed to spawn delta channel from vchannel"
-				log.Error(msg,
-					zap.String("channel", info.ChannelName),
-					zap.Error(err),
-				)
-				return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err)
-			}
-			deltaChannels[channelName] = append(deltaChannels[channelName], deltaChannel.VchannelInfo)
 		}
 	}
 
@@ -72,10 +58,6 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 	for _, channels := range dmChannels {
 		dmChannel := utils.MergeDmChannelInfo(channels)
 		s.targetMgr.AddDmChannel(dmChannel)
-	}
-	for _, channels := range deltaChannels {
-		deltaChannel := utils.MergeDeltaChannelInfo(channels)
-		s.targetMgr.AddDeltaChannel(deltaChannel)
 	}
 
 	return utils.WrapStatus(commonpb.ErrorCode_Success, "")

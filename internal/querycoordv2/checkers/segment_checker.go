@@ -40,7 +40,7 @@ func (checker *SegmentChecker) Description() string {
 	return "SegmentChecker checks the lack of segments, or some segments are redundant"
 }
 
-// SegmentID, ReplicaID -> Nodes
+// SegmentID, ReplicaID -> Segments
 type segmentSet map[*meta.Segment]struct{}
 type segmentDistribution map[int64]map[int64]segmentSet
 
@@ -158,6 +158,8 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 		RedundantSegmentTaskTimeout = 30 * time.Second
 	)
 
+	// todo(yah01): check replica number changed
+
 	tasks := make([]task.Task, 0)
 	for segmentID, replicaSegments := range segmentDist {
 		for replicaID, segments := range replicaSegments {
@@ -177,8 +179,8 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 					}
 				}
 
-				if !lo.Contains(checker.dist.LeaderDistribution.SegmentDistManager.GetByNode(toRemove.Node),
-					toRemove) {
+				if !lo.Contains(checker.dist.LeaderViewManager.GetSegmentByNode(toRemove.Node),
+					toRemove.ID) {
 					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
 						task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
 					segmentTask.SetPriority(task.TaskPriorityNormal)

@@ -28,13 +28,13 @@ func TestChannelManager(t *testing.T) {
 	}
 
 	for i, node := range Nodes {
-		mgr.UpdateDmChannels(node, dmcs[i])
+		mgr.Update(node, dmcs[i])
 	}
 
 	for i := range dmcs {
 		dmc := dmcs[i]
 
-		results := mgr.GetDmChannelByNode(Nodes[i])
+		results := mgr.GetByNode(Nodes[i])
 		assert.Equal(t, 1, len(results))
 		assert.Equal(t, dmc, results[0])
 	}
