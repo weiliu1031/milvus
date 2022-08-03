@@ -122,17 +122,15 @@ func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.
 	}
 }
 
-func packSubDeltaChannelRequest(task *ChannelTask, action Action, collection *meta.Collection, channel *meta.DeltaChannel) *querypb.WatchDeltaChannelsRequest {
-	return &querypb.WatchDeltaChannelsRequest{
+func packUnsubDmChannelRequest(task *ChannelTask, action Action) *querypb.UnsubDmChannelRequest {
+	return &querypb.UnsubDmChannelRequest{
 		Base: &commonpb.MsgBase{
-			MsgType: commonpb.MsgType_WatchDeltaChannels,
+			MsgType: commonpb.MsgType_UnsubDmChannel,
 			MsgID:   task.SourceID(),
 		},
-
-		CollectionID: task.CollectionID(),
-		Infos:        []*datapb.VchannelInfo{channel.VchannelInfo},
-		ReplicaId:    task.ReplicaID(),
 		NodeID:       action.Node(),
+		CollectionID: task.CollectionID(),
+		ChannelName:  task.Channel(),
 	}
 }
 

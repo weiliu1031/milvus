@@ -235,15 +235,6 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 }
 
 func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *ChannelAction) {
-	log := log.With(
-		zap.Int64("source-id", task.SourceID()),
-		zap.Int64("task-id", task.ID()),
-		zap.Int64("collection-id", task.CollectionID()),
-		zap.Int64("replica-id", task.ReplicaID()),
-		zap.String("channel", task.Channel()),
-		zap.Int64("node-id", action.Node()),
-	)
-
 	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
 	defer cancel()
 
@@ -287,5 +278,77 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *ChannelAct
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
+	}
+}
+
+func (ex *Executor) subDmChannel(task *ChannelTask, action *ChannelAction) {
+	log := log.With(
+		zap.Int64("source-id", task.SourceID()),
+		zap.Int64("task-id", task.ID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.String("channel", task.Channel()),
+		zap.Int64("node-id", action.Node()),
+	)
+
+	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
+	defer cancel()
+
+	collection := ex.meta.CollectionManager.Get(task.CollectionID())
+	if collection == nil {
+		log.Warn("failed to get collection")
+		return
+	}
+
+	channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
+	for _, partition := range collection.Partitions {
+		vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
+		if err != nil {
+			log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
+			return
+		}
+
+		for _, channel := range vchannels {
+			if channel.ChannelName == action.ChannelName() {
+				channels = append(channels, channel)
+			}
+		}
+	}
+
+	dmChannel := utils.MergeDmChannelInfo(channels)
+	req := packSubDmChannelRequest(task, action, collection, dmChannel)
+	status, err := ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
+	if err != nil {
+		log.Warn("failed to subscribe DmChannel, it may be a false failure", zap.Error(err))
+		return
+	}
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		log.Warn("failed to subscribe DmChannel", zap.String("reason", status.GetReason()))
+		return
+	}
+}
+
+func (ex *Executor) unsubDmChannel(task *ChannelTask, action *ChannelAction) {
+	log := log.With(
+		zap.Int64("source-id", task.SourceID()),
+		zap.Int64("task-id", task.ID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.String("channel", task.Channel()),
+		zap.Int64("node-id", action.Node()),
+	)
+
+	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
+	defer cancel()
+
+	req := packUnsubDmChannelRequest(task, action)
+	status, err := ex.cluster.UnsubDmChannel(ctx, action.Node(), req)
+	if err != nil {
+		log.Warn("failed to unsubscribe DmChannel, it may be a false failure", zap.Error(err))
+		return
+	}
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		log.Warn("failed to unsubscribe DmChannel", zap.String("reason", status.GetReason()))
+		return
 	}
 }

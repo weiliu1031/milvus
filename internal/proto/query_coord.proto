@@ -41,6 +41,7 @@ service QueryNode {
   rpc GetStatisticsChannel(internal.GetStatisticsChannelRequest) returns(milvus.StringResponse){}
 
   rpc WatchDmChannels(WatchDmChannelsRequest) returns (common.Status) {}
+  rpc UnsubDmChannel(UnsubDmChannelRequest) returns (common.Status) {}
   rpc WatchDeltaChannels(WatchDeltaChannelsRequest) returns (common.Status) {}
   rpc LoadSegments(LoadSegmentsRequest) returns (common.Status) {}
   rpc ReleaseCollection(ReleaseCollectionRequest) returns (common.Status) {}
@@ -184,6 +185,13 @@ message WatchDmChannelsRequest {
   LoadMetaInfo load_meta = 8;
   int64 replicaID = 9;
   map<int64, data.SegmentInfo> segment_infos = 10;
+}
+
+message UnsubDmChannelRequest {
+    common.MsgBase base = 1;
+    int64 nodeID = 2;
+    int64 collectionID = 3;
+    string channel_name = 4;
 }
 
 message WatchDeltaChannelsRequest {

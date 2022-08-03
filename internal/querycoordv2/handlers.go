@@ -12,11 +12,14 @@ import (
 )
 
 func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection) *commonpb.Status {
+	log = log.With(
+		zap.Int64("collection-id",collection.ID),
+	)
 	// Create replicas
 	_, err := s.meta.ReplicaManager.Put(collection.ReplicaNumber, collection.ID, collection.Partitions...)
 	if err != nil {
 		msg := "failed to spawn replica for collection"
-		log.Error(msg, zap.Error(err))
+		log.Error(msg, zap.Error(err))	
 		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
 	}
 
