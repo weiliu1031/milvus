@@ -3,11 +3,9 @@ package utils
 import (
 	"fmt"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
-	"github.com/milvus-io/milvus/internal/util/funcutil"
 )
 
 // WrapStatus wraps status with given error code, message and errors
@@ -55,29 +53,4 @@ func MergeDmChannelInfo(infos []*datapb.VchannelInfo) *meta.DmChannel {
 	}
 
 	return dmChannel
-}
-
-func SpawnDeltaChannel(info *datapb.VchannelInfo) (*meta.DeltaChannel, error) {
-	channelName, err := funcutil.ConvertChannelName(info.ChannelName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
-	if err != nil {
-		return nil, err
-	}
-	channel := proto.Clone(info).(*datapb.VchannelInfo)
-	channel.ChannelName = channelName
-	channel.UnflushedSegmentIds = nil
-	channel.FlushedSegmentIds = nil
-	channel.DroppedSegmentIds = nil
-	return meta.DeltaChannelFromVChannel(channel), nil
-}
-
-func MergeDeltaChannelInfo(infos []*datapb.VchannelInfo) *meta.DeltaChannel {
-	var deltaChannel *meta.DeltaChannel
-
-	for _, info := range infos {
-		if deltaChannel == nil || deltaChannel.SeekPosition.GetTimestamp() > info.SeekPosition.GetTimestamp() {
-			deltaChannel = meta.DeltaChannelFromVChannel(info)
-		}
-	}
-
-	return deltaChannel
 }

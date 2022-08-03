@@ -76,7 +76,7 @@ func (action *SegmentAction) SegmentID() UniqueID {
 }
 
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	segments := distMgr.GetByNode(action.Node())
+	segments := distMgr.SegmentDistManager.GetByNode(action.Node())
 
 	hasSegment := false
 	for _, segment := range segments {
@@ -138,7 +138,7 @@ func (action *ChannelAction) Execute(cluster *session.Cluster) error {
 }
 
 func (action *ChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	channels := distMgr.GetDmChannelByNode(action.nodeID)
+	channels := distMgr.ChannelDistManager.GetByNode(action.nodeID)
 
 	hasChannel := false
 	for _, channel := range channels {

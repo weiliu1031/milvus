@@ -13,7 +13,6 @@ type TargetManager struct {
 	segments        map[int64]*Segment
 	growingSegments typeutil.UniqueSet // Growing segments to release
 	dmChannels      map[string]*DmChannel
-	deltaChannels   map[string]*DeltaChannel
 }
 
 func NewTargetManager() *TargetManager {
@@ -21,7 +20,6 @@ func NewTargetManager() *TargetManager {
 		segments:        make(map[int64]*Segment),
 		growingSegments: make(typeutil.UniqueSet),
 		dmChannels:      make(map[string]*DmChannel),
-		deltaChannels:   make(map[string]*DeltaChannel),
 	}
 }
 
@@ -37,11 +35,6 @@ func (mgr *TargetManager) RemoveCollection(collectionID int64) {
 	for _, dmChannel := range mgr.dmChannels {
 		if dmChannel.CollectionID == collectionID {
 			delete(mgr.dmChannels, dmChannel.ChannelName)
-		}
-	}
-	for _, deltaChannel := range mgr.deltaChannels {
-		if deltaChannel.CollectionID == collectionID {
-			delete(mgr.deltaChannels, deltaChannel.ChannelName)
 		}
 	}
 }
@@ -137,13 +130,4 @@ func (mgr *TargetManager) GetDmChannelsByCollection(collectionID int64) []*DmCha
 		}
 	}
 	return channels
-}
-
-func (mgr *TargetManager) AddDeltaChannel(channels ...*DeltaChannel) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	for _, channel := range channels {
-		mgr.deltaChannels[channel.GetChannelName()] = channel
-	}
 }
