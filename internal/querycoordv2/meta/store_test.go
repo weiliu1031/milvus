@@ -20,25 +20,7 @@ func (suite *StoreTestSuite) SetupTest() {
 func (suite *StoreTestSuite) TearDownTest() {}
 
 func (suite *StoreTestSuite) TestLoadRelease() {
-	var err error
-	// empty partitions error
-	err = suite.store.Load(1, []int64{})
-	suite.Equal(ErrEmptyPartitions, err)
-
-	var ret map[int64][]int64
-	ret, err = suite.store.GetPartitions()
-	suite.NoError(err)
-	suite.Empty(ret)
-	err = suite.store.Load(1, []int64{1, 2})
-	suite.NoError(err)
-	ret, err = suite.store.GetPartitions()
-	suite.NoError(err)
-	suite.Equal(map[int64][]int64{1: {1, 2}}, ret)
-	err = suite.store.Release(1, []int64{1})
-	suite.NoError(err)
-	ret, err = suite.store.GetPartitions()
-	suite.NoError(err)
-	suite.Equal(map[int64][]int64{1: {2}}, ret)
+	// TODO(sunby): add ut
 }
 
 func TestStoreSuite(t *testing.T) {
