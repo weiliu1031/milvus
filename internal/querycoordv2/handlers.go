@@ -16,7 +16,7 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 		zap.Int64("collection-id", collection.CollectionID),
 	)
 	// Create replicas
-	_, err := s.meta.ReplicaManager.Put(collection.Replica, collection.CollectionID)
+	_, err := s.meta.ReplicaManager.Put(collection.GetReplicaNumber(), collection.CollectionID)
 	if err != nil {
 		msg := "failed to spawn replica for collection"
 		log.Error(msg, zap.Error(err))

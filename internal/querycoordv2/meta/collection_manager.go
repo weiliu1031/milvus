@@ -87,11 +87,11 @@ func (m *CollectionManager) GetReplicaNumber(id UniqueID) int32 {
 
 	collection, ok := m.collections[id]
 	if ok {
-		return collection.Replica
+		return collection.GetReplicaNumber()
 	}
 	partitions := m.getPartitionsByCollection(id)
 	if len(partitions) > 0 {
-		return partitions[0].Replica
+		return partitions[0].GetReplicaNumber()
 	}
 	return 0
 }

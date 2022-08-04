@@ -48,7 +48,7 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 			msg := "a collection with different LoadType existed"
 			log.Error(msg)
 			status = utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-		} else if old.GetReplica() != collection.GetReplica() {
+		} else if old.GetReplicaNumber() != collection.GetReplicaNumber() {
 			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
 			log.Error(msg)
 			status = utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
