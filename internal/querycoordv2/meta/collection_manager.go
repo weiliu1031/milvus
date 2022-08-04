@@ -2,52 +2,65 @@ package meta
 
 import (
 	"sync"
+	"time"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
-type CollectionStatus int32
-
-const (
-	CollectionStatusLoading CollectionStatus = iota + 1
-	CollectionStatusLoaded
-)
-
 type Collection struct {
-	ID                 UniqueID
-	Partitions         []UniqueID
-	Schema             *schemapb.CollectionSchema
-	InMemoryPercentage int32
-	ReplicaNumber      int32
-	LoadType           querypb.LoadType
-	Status             CollectionStatus
+	*querypb.CollectionLoadInfo
+	LoadPercentage int32
+	CreatedAt      time.Time
+}
+
+type Partition struct {
+	*querypb.PartitionLoadInfo
+	LoadPercentage int32
+	CreatedAt      time.Time
 }
 
 type CollectionManager struct {
 	rwmutex sync.RWMutex
 
 	collections map[UniqueID]*Collection
+	parttions   map[UniqueID]*Partition
 	store       Store
 
 	broker *CoordinatorBroker
 }
 
-func NewCollectionManager(txnKV kv.TxnKV, broker *CoordinatorBroker) *CollectionManager {
+func NewCollectionManager(store Store, broker *CoordinatorBroker) *CollectionManager {
 	return &CollectionManager{
 		collections: make(map[int64]*Collection),
-		store:       NewMetaStore(txnKV),
-
-		broker: broker,
+		store:       store,
+		broker:      broker,
 	}
 }
 
 // Reload recovers collections from kv store,
 // panics if failed
 func (m *CollectionManager) Reload() {
+	collections, err := m.store.GetCollections()
+	if err != nil {
+		panic(err)
+	}
+	partitions, err := m.store.GetPartitions()
+	if err != nil {
+		panic(err)
+	}
 
+	for _, collection := range collections {
+		m.collections[collection.CollectionID] = &Collection{
+			CollectionLoadInfo: collection,
+		}
+	}
+
+	for _, partition := range partitions {
+		m.parttions[partition.PartitionID] = &Partition{
+			PartitionLoadInfo: partition,
+		}
+	}
 }
 
 func (m *CollectionManager) Get(id UniqueID) *Collection {
@@ -55,6 +68,32 @@ func (m *CollectionManager) Get(id UniqueID) *Collection {
 	defer m.rwmutex.RUnlock()
 
 	return m.collections[id]
+}
+
+func (m *CollectionManager) GetLoadType(id UniqueID) querypb.LoadType {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	_, ok := m.collections[id]
+	if ok {
+		return querypb.LoadType_LoadCollection
+	}
+	return querypb.LoadType_LoadPartition
+}
+
+func (m *CollectionManager) GetReplicaNumber(id UniqueID) int32 {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	collection, ok := m.collections[id]
+	if ok {
+		return collection.Replica
+	}
+	partitions := m.getPartitionsByCollection(id)
+	if len(partitions) > 0 {
+		return partitions[0].Replica
+	}
+	return 0
 }
 
 func (m *CollectionManager) GetAll() []*Collection {
@@ -69,6 +108,23 @@ func (m *CollectionManager) GetAll() []*Collection {
 	return collections
 }
 
+func (m *CollectionManager) GetPartitionsByCollection(collectionID UniqueID) []*Partition {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	return m.getPartitionsByCollection(collectionID)
+}
+
+func (m *CollectionManager) getPartitionsByCollection(collectionID UniqueID) []*Partition {
+	partitions := make([]*Partition, 0)
+	for _, partition := range m.parttions {
+		if partition.CollectionID == collectionID {
+			partitions = append(partitions, partition)
+		}
+	}
+	return partitions
+}
+
 func (m *CollectionManager) Put(collection *Collection) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
@@ -77,11 +133,11 @@ func (m *CollectionManager) Put(collection *Collection) error {
 }
 
 func (m *CollectionManager) put(collection *Collection) error {
-	err := m.store.Load(collection.ID, collection.Partitions)
+	err := m.store.SaveCollection(collection.CollectionLoadInfo)
 	if err != nil {
 		return err
 	}
-	m.collections[collection.ID] = collection
+	m.collections[collection.CollectionID] = collection
 
 	return nil
 }
@@ -103,16 +159,16 @@ func (m *CollectionManager) GetOrPut(collectionID UniqueID, collection *Collecti
 	return collection, false, nil
 }
 
-func (m *CollectionManager) Remove(id UniqueID) error {
+func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	collection, ok := m.collections[id]
+	_, ok := m.collections[id]
 	if !ok {
 		return nil
 	}
 
-	err := m.store.Release(collection.ID, collection.Partitions)
+	err := m.store.ReleaseCollection(id)
 	if err != nil {
 		return err
 	}

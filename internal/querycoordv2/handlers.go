@@ -13,10 +13,10 @@ import (
 
 func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection) *commonpb.Status {
 	log := log.With(
-		zap.Int64("collection-id", collection.ID),
+		zap.Int64("collection-id", collection.CollectionID),
 	)
 	// Create replicas
-	_, err := s.meta.ReplicaManager.Put(collection.ReplicaNumber, collection.ID, collection.Partitions...)
+	_, err := s.meta.ReplicaManager.Put(collection.Replica, collection.CollectionID)
 	if err != nil {
 		msg := "failed to spawn replica for collection"
 		log.Error(msg, zap.Error(err))
@@ -25,7 +25,7 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 
 	var dmChannels map[string][]*datapb.VchannelInfo
 	// Fetch channels and segments from DataCoord
-	partitions, err := s.broker.GetPartitions(ctx, collection.ID)
+	partitions, err := s.broker.GetPartitions(ctx, collection.CollectionID)
 	if err != nil {
 		msg := "failed to get partitions from RootCoord"
 		log.Error(msg, zap.Error(err))
@@ -35,7 +35,7 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 		log := log.With(
 			zap.Int64("partition-id", partitionID),
 		)
-		vChannelInfos, binlogs, err := s.broker.GetRecoveryInfo(ctx, collection.ID, partitionID)
+		vChannelInfos, binlogs, err := s.broker.GetRecoveryInfo(ctx, collection.CollectionID, partitionID)
 		if err != nil {
 			msg := "failed to GetRecoveryInfo from DataCoord"
 			log.Error(msg, zap.Error(err))
@@ -44,7 +44,7 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 
 		for _, segmentBinlogs := range binlogs {
 			s.targetMgr.AddSegment(&meta.Segment{
-				SegmentInfo: utils.SegmentBinlogs2SegmentInfo(collection.ID, partitionID, segmentBinlogs),
+				SegmentInfo: utils.SegmentBinlogs2SegmentInfo(collection.CollectionID, partitionID, segmentBinlogs),
 			})
 		}
 

@@ -35,6 +35,20 @@ type CoordinatorBroker struct {
 	cm storage.ChunkManager
 }
 
+func (broker *CoordinatorBroker) GetCollectionSchema(ctx context.Context, collectionID UniqueID) (*schemapb.CollectionSchema, error) {
+	ctx, cancel := context.WithTimeout(ctx, brokerRpcTimeout)
+	defer cancel()
+	
+	req := &milvuspb.DescribeCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_DescribeCollection,
+		},
+		CollectionID: collectionID,
+	}
+	resp, err := broker.rootCoord.DescribeCollection(ctx, req)
+	return resp.GetSchema(), err
+}
+
 func (broker *CoordinatorBroker) GetPartitions(ctx context.Context, collectionID UniqueID) ([]UniqueID, error) {
 	ctx, cancel := context.WithTimeout(ctx, brokerRpcTimeout)
 	defer cancel()
@@ -115,7 +129,7 @@ func (broker *CoordinatorBroker) GetSegmentInfo(ctx context.Context, segmentID U
 	return resp.GetInfos()[0], nil
 }
 
-func (broker *CoordinatorBroker) GetIndexInfo(ctx context.Context, schema *schemapb.CollectionSchema, collectionID UniqueID, segmentID UniqueID) ([]*querypb.FieldIndexInfo, error) {
+func (broker *CoordinatorBroker) GetIndexInfo(ctx context.Context, collectionID UniqueID, segmentID UniqueID) ([]*querypb.FieldIndexInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, brokerRpcTimeout)
 	defer cancel()
 

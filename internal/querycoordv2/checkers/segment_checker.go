@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
@@ -94,10 +95,10 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 	tasks := make([]task.Task, 0)
 	for _, collection := range collections {
 		log := log.With(
-			zap.Int64("collection-id", collection.ID),
+			zap.Int64("collection-id", collection.CollectionID),
 		)
-		replicas := checker.meta.ReplicaManager.GetByCollection(collection.ID)
-		targets := checker.targetMgr.GetSegmentsByCollection(collection.ID)
+		replicas := checker.meta.ReplicaManager.GetByCollection(collection.CollectionID)
+		targets := checker.targetMgr.GetSegmentsByCollection(collection.CollectionID)
 
 		// SegmentID -> Replicas
 		toAdd := make(map[int64][]int64)
@@ -125,7 +126,7 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 				log.Warn("failed to get segment info from DataCoord", zap.Error(err))
 				continue
 			}
-			indexes, err := checker.broker.GetIndexInfo(ctx, collection.Schema, collection.ID, segment.ID)
+			indexes, err := checker.broker.GetIndexInfo(ctx, collection.CollectionID, segment.ID)
 			if err != nil {
 				log.Warn("failed to get index of segment, will load without index")
 			}
@@ -155,9 +156,9 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 						zap.Int64("segment-size", loadInfo.SegmentSize))
 					continue
 				}
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, checker.ID(), collection.ID, replica),
+				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, checker.ID(), collection.CollectionID, replica),
 					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID, release))
-				if collection.Status == meta.CollectionStatusLoading {
+				if collection.Status == querypb.LoadStatus_Loading {
 					segmentTask.SetPriority(task.TaskPriorityNormal)
 				} else {
 					segmentTask.SetPriority(task.TaskPriorityHigh)

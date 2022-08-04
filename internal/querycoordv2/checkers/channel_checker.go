@@ -84,10 +84,10 @@ func (checker *ChannelChecker) checkLack(ctx context.Context, collections []*met
 	tasks := make([]task.Task, 0)
 	for _, collection := range collections {
 		log := log.With(
-			zap.Int64("collection-id", collection.ID),
+			zap.Int64("collection-id", collection.CollectionID),
 		)
-		replicas := checker.meta.ReplicaManager.GetByCollection(collection.ID)
-		targets := checker.targetMgr.GetDmChannelsByCollection(collection.ID)
+		replicas := checker.meta.ReplicaManager.GetByCollection(collection.CollectionID)
+		targets := checker.targetMgr.GetDmChannelsByCollection(collection.CollectionID)
 
 		// ChannelName -> Replicas
 		toAdd := make(map[string][]int64)
@@ -127,7 +127,7 @@ func (checker *ChannelChecker) checkLack(ctx context.Context, collections []*met
 					continue
 				}
 
-				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDmChannelTaskTimeout, checker.ID(), collection.ID, replica),
+				channelTask := task.NewChannelTask(task.NewBaseTask(ctx, LackDmChannelTaskTimeout, checker.ID(), collection.CollectionID, replica),
 					task.NewChannelAction(nodes[0].ID(), task.ActionTypeGrow, channel))
 				channelTask.SetPriority(task.TaskPriorityHigh)
 				tasks = append(tasks, channelTask)

@@ -6,22 +6,25 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 )
 
-func packLoadSegmentRequest(task *SegmentTask, action Action, collection *meta.Collection, loadInfo *querypb.SegmentLoadInfo) *querypb.LoadSegmentsRequest {
+func packLoadSegmentRequest(
+	task *SegmentTask,
+	action Action,
+	schema *schemapb.CollectionSchema,
+	loadMeta *querypb.LoadMetaInfo,
+	loadInfo *querypb.SegmentLoadInfo,
+) *querypb.LoadSegmentsRequest {
 	return &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadSegments,
 			MsgID:   task.SourceID(),
 		},
-		Infos:  []*querypb.SegmentLoadInfo{loadInfo},
-		Schema: collection.Schema,
-		LoadMeta: &querypb.LoadMetaInfo{
-			LoadType:     collection.LoadType,
-			CollectionID: collection.ID,
-			PartitionIDs: collection.Partitions,
-		},
+		Infos:        []*querypb.SegmentLoadInfo{loadInfo},
+		Schema:       schema,
+		LoadMeta:     loadMeta,
 		CollectionID: task.CollectionID(),
 		ReplicaID:    task.ReplicaID(),
 		DstNodeID:    action.Node(),
@@ -43,7 +46,21 @@ func packReleaseSegmentRequest(task *SegmentTask, action Action) *querypb.Releas
 	}
 }
 
-func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.Collection, channel *meta.DmChannel) *querypb.WatchDmChannelsRequest {
+func packLoadMeta(loadType querypb.LoadType, collectionID int64, partitions ...int64) *querypb.LoadMetaInfo {
+	return &querypb.LoadMetaInfo{
+		LoadType:     loadType,
+		CollectionID: collectionID,
+		PartitionIDs: partitions,
+	}
+}
+
+func packSubDmChannelRequest(
+	task *ChannelTask,
+	action Action,
+	schema *schemapb.CollectionSchema,
+	loadMeta *querypb.LoadMetaInfo,
+	channel *meta.DmChannel,
+) *querypb.WatchDmChannelsRequest {
 	return &querypb.WatchDmChannelsRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_WatchDmChannels,
@@ -52,13 +69,9 @@ func packSubDmChannelRequest(task *ChannelTask, action Action, collection *meta.
 		NodeID:       action.Node(),
 		CollectionID: task.CollectionID(),
 		Infos:        []*datapb.VchannelInfo{channel.VchannelInfo},
-		Schema:       collection.Schema,
-		LoadMeta: &querypb.LoadMetaInfo{
-			LoadType:     collection.LoadType,
-			CollectionID: collection.ID,
-			PartitionIDs: collection.Partitions,
-		},
-		ReplicaID: task.ReplicaID(),
+		Schema:       schema,
+		LoadMeta:     loadMeta,
+		ReplicaID:    task.ReplicaID(),
 	}
 }
 

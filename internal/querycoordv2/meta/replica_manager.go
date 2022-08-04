@@ -11,7 +11,6 @@ import (
 type Replica struct {
 	ID           UniqueID
 	CollectionID UniqueID
-	PartitionIDs UniqueSet
 	Nodes        UniqueSet
 }
 
@@ -36,13 +35,13 @@ func (m *ReplicaManager) Get(id UniqueID) *Replica {
 	return m.replicas[id]
 }
 
-func (m *ReplicaManager) Put(replicaNumber int32, collectionID UniqueID, partitionIDs ...UniqueID) ([]*Replica, error) {
+func (m *ReplicaManager) Put(replicaNumber int32, collectionID UniqueID) ([]*Replica, error) {
 	var (
 		replicas = make([]*Replica, replicaNumber)
 		err      error
 	)
 	for i := range replicas {
-		replicas[i], err = m.spawn(collectionID, partitionIDs...)
+		replicas[i], err = m.spawn(collectionID)
 		if err != nil {
 			return nil, err
 		}
@@ -57,7 +56,7 @@ func (m *ReplicaManager) Put(replicaNumber int32, collectionID UniqueID, partiti
 	return replicas, nil
 }
 
-func (m *ReplicaManager) spawn(collectionID UniqueID, partitionIDs ...UniqueID) (*Replica, error) {
+func (m *ReplicaManager) spawn(collectionID UniqueID) (*Replica, error) {
 	id, err := m.idAllocator()
 	if err != nil {
 		return nil, err
@@ -65,7 +64,6 @@ func (m *ReplicaManager) spawn(collectionID UniqueID, partitionIDs ...UniqueID) 
 	return &Replica{
 		ID:           id,
 		CollectionID: collectionID,
-		PartitionIDs: NewUniqueSet(partitionIDs...),
 		Nodes:        make(UniqueSet),
 	}, nil
 }

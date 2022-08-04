@@ -2,6 +2,7 @@ package querycoordv2
 
 import (
 	"context"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -27,11 +28,12 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		zap.Int32("replica-number", req.ReplicaNumber))
 
 	collection := &meta.Collection{
-		ID:            req.GetCollectionID(),
-		Schema:        req.GetSchema(),
-		ReplicaNumber: req.GetReplicaNumber(),
-		LoadType:      querypb.LoadType_LoadCollection,
-		Status:        meta.CollectionStatusLoading,
+		CollectionLoadInfo: &querypb.CollectionLoadInfo{
+			CollectionID: req.GetCollectionID(),
+			Replica:      req.GetReplicaNumber(),
+			Status:       querypb.LoadStatus_Loading,
+		},
+		CreatedAt: time.Now(),
 	}
 
 	old, ok, err := s.meta.CollectionManager.GetOrPut(req.GetCollectionID(), collection)
@@ -42,11 +44,11 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 	}
 	if ok {
 		status := utils.WrapStatus(commonpb.ErrorCode_Success, "")
-		if old.LoadType != collection.LoadType {
+		if s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) != querypb.LoadType_LoadCollection {
 			msg := "a collection with different LoadType existed"
 			log.Error(msg)
 			status = utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-		} else if old.ReplicaNumber != collection.ReplicaNumber {
+		} else if old.GetReplica() != collection.GetReplica() {
 			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
 			log.Error(msg)
 			status = utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
@@ -57,9 +59,9 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 
 	status := s.loadCollection(ctx, collection)
 	if status.ErrorCode != commonpb.ErrorCode_Success {
-		s.meta.CollectionManager.Remove(collection.ID)
-		s.meta.ReplicaManager.RemoveCollection(collection.ID)
-		s.targetMgr.RemoveCollection(collection.ID)
+		s.meta.CollectionManager.RemoveCollection(collection.CollectionID)
+		s.meta.ReplicaManager.RemoveCollection(collection.CollectionID)
+		s.targetMgr.RemoveCollection(collection.CollectionID)
 	}
 	return status, nil
 }

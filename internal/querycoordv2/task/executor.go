@@ -122,18 +122,27 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
 	defer cancel()
 
-	collection := ex.meta.CollectionManager.Get(task.CollectionID())
-	if collection == nil {
-		log.Warn("failed to get collection")
+	schema, err := ex.broker.GetCollectionSchema(ctx, task.CollectionID())
+	if err != nil {
+		log.Warn("failed to get schema of collection", zap.Error(err))
 		return
 	}
-
+	partitions, err := utils.GetPartitions(ex.meta.CollectionManager, ex.broker, task.CollectionID())
+	if err != nil {
+		log.Warn("failed to get partitions of collection", zap.Error(err))
+		return
+	}
+	loadMeta := packLoadMeta(
+		ex.meta.GetLoadType(task.CollectionID()),
+		task.CollectionID(),
+		partitions...,
+	)
 	segment, err := ex.broker.GetSegmentInfo(ctx, task.segmentID)
 	if err != nil {
 		log.Warn("failed to get segment info from DataCoord", zap.Error(err))
 		return
 	}
-	indexes, err := ex.broker.GetIndexInfo(ctx, collection.Schema, collection.ID, segment.ID)
+	indexes, err := ex.broker.GetIndexInfo(ctx, task.CollectionID(), segment.ID)
 	if err != nil {
 		log.Warn("failed to get index of segment, will load without index")
 	}
@@ -152,7 +161,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 	}
 	log = log.With(zap.Int64("shard-leader", leader))
 
-	req := packLoadSegmentRequest(task, action, collection, loadInfo)
+	req := packLoadSegmentRequest(task, action, schema,loadMeta, loadInfo)
 	status, err := ex.cluster.LoadSegments(ctx, leader, req)
 	if err != nil {
 		log.Warn("failed to load segment, it may be a false failure", zap.Error(err))
@@ -220,43 +229,9 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 }
 
 func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *ChannelAction) {
-	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
-	defer cancel()
-
 	switch action.Type() {
 	case ActionTypeGrow:
-		collection := ex.meta.CollectionManager.Get(task.CollectionID())
-		if collection == nil {
-			log.Warn("failed to get collection")
-			return
-		}
-
-		channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
-		for _, partition := range collection.Partitions {
-			vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
-			if err != nil {
-				log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
-				return
-			}
-
-			for _, channel := range vchannels {
-				if channel.ChannelName == action.ChannelName() {
-					channels = append(channels, channel)
-				}
-			}
-		}
-
-		dmChannel := utils.MergeDmChannelInfo(channels)
-		req := packSubDmChannelRequest(task, action, collection, dmChannel)
-		status, err := ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
-		if err != nil {
-			log.Warn("failed to sub DmChannel, it may be a false failure", zap.Error(err))
-			return
-		}
-		if status.ErrorCode != commonpb.ErrorCode_Success {
-			log.Warn("failed to sub DmChannel", zap.String("reason", status.GetReason()))
-			return
-		}
+		ex.subDmChannel(task, action)
 
 	case ActionTypeReduce:
 		// TODO(yah01): unsub DmChannel
@@ -279,14 +254,23 @@ func (ex *Executor) subDmChannel(task *ChannelTask, action *ChannelAction) {
 	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
 	defer cancel()
 
-	collection := ex.meta.CollectionManager.Get(task.CollectionID())
-	if collection == nil {
-		log.Warn("failed to get collection")
+	schema, err := ex.broker.GetCollectionSchema(ctx, task.CollectionID())
+	if err != nil {
+		log.Warn("failed to get schema of collection")
 		return
 	}
-
-	channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
-	for _, partition := range collection.Partitions {
+	partitions, err := utils.GetPartitions(ex.meta.CollectionManager, ex.broker, task.CollectionID())
+	if err != nil {
+		log.Warn("failed to get partitions of collection")
+		return
+	}
+	loadMeta := packLoadMeta(
+		ex.meta.GetLoadType(task.CollectionID()),
+		task.CollectionID(),
+		partitions...,
+	)
+	channels := make([]*datapb.VchannelInfo, 0, len(partitions))
+	for _, partition := range partitions {
 		vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
 		if err != nil {
 			log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
@@ -301,14 +285,14 @@ func (ex *Executor) subDmChannel(task *ChannelTask, action *ChannelAction) {
 	}
 
 	dmChannel := utils.MergeDmChannelInfo(channels)
-	req := packSubDmChannelRequest(task, action, collection, dmChannel)
+	req := packSubDmChannelRequest(task, action, schema, loadMeta, dmChannel)
 	status, err := ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
 	if err != nil {
-		log.Warn("failed to subscribe DmChannel, it may be a false failure", zap.Error(err))
+		log.Warn("failed to sub DmChannel, it may be a false failure", zap.Error(err))
 		return
 	}
 	if status.ErrorCode != commonpb.ErrorCode_Success {
-		log.Warn("failed to subscribe DmChannel", zap.String("reason", status.GetReason()))
+		log.Warn("failed to sub DmChannel", zap.String("reason", status.GetReason()))
 		return
 	}
 }

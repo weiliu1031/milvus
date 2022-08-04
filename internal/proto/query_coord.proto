@@ -429,13 +429,13 @@ enum LoadStatus {
 message CollectionLoadInfo {
   int64 collectionID = 1;
   repeated int64 releasedPartitions = 2;
-  int64 replica = 3;
+  int32 replica = 3;
   LoadStatus status = 4;
 }
 
 message PartitionLoadInfo {
   int64 collectionID = 1;
   int64 partitionID = 2;
-  int64 replica = 3;
+  int32 replica = 3;
   LoadStatus status = 4;
 }
