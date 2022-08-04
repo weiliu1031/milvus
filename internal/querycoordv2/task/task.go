@@ -151,8 +151,9 @@ func (task *BaseTask) SetErr(err error) {
 
 func (task *BaseTask) Cancel() {
 	task.cancel()
-	for _, action := range task.actions {
-		action.Done()
+
+	for step := task.Step(); step < len(task.actions); step++ {
+		task.actions[step].Done()
 	}
 }
 
