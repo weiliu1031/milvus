@@ -13,16 +13,8 @@ type DmChannel struct {
 	Version int64
 }
 
-type DeltaChannel DmChannel
-
 func DmChannelFromVChannel(channel *datapb.VchannelInfo) *DmChannel {
 	return &DmChannel{
-		VchannelInfo: channel,
-	}
-}
-
-func DeltaChannelFromVChannel(channel *datapb.VchannelInfo) *DeltaChannel {
-	return &DeltaChannel{
 		VchannelInfo: channel,
 	}
 }
@@ -31,25 +23,23 @@ type ChannelDistManager struct {
 	rwmutex sync.RWMutex
 
 	// NodeID -> Channels
-	dmChannels    map[UniqueID][]*DmChannel
-	deltaChannels map[UniqueID][]*DeltaChannel
+	dmChannels map[UniqueID][]*DmChannel
 }
 
 func NewChannelDistManager() *ChannelDistManager {
 	return &ChannelDistManager{
-		dmChannels:    make(map[UniqueID][]*DmChannel),
-		deltaChannels: make(map[UniqueID][]*DeltaChannel),
+		dmChannels: make(map[UniqueID][]*DmChannel),
 	}
 }
 
-func (m *ChannelDistManager) GetDmChannelByNode(nodeID UniqueID) []*DmChannel {
+func (m *ChannelDistManager) GetByNode(nodeID UniqueID) []*DmChannel {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	return m.getDmChannelByNode(nodeID)
+	return m.getByNode(nodeID)
 }
 
-func (m *ChannelDistManager) getDmChannelByNode(nodeID UniqueID) []*DmChannel {
+func (m *ChannelDistManager) getByNode(nodeID UniqueID) []*DmChannel {
 	channels, ok := m.dmChannels[nodeID]
 	if !ok {
 		return nil
@@ -58,7 +48,7 @@ func (m *ChannelDistManager) getDmChannelByNode(nodeID UniqueID) []*DmChannel {
 	return channels
 }
 
-func (m *ChannelDistManager) GetAllDmChannels() []*DmChannel {
+func (m *ChannelDistManager) GetAll() []*DmChannel {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
@@ -89,7 +79,7 @@ func (m *ChannelDistManager) GetShardLeader(replica *Replica, shard string) (int
 	return 0, false
 }
 
-func (m *ChannelDistManager) GetDmChannelByCollection(collectionID UniqueID) []*DmChannel {
+func (m *ChannelDistManager) GetByCollection(collectionID UniqueID) []*DmChannel {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
@@ -105,12 +95,12 @@ func (m *ChannelDistManager) GetDmChannelByCollection(collectionID UniqueID) []*
 	return channels
 }
 
-func (m *ChannelDistManager) GetDmChannelByNodeAndCollection(nodeID, collectionID UniqueID) []*DmChannel {
+func (m *ChannelDistManager) GetByNodeAndCollection(nodeID, collectionID UniqueID) []*DmChannel {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
 	channels := make([]*DmChannel, 0)
-	for _, channel := range m.getDmChannelByNode(nodeID) {
+	for _, channel := range m.getByNode(nodeID) {
 		if channel.CollectionID == collectionID {
 			channels = append(channels, channel)
 		}
@@ -119,45 +109,9 @@ func (m *ChannelDistManager) GetDmChannelByNodeAndCollection(nodeID, collectionI
 	return channels
 }
 
-func (m *ChannelDistManager) UpdateDmChannels(nodeID UniqueID, channels ...*DmChannel) {
+func (m *ChannelDistManager) Update(nodeID UniqueID, channels ...*DmChannel) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
 	m.dmChannels[nodeID] = channels
-}
-
-func (m *ChannelDistManager) GetDeltaChannelByNode(nodeID UniqueID) []*DeltaChannel {
-	m.rwmutex.RLock()
-	defer m.rwmutex.RUnlock()
-
-	return m.getDeltaChannelByNode(nodeID)
-}
-
-func (m *ChannelDistManager) getDeltaChannelByNode(nodeID UniqueID) []*DeltaChannel {
-	channels, ok := m.deltaChannels[nodeID]
-	if !ok {
-		return nil
-	}
-
-	return channels
-}
-
-func (m *ChannelDistManager) GetAllDeltaChannels() []*DeltaChannel {
-	m.rwmutex.RLock()
-	defer m.rwmutex.RUnlock()
-
-	result := make([]*DeltaChannel, 0)
-	for _, channels := range m.deltaChannels {
-		for _, channel := range channels {
-			result = append(result, channel)
-		}
-	}
-	return result
-}
-
-func (m *ChannelDistManager) UpdateDeltaChannels(nodeID UniqueID, channels ...*DeltaChannel) {
-	m.rwmutex.Lock()
-	defer m.rwmutex.Unlock()
-
-	m.deltaChannels[nodeID] = channels
 }

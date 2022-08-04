@@ -83,6 +83,18 @@ func (c *Cluster) WatchDmChannels(ctx context.Context, nodeID int64, req *queryp
 	return status, err
 }
 
+func (c *Cluster) UnsubDmChannel(ctx context.Context, nodeID int64, req *querypb.UnsubDmChannelRequest) (*commonpb.Status, error) {
+	var status *commonpb.Status
+	var err error
+	err1 := c.send(ctx, nodeID, func(cli *grpcquerynodeclient.Client) {
+		status, err = cli.UnsubDmChannel(ctx, req)
+	})
+	if err1 != nil {
+		return nil, err1
+	}
+	return status, err
+}
+
 func (c *Cluster) WatchDeltaChannels(ctx context.Context, nodeID int64, req *querypb.WatchDeltaChannelsRequest) (*commonpb.Status, error) {
 	var status *commonpb.Status
 	var err error

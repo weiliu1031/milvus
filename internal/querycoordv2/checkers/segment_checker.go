@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 )
 
@@ -18,6 +19,7 @@ type SegmentChecker struct {
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
+	broker    *meta.CoordinatorBroker
 	nodeMgr   *session.NodeManager
 }
 
@@ -25,12 +27,14 @@ func NewSegmentChecker(
 	meta *meta.Meta,
 	dist *meta.DistributionManager,
 	targetMgr *meta.TargetManager,
+	broker *meta.CoordinatorBroker,
 	nodeMgr *session.NodeManager,
 ) *SegmentChecker {
 	return &SegmentChecker{
 		meta:      meta,
 		dist:      dist,
 		targetMgr: targetMgr,
+		broker:    broker,
 		nodeMgr:   nodeMgr,
 	}
 }
@@ -39,7 +43,7 @@ func (checker *SegmentChecker) Description() string {
 	return "SegmentChecker checks the lack of segments, or some segments are redundant"
 }
 
-// SegmentID, ReplicaID -> Nodes
+// SegmentID, ReplicaID -> Segments
 type segmentSet map[*meta.Segment]struct{}
 type segmentDistribution map[int64]map[int64]segmentSet
 
@@ -116,6 +120,17 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 		for segmentID, replicas := range toAdd {
 			log := log.With(zap.Int64("segment-id", segmentID))
 
+			segment, err := checker.broker.GetSegmentInfo(ctx, segmentID)
+			if err != nil {
+				log.Warn("failed to get segment info from DataCoord", zap.Error(err))
+				continue
+			}
+			indexes, err := checker.broker.GetIndexInfo(ctx, collection.Schema, collection.ID, segment.ID)
+			if err != nil {
+				log.Warn("failed to get index of segment, will load without index")
+			}
+			loadInfo := utils.PackSegmentLoadInfo(segment, indexes)
+
 			for _, replica := range replicas {
 				log := log.With(zap.Int64("replica-id", replica))
 
@@ -133,8 +148,15 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 					continue
 				}
 
+				ok, release := nodes[0].PreAllocate(loadInfo.SegmentSize)
+				if !ok {
+					log.Warn("no enough memory to pre-allocate for loading segment",
+						zap.Int64("node-memory-remaining", nodes[0].Remaining()),
+						zap.Int64("segment-size", loadInfo.SegmentSize))
+					continue
+				}
 				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, checker.ID(), collection.ID, replica),
-					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID))
+					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID, release))
 				if collection.Status == meta.CollectionStatusLoading {
 					segmentTask.SetPriority(task.TaskPriorityNormal)
 				} else {
@@ -149,11 +171,15 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 }
 
 // checkRedundantSegment checks whether redundant segments exist,
+// 1. Remove all segments not in target manager
+// 2. Remove the segment with minimum version if it's not hold by any leader
 // returns tasks that release segments.
 func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist segmentDistribution) []task.Task {
 	const (
 		RedundantSegmentTaskTimeout = 30 * time.Second
 	)
+
+	// todo(yah01): check replica number changed
 
 	tasks := make([]task.Task, 0)
 	for segmentID, replicaSegments := range segmentDist {
@@ -173,10 +199,14 @@ func (checker *SegmentChecker) checkRedundancy(ctx context.Context, segmentDist 
 						toRemove = segment
 					}
 				}
-				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
-					task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
-				segmentTask.SetPriority(task.TaskPriorityNormal)
-				tasks = append(tasks, segmentTask)
+
+				if !lo.Contains(checker.dist.LeaderViewManager.GetSegmentByNode(toRemove.Node),
+					toRemove.ID) {
+					segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, RedundantSegmentTaskTimeout, checker.ID(), toRemove.CollectionID, replicaID),
+						task.NewSegmentAction(toRemove.Node, task.ActionTypeReduce, toRemove.ID))
+					segmentTask.SetPriority(task.TaskPriorityNormal)
+					tasks = append(tasks, segmentTask)
+				}
 			}
 		}
 	}

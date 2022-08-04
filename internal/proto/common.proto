@@ -186,6 +186,7 @@ enum MsgType {
     WatchDeltaChannels = 513;
     GetShardLeaders = 514;
     GetReplicas = 515;
+    UnsubDmChannel = 516;
 
     /* DATA SERVICE */
     SegmentInfo = 600;

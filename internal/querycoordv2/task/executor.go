@@ -79,11 +79,8 @@ func (ex *Executor) Execute(task Task, step int, action Action) bool {
 		case *SegmentAction:
 			ex.executeSegmentAction(task.(*SegmentTask), action)
 
-		case *DmChannelAction:
+		case *ChannelAction:
 			ex.executeDmChannelAction(task.(*ChannelTask), action)
-
-		case *DeltaChannelAction:
-			ex.executeDeltaChannelAction(task.(*ChannelTask), action)
 
 		default:
 			panic(fmt.Sprintf("forget to process action type: %+v", action))
@@ -140,7 +137,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 	if err != nil {
 		log.Warn("failed to get index of segment, will load without index")
 	}
-	loadInfo := packSegmentLoadInfo(segment, indexes)
+	loadInfo := utils.PackSegmentLoadInfo(segment, indexes)
 
 	// Get shard leader for the given replica and segment
 	replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
@@ -154,21 +151,6 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 		return
 	}
 	log = log.With(zap.Int64("shard-leader", leader))
-
-	// Pre-allocate memory for loading segment
-	node := ex.nodeMgr.Get(action.Node())
-	if node == nil {
-		log.Warn("failed to get node, the task may be stale")
-		return
-	}
-	ok, release := node.PreAllocate(loadInfo.SegmentSize)
-	if !ok {
-		log.Warn("no enough memory to pre-allocate for loading segment",
-			zap.Int64("node-memory-remaining", node.Remaining()),
-			zap.Int64("segment-size", loadInfo.SegmentSize))
-		return
-	}
-	defer release()
 
 	req := packLoadSegmentRequest(task, action, collection, loadInfo)
 	status, err := ex.cluster.LoadSegments(ctx, leader, req)
@@ -237,16 +219,7 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 	}
 }
 
-func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelAction) {
-	log := log.With(
-		zap.Int64("source-id", task.SourceID()),
-		zap.Int64("task-id", task.ID()),
-		zap.Int64("collection-id", task.CollectionID()),
-		zap.Int64("replica-id", task.ReplicaID()),
-		zap.String("channel", task.Channel()),
-		zap.Int64("node-id", action.Node()),
-	)
-
+func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *ChannelAction) {
 	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
 	defer cancel()
 
@@ -293,7 +266,7 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *DmChannelA
 	}
 }
 
-func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaChannelAction) {
+func (ex *Executor) subDmChannel(task *ChannelTask, action *ChannelAction) {
 	log := log.With(
 		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()),
@@ -306,51 +279,61 @@ func (ex *Executor) executeDeltaChannelAction(task *ChannelTask, action *DeltaCh
 	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
 	defer cancel()
 
-	switch action.Type() {
-	case ActionTypeGrow:
-		collection := ex.meta.CollectionManager.Get(task.CollectionID())
-		if collection == nil {
-			log.Warn("failed to get collection")
-			return
-		}
+	collection := ex.meta.CollectionManager.Get(task.CollectionID())
+	if collection == nil {
+		log.Warn("failed to get collection")
+		return
+	}
 
-		channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
-		for _, partition := range collection.Partitions {
-			vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
-			if err != nil {
-				log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
-				return
-			}
-
-			for _, channel := range vchannels {
-				deltaChannel, err := utils.SpawnDeltaChannel(channel)
-				if err != nil {
-					log.Warn("failed to spawn delta channel from vchannel", zap.Error(err))
-					return
-				}
-
-				if deltaChannel.ChannelName == action.ChannelName() {
-					channels = append(channels, channel)
-				}
-			}
-		}
-
-		deltaChannel := utils.MergeDeltaChannelInfo(channels)
-		req := packSubDeltaChannelRequest(task, action, collection, deltaChannel)
-		status, err := ex.cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
+	channels := make([]*datapb.VchannelInfo, 0, len(collection.Partitions))
+	for _, partition := range collection.Partitions {
+		vchannels, _, err := ex.broker.GetRecoveryInfo(ctx, task.CollectionID(), partition)
 		if err != nil {
-			log.Warn("failed to sub DmChannel, it may be a false failure", zap.Error(err))
-			return
-		}
-		if status.ErrorCode != commonpb.ErrorCode_Success {
-			log.Warn("failed to sub DmChannel", zap.String("reason", status.GetReason()))
+			log.Warn("failed to get vchannel from DataCoord", zap.Error(err))
 			return
 		}
 
-	case ActionTypeReduce:
-		// todo(yah01): unsub delta channel
+		for _, channel := range vchannels {
+			if channel.ChannelName == action.ChannelName() {
+				channels = append(channels, channel)
+			}
+		}
+	}
 
-	default:
-		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
+	dmChannel := utils.MergeDmChannelInfo(channels)
+	req := packSubDmChannelRequest(task, action, collection, dmChannel)
+	status, err := ex.cluster.WatchDmChannels(action.ctx, action.Node(), req)
+	if err != nil {
+		log.Warn("failed to subscribe DmChannel, it may be a false failure", zap.Error(err))
+		return
+	}
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		log.Warn("failed to subscribe DmChannel", zap.String("reason", status.GetReason()))
+		return
+	}
+}
+
+func (ex *Executor) unsubDmChannel(task *ChannelTask, action *ChannelAction) {
+	log := log.With(
+		zap.Int64("source-id", task.SourceID()),
+		zap.Int64("task-id", task.ID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.String("channel", task.Channel()),
+		zap.Int64("node-id", action.Node()),
+	)
+
+	ctx, cancel := context.WithTimeout(task.Context(), actionTimeout)
+	defer cancel()
+
+	req := packUnsubDmChannelRequest(task, action)
+	status, err := ex.cluster.UnsubDmChannel(ctx, action.Node(), req)
+	if err != nil {
+		log.Warn("failed to unsubscribe DmChannel, it may be a false failure", zap.Error(err))
+		return
+	}
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		log.Warn("failed to unsubscribe DmChannel", zap.String("reason", status.GetReason()))
+		return
 	}
 }

@@ -28,6 +28,8 @@ const (
 type Action interface {
 	Node() int64
 	IsFinished(distMgr *meta.DistributionManager) bool
+	OnDone(func())
+	Done()
 
 	setContext(ctx context.Context)
 }
@@ -36,7 +38,8 @@ type BaseAction struct {
 	nodeID UniqueID
 	typ    ActionType
 
-	ctx context.Context // Set by executor
+	ctx    context.Context // Set by executor
+	onDone []func()
 }
 
 func NewBaseAction(nodeID UniqueID, typ ActionType) *BaseAction {
@@ -54,29 +57,45 @@ func (action *BaseAction) Type() ActionType {
 	return action.typ
 }
 
+func (action *BaseAction) OnDone(fn func()) {
+	action.onDone = append(action.onDone, fn)
+}
+
+func (action *BaseAction) Done() {
+	for _, fn := range action.onDone {
+		fn()
+	}
+}
+
 func (action *BaseAction) setContext(ctx context.Context) {
 	action.ctx = ctx
 }
 
 type SegmentAction struct {
 	*BaseAction
-	SegmentID UniqueID
+
+	segmentID UniqueID
 }
 
-func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID) *SegmentAction {
+func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID, onDone ...func()) *SegmentAction {
+	base := NewBaseAction(nodeID, typ)
+	base.onDone = append(base.onDone, onDone...)
 	return &SegmentAction{
-		BaseAction: NewBaseAction(nodeID, typ),
-
-		SegmentID: segmentID,
+		BaseAction: base,
+		segmentID:  segmentID,
 	}
 }
 
+func (action *SegmentAction) SegmentID() UniqueID {
+	return action.segmentID
+}
+
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	segments := distMgr.GetByNode(action.Node())
+	segments := distMgr.SegmentDistManager.GetByNode(action.Node())
 
 	hasSegment := false
 	for _, segment := range segments {
-		if segment.GetID() == action.SegmentID {
+		if segment.GetID() == action.segmentID {
 			hasSegment = true
 			break
 		}
@@ -87,24 +106,24 @@ func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool 
 	return hasSegment == isGrow
 }
 
-type DmChannelAction struct {
+type ChannelAction struct {
 	*BaseAction
 	channelName string
 }
 
-func NewDmChannelAction(nodeID UniqueID, typ ActionType, channelName string) *DmChannelAction {
-	return &DmChannelAction{
+func NewChannelAction(nodeID UniqueID, typ ActionType, channelName string) *ChannelAction {
+	return &ChannelAction{
 		BaseAction: NewBaseAction(nodeID, typ),
 
 		channelName: channelName,
 	}
 }
 
-func (action *DmChannelAction) ChannelName() string {
+func (action *ChannelAction) ChannelName() string {
 	return action.channelName
 }
 
-func (action *DmChannelAction) Execute(cluster *session.Cluster) error {
+func (action *ChannelAction) Execute(cluster *session.Cluster) error {
 	var (
 		status *commonpb.Status
 		err    error
@@ -133,70 +152,8 @@ func (action *DmChannelAction) Execute(cluster *session.Cluster) error {
 	return nil
 }
 
-func (action *DmChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	channels := distMgr.GetDmChannelByNode(action.nodeID)
-
-	hasChannel := false
-	for _, channel := range channels {
-		if channel.ChannelName == action.ChannelName() {
-			hasChannel = true
-			break
-		}
-	}
-
-	isGrow := action.Type() == ActionTypeGrow
-
-	return hasChannel == isGrow
-}
-
-type DeltaChannelAction struct {
-	*BaseAction
-	channelName string
-}
-
-func NewDeltaChannelAction(nodeID UniqueID, typ ActionType, channelName string) *DeltaChannelAction {
-	return &DeltaChannelAction{
-		BaseAction: NewBaseAction(nodeID, typ),
-
-		channelName: channelName,
-	}
-}
-
-func (action *DeltaChannelAction) ChannelName() string {
-	return action.channelName
-}
-
-func (action *DeltaChannelAction) Execute(cluster *session.Cluster) error {
-	var (
-		status *commonpb.Status
-		err    error
-	)
-
-	switch action.Type() {
-	case ActionTypeGrow:
-		req := &querypb.WatchDeltaChannelsRequest{}
-		status, err = cluster.WatchDeltaChannels(action.ctx, action.Node(), req)
-
-	case ActionTypeReduce:
-		// todo(yah01): Add unsub delta channel?
-
-	default:
-		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(status.Reason)
-	}
-
-	return nil
-}
-
-func (action *DeltaChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	channels := distMgr.GetDeltaChannelByNode(action.nodeID)
+func (action *ChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
+	channels := distMgr.ChannelDistManager.GetByNode(action.nodeID)
 
 	hasChannel := false
 	for _, channel := range channels {

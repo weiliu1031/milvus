@@ -16,13 +16,13 @@ type Segment struct {
 type SegmentDistManager struct {
 	rwmutex sync.RWMutex
 
-	// shard, nodeID -> []*Segment
-	segments map[string]map[UniqueID][]*Segment
+	// nodeID -> []*Segment
+	segments map[UniqueID][]*Segment
 }
 
 func NewSegmentDistManager() *SegmentDistManager {
 	return &SegmentDistManager{
-		segments: make(map[string]map[UniqueID][]*Segment),
+		segments: make(map[UniqueID][]*Segment),
 	}
 }
 
@@ -30,31 +30,22 @@ func (m *SegmentDistManager) Update(nodeID UniqueID, segments ...*Segment) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	shardSegments := make(map[string][]*Segment)
 	for _, segment := range segments {
 		segment.Node = nodeID
-		shardSegments[segment.InsertChannel] = append(shardSegments[segment.InsertChannel], segment)
 	}
-
-	for shard, segments := range shardSegments {
-		m.segments[shard][nodeID] = segments
-	}
+	m.segments[nodeID] = segments
 }
 
-// GetAll returns all segments,
-// group by collection and replica
+// GetAll returns all segments
 func (m *SegmentDistManager) GetAll() []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	segments := make([]*Segment, 0, len(m.segments))
-	for _, shardSegments := range m.segments {
-		for _, nodeSegments := range shardSegments {
-			segments = append(segments, nodeSegments...)
-		}
+	ret := make([]*Segment, 0)
+	for _, segments := range m.segments {
+		ret = append(ret, segments...)
 	}
-
-	return segments
+	return ret
 }
 
 // func (m *SegmentDistManager) Remove(ids ...UniqueID) {
@@ -71,11 +62,7 @@ func (m *SegmentDistManager) GetByNode(nodeID UniqueID) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	segments := make([]*Segment, 0)
-	for _, shardSegments := range m.segments {
-		segments = append(segments, shardSegments[nodeID]...)
-	}
-	return segments
+	return m.segments[nodeID]
 }
 
 // GetByCollection returns all segments of the given collection.
@@ -83,17 +70,15 @@ func (m *SegmentDistManager) GetByCollection(collectionID UniqueID) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	result := make([]*Segment, 0)
-	for _, shardSegments := range m.segments {
-		for _, segments := range shardSegments {
-			for _, segment := range segments {
-				if segment.CollectionID == collectionID {
-					result = append(result, segment)
-				}
+	ret := make([]*Segment, 0)
+	for _, segments := range m.segments {
+		for _, segment := range segments {
+			if segment.CollectionID == collectionID {
+				ret = append(ret, segment)
 			}
 		}
 	}
-	return result
+	return ret
 }
 
 // GetByCollectionAndNode returns all segments of the given collection and node.
@@ -101,13 +86,11 @@ func (m *SegmentDistManager) GetByCollectionAndNode(collectionID, nodeID UniqueI
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	result := make([]*Segment, 0)
-	for _, shardSegments := range m.segments {
-		for _, segment := range shardSegments[nodeID] {
+	ret := make([]*Segment, 0)
+	for _, segment := range m.segments[nodeID] {
 			if segment.CollectionID == collectionID {
-				result = append(result, segment)
+				ret = append(ret, segment)
 			}
-		}
 	}
-	return result
+	return ret
 }
