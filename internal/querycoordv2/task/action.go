@@ -28,6 +28,8 @@ const (
 type Action interface {
 	Node() int64
 	IsFinished(distMgr *meta.DistributionManager) bool
+	OnDone(func())
+	Done()
 
 	setContext(ctx context.Context)
 }
@@ -36,7 +38,8 @@ type BaseAction struct {
 	nodeID UniqueID
 	typ    ActionType
 
-	ctx context.Context // Set by executor
+	ctx    context.Context // Set by executor
+	onDone []func()
 }
 
 func NewBaseAction(nodeID UniqueID, typ ActionType) *BaseAction {
@@ -54,20 +57,32 @@ func (action *BaseAction) Type() ActionType {
 	return action.typ
 }
 
+func (action *BaseAction) OnDone(fn func()) {
+	action.onDone = append(action.onDone, fn)
+}
+
+func (action *BaseAction) Done() {
+	for _, fn := range action.onDone {
+		fn()
+	}
+}
+
 func (action *BaseAction) setContext(ctx context.Context) {
 	action.ctx = ctx
 }
 
 type SegmentAction struct {
 	*BaseAction
+
 	segmentID UniqueID
 }
 
-func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID) *SegmentAction {
+func NewSegmentAction(nodeID UniqueID, typ ActionType, segmentID UniqueID, onDone ...func()) *SegmentAction {
+	base := NewBaseAction(nodeID, typ)
+	base.onDone = append(base.onDone, onDone...)
 	return &SegmentAction{
-		BaseAction: NewBaseAction(nodeID, typ),
-
-		segmentID: segmentID,
+		BaseAction: base,
+		segmentID:  segmentID,
 	}
 }
 

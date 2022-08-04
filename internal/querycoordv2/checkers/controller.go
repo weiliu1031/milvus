@@ -20,6 +20,7 @@ type CheckerController struct {
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
+	broker    *meta.CoordinatorBroker
 	nodeMgr   *session.NodeManager
 
 	scheduler *task.Scheduler
@@ -30,6 +31,7 @@ func NewCheckerController(ctx context.Context,
 	meta *meta.Meta,
 	dist *meta.DistributionManager,
 	targetMgr *meta.TargetManager,
+	broker *meta.CoordinatorBroker,
 	nodeMgr *session.NodeManager,
 	scheduler *task.Scheduler) *CheckerController {
 
@@ -37,7 +39,7 @@ func NewCheckerController(ctx context.Context,
 	// the former checker has higher priority
 	checkers := []Checker{
 		NewChannelChecker(meta, dist, targetMgr, nodeMgr),
-		NewSegmentChecker(meta, dist, targetMgr, nodeMgr),
+		NewSegmentChecker(meta, dist, targetMgr, broker, nodeMgr),
 	}
 	for i, checker := range checkers {
 		checker.SetID(int64(i + 1))

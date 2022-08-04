@@ -19,6 +19,7 @@ type SegmentChecker struct {
 	meta      *meta.Meta
 	dist      *meta.DistributionManager
 	targetMgr *meta.TargetManager
+	broker    *meta.CoordinatorBroker
 	nodeMgr   *session.NodeManager
 }
 
@@ -26,12 +27,14 @@ func NewSegmentChecker(
 	meta *meta.Meta,
 	dist *meta.DistributionManager,
 	targetMgr *meta.TargetManager,
+	broker *meta.CoordinatorBroker,
 	nodeMgr *session.NodeManager,
 ) *SegmentChecker {
 	return &SegmentChecker{
 		meta:      meta,
 		dist:      dist,
 		targetMgr: targetMgr,
+		broker:    broker,
 		nodeMgr:   nodeMgr,
 	}
 }
@@ -117,6 +120,17 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 		for segmentID, replicas := range toAdd {
 			log := log.With(zap.Int64("segment-id", segmentID))
 
+			segment, err := checker.broker.GetSegmentInfo(ctx, segmentID)
+			if err != nil {
+				log.Warn("failed to get segment info from DataCoord", zap.Error(err))
+				continue
+			}
+			indexes, err := checker.broker.GetIndexInfo(ctx, collection.Schema, collection.ID, segment.ID)
+			if err != nil {
+				log.Warn("failed to get index of segment, will load without index")
+			}
+			loadInfo := utils.PackSegmentLoadInfo(segment, indexes)
+
 			for _, replica := range replicas {
 				log := log.With(zap.Int64("replica-id", replica))
 
@@ -134,8 +148,15 @@ func (checker *SegmentChecker) checkLack(ctx context.Context, collections []*met
 					continue
 				}
 
+				ok, release := nodes[0].PreAllocate(loadInfo.SegmentSize)
+				if !ok {
+					log.Warn("no enough memory to pre-allocate for loading segment",
+						zap.Int64("node-memory-remaining", nodes[0].Remaining()),
+						zap.Int64("segment-size", loadInfo.SegmentSize))
+					continue
+				}
 				segmentTask := task.NewSegmentTask(task.NewBaseTask(ctx, LackSegmentTaskTimeout, checker.ID(), collection.ID, replica),
-					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID))
+					task.NewSegmentAction(nodes[0].ID(), task.ActionTypeGrow, segmentID, release))
 				if collection.Status == meta.CollectionStatusLoading {
 					segmentTask.SetPriority(task.TaskPriorityNormal)
 				} else {

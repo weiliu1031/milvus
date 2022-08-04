@@ -151,6 +151,9 @@ func (task *BaseTask) SetErr(err error) {
 
 func (task *BaseTask) Cancel() {
 	task.cancel()
+	for _, action := range task.actions {
+		action.Done()
+	}
 }
 
 func (task *BaseTask) Actions() []Action {
@@ -168,6 +171,7 @@ func (task *BaseTask) IsFinished(distMgr *meta.DistributionManager) bool {
 
 	actions, step := task.Actions(), task.Step()
 	for step < len(actions) && actions[step].IsFinished(distMgr) {
+		actions[step].Done()
 		task.step++
 	}
 
