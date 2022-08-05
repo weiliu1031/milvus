@@ -23,7 +23,7 @@ func GetReplicaNodesInfo(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeM
 }
 
 func GetPartitions(collectionMgr *meta.CollectionManager, broker *meta.CoordinatorBroker, collectionID int64) ([]int64, error) {
-	collection := collectionMgr.Get(collectionID)
+	collection := collectionMgr.GetCollection(collectionID)
 	if collection != nil {
 		partitions, err := broker.GetPartitions(context.Background(), collectionID)
 		return partitions, err

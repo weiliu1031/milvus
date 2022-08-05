@@ -246,17 +246,17 @@ func (scheduler *Scheduler) GetNodeSegmentDelta(nodeID int64) int {
 	scheduler.rwmutex.RLock()
 	defer scheduler.rwmutex.RUnlock()
 
-	return calculateNodeDelta(nodeID, lo.Values(scheduler.segmentTasks))
+	return calculateNodeDelta(nodeID, scheduler.segmentTasks)
 }
 
 func (scheduler *Scheduler) GetNodeChannelDelta(nodeID int64) int {
 	scheduler.rwmutex.RLock()
 	defer scheduler.rwmutex.RUnlock()
 
-	return calculateNodeDelta(nodeID, lo.Values(scheduler.channelTasks))
+	return calculateNodeDelta(nodeID, scheduler.channelTasks)
 }
 
-func calculateNodeDelta(nodeID int64, tasks []Task) int {
+func calculateNodeDelta[K comparable, T ~map[K]Task](nodeID int64, tasks T) int {
 	delta := 0
 	for _, task := range tasks {
 		if task.IsRelatedTo(nodeID) {

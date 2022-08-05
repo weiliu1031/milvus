@@ -6,6 +6,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/samber/lo"
 )
 
 type Collection struct {
@@ -63,7 +64,7 @@ func (m *CollectionManager) Reload() {
 	}
 }
 
-func (m *CollectionManager) Get(id UniqueID) *Collection {
+func (m *CollectionManager) GetCollection(id UniqueID) *Collection {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
@@ -96,16 +97,18 @@ func (m *CollectionManager) GetReplicaNumber(id UniqueID) int32 {
 	return 0
 }
 
-func (m *CollectionManager) GetAll() []*Collection {
-	collections := make([]*Collection, 0, len(m.collections))
-
+func (m *CollectionManager) GetAllCollections() []*Collection {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	for _, collection := range m.collections {
-		collections = append(collections, collection)
-	}
-	return collections
+	return lo.Values(m.collections)
+}
+
+func (m *CollectionManager) GetAllPartitions() []*Partition {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	return lo.Values(m.parttions)
 }
 
 func (m *CollectionManager) GetPartitionsByCollection(collectionID UniqueID) []*Partition {
