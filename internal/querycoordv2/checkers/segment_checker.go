@@ -49,7 +49,7 @@ type segmentSet map[*meta.Segment]struct{}
 type segmentDistribution map[int64]map[int64]segmentSet
 
 func (checker *SegmentChecker) Check(ctx context.Context) []task.Task {
-	collections := checker.meta.CollectionManager.GetAll()
+	collections := checker.meta.CollectionManager.GetAllCollections()
 	segments := checker.dist.SegmentDistManager.GetAll()
 
 	segmentDist := make(segmentDistribution)
