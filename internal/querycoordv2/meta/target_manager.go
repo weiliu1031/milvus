@@ -3,6 +3,7 @@ package meta
 import (
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -10,14 +11,14 @@ import (
 type TargetManager struct {
 	rwmutex sync.RWMutex
 
-	segments        map[int64]*Segment
+	segments        map[int64]*datapb.SegmentInfo
 	growingSegments typeutil.UniqueSet // Growing segments to release
 	dmChannels      map[string]*DmChannel
 }
 
 func NewTargetManager() *TargetManager {
 	return &TargetManager{
-		segments:        make(map[int64]*Segment),
+		segments:        make(map[int64]*datapb.SegmentInfo),
 		growingSegments: make(typeutil.UniqueSet),
 		dmChannels:      make(map[string]*DmChannel),
 	}
@@ -50,14 +51,14 @@ func (mgr *TargetManager) RemovePartition(partitionID int64) {
 	}
 }
 
-func (mgr *TargetManager) AddSegment(segments ...*Segment) {
+func (mgr *TargetManager) AddSegment(segments ...*datapb.SegmentInfo ) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
 
 	mgr.addSegment(segments...)
 }
 
-func (mgr *TargetManager) addSegment(segments ...*Segment) {
+func (mgr *TargetManager) addSegment(segments ...*datapb.SegmentInfo ) {
 	for _, segment := range segments {
 		mgr.segments[segment.GetID()] = segment
 	}
@@ -75,11 +76,11 @@ func (mgr *TargetManager) containSegment(id int64) bool {
 	return ok
 }
 
-func (mgr *TargetManager) GetSegments(collectionID int64, partitionIDs ...int64) []*Segment {
+func (mgr *TargetManager) GetSegments(collectionID int64, partitionIDs ...int64) []*datapb.SegmentInfo {
 	mgr.rwmutex.RLock()
 	defer mgr.rwmutex.RUnlock()
 
-	segments := make([]*Segment, 0)
+	segments := make([]*datapb.SegmentInfo , 0)
 	for _, segment := range mgr.segments {
 		if segment.CollectionID == collectionID &&
 			(len(partitionIDs) == 0 || funcutil.SliceContain(partitionIDs, segment.PartitionID)) {
@@ -90,11 +91,11 @@ func (mgr *TargetManager) GetSegments(collectionID int64, partitionIDs ...int64)
 	return segments
 }
 
-func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions ...int64) []*Segment {
+func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions ...int64) []*datapb.SegmentInfo  {
 	mgr.rwmutex.RLock()
 	defer mgr.rwmutex.RUnlock()
 
-	segments := make([]*Segment, 0)
+	segments := make([]*datapb.SegmentInfo , 0)
 	for _, segment := range mgr.segments {
 		if segment.CollectionID == collection &&
 			(len(partitions) == 0 || funcutil.SliceContain(partitions, segment.PartitionID)) {
@@ -105,7 +106,7 @@ func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions .
 	return segments
 }
 
-func (mgr *TargetManager) HandoffSegment(dest *Segment, sources ...int64) {
+func (mgr *TargetManager) HandoffSegment(dest *datapb.SegmentInfo, sources ...int64) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
 

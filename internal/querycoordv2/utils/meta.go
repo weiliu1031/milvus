@@ -39,3 +39,18 @@ func GetPartitions(collectionMgr *meta.CollectionManager, broker *meta.Coordinat
 	// todo(yah01): replace this error with a defined error
 	return nil, fmt.Errorf("collection/partition not loaded")
 }
+
+// GroupNodesByReplica groups nodes by replica,
+// returns ReplicaID -> NodeIDs
+func GroupNodesByReplica(replicaMgr *meta.ReplicaManager, collectionID int64, nodes []int64) map[int64][]int64 {
+	ret := make(map[int64][]int64)
+	replicas := replicaMgr.GetByCollection(collectionID)
+	for _, replica := range replicas {
+		for _, node := range nodes {
+			if replica.Nodes.Contain(node) {
+				ret[replica.ID] = append(ret[replica.ID], node)
+			}
+		}
+	}
+	return ret
+}
