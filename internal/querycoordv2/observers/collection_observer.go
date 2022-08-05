@@ -9,7 +9,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 const (
