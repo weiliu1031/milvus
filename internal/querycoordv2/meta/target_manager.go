@@ -39,6 +39,17 @@ func (mgr *TargetManager) RemoveCollection(collectionID int64) {
 	}
 }
 
+func (mgr *TargetManager) RemovePartition(partitionID int64) {
+	mgr.rwmutex.Lock()
+	defer mgr.rwmutex.Unlock()
+
+	for _, segment := range mgr.segments {
+		if segment.CollectionID == partitionID {
+			delete(mgr.segments, segment.ID)
+		}
+	}
+}
+
 func (mgr *TargetManager) AddSegment(segments ...*Segment) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()

@@ -179,3 +179,21 @@ func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 
 	return nil
 }
+
+func (m *CollectionManager) RemovePartition(id UniqueID) error {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	partition, ok := m.parttions[id]
+	if !ok {
+		return nil
+	}
+
+	err := m.store.ReleasePartition(partition.CollectionID, partition.PartitionID)
+	if err != nil {
+		return err
+	}
+	delete(m.parttions, id)
+
+	return nil
+}
