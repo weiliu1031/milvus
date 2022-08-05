@@ -43,9 +43,10 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 		}
 
 		for _, segmentBinlogs := range binlogs {
-			s.targetMgr.AddSegment(&meta.Segment{
-				SegmentInfo: utils.SegmentBinlogs2SegmentInfo(collection.CollectionID, partitionID, segmentBinlogs),
-			})
+			s.targetMgr.AddSegment(utils.SegmentBinlogs2SegmentInfo(
+				collection.CollectionID,
+				partitionID,
+				segmentBinlogs))
 		}
 
 		for _, info := range vChannelInfos {

@@ -29,9 +29,9 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 
 	collection := &meta.Collection{
 		CollectionLoadInfo: &querypb.CollectionLoadInfo{
-			CollectionID: req.GetCollectionID(),
-			Replica:      req.GetReplicaNumber(),
-			Status:       querypb.LoadStatus_Loading,
+			CollectionID:  req.GetCollectionID(),
+			ReplicaNumber: req.GetReplicaNumber(),
+			Status:        querypb.LoadStatus_Loading,
 		},
 		CreatedAt: time.Now(),
 	}

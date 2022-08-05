@@ -161,7 +161,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 	}
 	log = log.With(zap.Int64("shard-leader", leader))
 
-	req := packLoadSegmentRequest(task, action, schema,loadMeta, loadInfo)
+	req := packLoadSegmentRequest(task, action, schema, loadMeta, loadInfo)
 	status, err := ex.cluster.LoadSegments(ctx, leader, req)
 	if err != nil {
 		log.Warn("failed to load segment, it may be a false failure", zap.Error(err))

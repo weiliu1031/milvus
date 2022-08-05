@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/samber/lo"
 )
 
 var (
@@ -92,19 +93,11 @@ func (action *SegmentAction) SegmentID() UniqueID {
 }
 
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	segments := distMgr.SegmentDistManager.GetByNode(action.Node())
-
-	hasSegment := false
-	for _, segment := range segments {
-		if segment.GetID() == action.segmentID {
-			hasSegment = true
-			break
-		}
-	}
-
+	nodes := distMgr.LeaderViewManager.GetSegmentDist(action.SegmentID())
+	hasNode := lo.Contains(nodes, action.Node())
 	isGrow := action.Type() == ActionTypeGrow
 
-	return hasSegment == isGrow
+	return hasNode == isGrow
 }
 
 type ChannelAction struct {
@@ -154,17 +147,9 @@ func (action *ChannelAction) Execute(cluster *session.Cluster) error {
 }
 
 func (action *ChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	channels := distMgr.ChannelDistManager.GetByNode(action.nodeID)
-
-	hasChannel := false
-	for _, channel := range channels {
-		if channel.ChannelName == action.ChannelName() {
-			hasChannel = true
-			break
-		}
-	}
-
+	nodes := distMgr.LeaderViewManager.GetChannelDist(action.ChannelName())
+	hasNode := lo.Contains(nodes, action.Node())
 	isGrow := action.Type() == ActionTypeGrow
 
-	return hasChannel == isGrow
+	return hasNode == isGrow
 }
