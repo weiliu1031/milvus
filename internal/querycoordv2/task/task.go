@@ -287,3 +287,16 @@ func NewChannelTask(base *BaseTask, actions ...Action) *ChannelTask {
 func (task *ChannelTask) Channel() string {
 	return task.channel
 }
+
+type TaskInfluence interface {
+	Task() Task
+	Influence() int
+}
+
+type BaseTaskInfluence struct {
+	task Task
+}
+
+func (influence *BaseTaskInfluence) Task() {
+
+}

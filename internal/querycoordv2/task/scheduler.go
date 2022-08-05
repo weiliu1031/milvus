@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 )
 
@@ -239,6 +240,36 @@ func (scheduler *Scheduler) Dispatch(node int64) {
 			scheduler.schedule(node)
 		}
 	}
+}
+
+func (scheduler *Scheduler) GetNodeSegmentDelta(nodeID int64) int {
+	scheduler.rwmutex.RLock()
+	defer scheduler.rwmutex.RUnlock()
+
+	return calculateNodeDelta(nodeID, lo.Values(scheduler.segmentTasks))
+}
+
+func (scheduler *Scheduler) GetNodeChannelDelta(nodeID int64) int {
+	scheduler.rwmutex.RLock()
+	defer scheduler.rwmutex.RUnlock()
+
+	return calculateNodeDelta(nodeID, lo.Values(scheduler.channelTasks))
+}
+
+func calculateNodeDelta(nodeID int64, tasks []Task) int {
+	delta := 0
+	for _, task := range tasks {
+		if task.IsRelatedTo(nodeID) {
+			for _, action := range task.Actions() {
+				if action.Type() == ActionTypeGrow {
+					delta++
+				} else if action.Type() == ActionTypeReduce {
+					delta--
+				}
+			}
+		}
+	}
+	return delta
 }
 
 // schedule selects some tasks to execute, follow these steps for each started selected tasks:

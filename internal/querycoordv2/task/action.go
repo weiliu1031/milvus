@@ -27,6 +27,7 @@ const (
 
 type Action interface {
 	Node() int64
+	Type() ActionType
 	IsFinished(distMgr *meta.DistributionManager) bool
 	OnDone(func())
 	Done()
