@@ -2,6 +2,7 @@ package checkers
 
 import (
 	"context"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -12,6 +13,7 @@ import (
 
 var (
 	checkRoundTaskNumLimit = 128
+	checkPeriod            = 200 * time.Millisecond
 )
 
 type CheckerController struct {
@@ -61,11 +63,15 @@ func NewCheckerController(ctx context.Context,
 // Check run checkers to spawn tasks,
 // and adds them into scheduler.
 func (controller *CheckerController) Check() {
-	select {
-	case <-controller.ctx.Done():
-
-	default:
-		controller.check()
+	ticker := time.NewTicker(checkPeriod)
+	for {
+		select {
+		case <-controller.ctx.Done():
+			ticker.Stop()
+	
+		case <-ticker.C:
+			controller.check()
+		}
 	}
 }
 

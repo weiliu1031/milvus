@@ -92,7 +92,10 @@ func (m *CollectionManager) GetLoadType(id UniqueID) querypb.LoadType {
 	if ok {
 		return querypb.LoadType_LoadCollection
 	}
-	return querypb.LoadType_LoadPartition
+	if len(m.getPartitionsByCollection(id)) > 0 {
+		return querypb.LoadType_LoadPartition
+	}
+	return querypb.LoadType_UnKnownType
 }
 
 func (m *CollectionManager) GetReplicaNumber(id UniqueID) int32 {
@@ -107,7 +110,24 @@ func (m *CollectionManager) GetReplicaNumber(id UniqueID) int32 {
 	if len(partitions) > 0 {
 		return partitions[0].GetReplicaNumber()
 	}
-	return 0
+	return -1
+}
+
+func (m *CollectionManager) GetLoadPercentage(id UniqueID) int32 {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	collection, ok := m.collections[id]
+	if ok {
+		return collection.LoadPercentage
+	}
+	partitions := m.getPartitionsByCollection(id)
+	if len(partitions) > 0 {
+		return lo.SumBy(partitions, func(partition *Partition) int32 {
+			return partition.LoadPercentage
+		}) / int32(len(partitions))
+	}
+	return -1
 }
 
 func (m *CollectionManager) GetAllCollections() []*Collection {

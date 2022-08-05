@@ -2,6 +2,7 @@ package querycoordv2
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -10,11 +11,48 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 )
 
 func (s *Server) ShowCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(zap.Int64("msg-id", req.GetBase().GetMsgID()))
+
+	log.Info("show collections", zap.Int64s("collection-ids", req.GetCollectionIDs()))
+
+	collectionSet := typeutil.NewUniqueSet(req.GetCollectionIDs()...)
+	if len(req.GetCollectionIDs()) == 0 {
+		for _, collection := range s.meta.GetAllCollections() {
+			collectionSet.Insert(collection.GetCollectionID())
+		}
+		for _, partition := range s.meta.GetAllPartitions() {
+			collectionSet.Insert(partition.GetCollectionID())
+		}
+	}
+	collections := collectionSet.Collect()
+
+	resp := &querypb.ShowCollectionsResponse{
+		Status:                utils.WrapStatus(commonpb.ErrorCode_Success, ""),
+		CollectionIDs:         collections,
+		InMemoryPercentages:   make([]int64, len(collectionSet)),
+		QueryServiceAvailable: make([]bool, len(collectionSet)),
+	}
+	for i, collectionID := range collections {
+		log := log.With(zap.Int64("collection-id", collectionID))
+
+		percentage := s.meta.CollectionManager.GetLoadPercentage(collectionID)
+		if percentage < 0 {
+			err := fmt.Errorf("collection %d has not been loaded to memory or load failed", collectionID)
+			log.Warn("show collection failed", zap.Error(err))
+			return &querypb.ShowCollectionsResponse{
+				Status: utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, err.Error()),
+			}, nil
+		}
+		resp.InMemoryPercentages[i] = int64(percentage)
+		resp.QueryServiceAvailable[i] = s.checkAnyReplicaAvailable(collectionID)
+	}
+
+	return resp, nil
 }
 
 func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollectionRequest) (*commonpb.Status, error) {
