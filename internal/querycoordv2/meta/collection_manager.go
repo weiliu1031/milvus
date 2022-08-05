@@ -184,6 +184,23 @@ func (m *CollectionManager) GetOrPut(collectionID UniqueID, collection *Collecti
 	return collection, false, nil
 }
 
+func (m *CollectionManager) GetOrPutPartition(partition *Partition) (*Partition, bool, error) {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	old, ok := m.parttions[partition.GetPartitionID()]
+	if ok {
+		return old, true, nil
+	}
+
+	err := m.putPartition(partition, true)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return partition, false, nil
+}
+
 func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()

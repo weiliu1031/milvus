@@ -27,6 +27,12 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		zap.Any("schema", req.Schema),
 		zap.Int32("replica-number", req.ReplicaNumber))
 
+	if s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) != querypb.LoadType_LoadCollection {
+		msg := "a collection with different LoadType existed"
+		log.Error(msg)
+		return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
+	}
+
 	collection := &meta.Collection{
 		CollectionLoadInfo: &querypb.CollectionLoadInfo{
 			CollectionID:  req.GetCollectionID(),
@@ -43,18 +49,13 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err), nil
 	}
 	if ok {
-		status := utils.WrapStatus(commonpb.ErrorCode_Success, "")
-		if s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) != querypb.LoadType_LoadCollection {
-			msg := "a collection with different LoadType existed"
-			log.Error(msg)
-			status = utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-		} else if old.GetReplicaNumber() != collection.GetReplicaNumber() {
+		if old.GetReplicaNumber() != collection.GetReplicaNumber() {
 			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
 			log.Error(msg)
-			status = utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
 		}
 
-		return status, nil
+		return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
 	}
 
 	status := s.loadCollection(ctx, collection)
@@ -75,7 +76,59 @@ func (s *Server) ShowPartitions(ctx context.Context, req *querypb.ShowPartitions
 }
 
 func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) (*commonpb.Status, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("received load collection request",
+		zap.Any("schema", req.Schema),
+		zap.Int32("replica-number", req.ReplicaNumber))
+
+	if s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) != querypb.LoadType_LoadPartition {
+		msg := "a collection with different LoadType existed"
+		log.Error(msg)
+		return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
+	}
+
+	partitions := make([]*meta.Partition, len(req.GetPartitionIDs()))
+	for i := range partitions {
+		partitions[i] = &meta.Partition{
+			PartitionLoadInfo: &querypb.PartitionLoadInfo{
+				CollectionID:  req.GetCollectionID(),
+				PartitionID:   req.GetPartitionIDs()[i],
+				ReplicaNumber: req.GetReplicaNumber(),
+				Status:        querypb.LoadStatus_Loading,
+			},
+			CreatedAt: time.Now(),
+		}
+
+		old, ok, err := s.meta.CollectionManager.GetOrPutPartition(partitions[i])
+		if err != nil {
+			msg := "failed to store partition"
+			log.Error(msg, zap.Error(err))
+			return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err), nil
+		}
+		if ok {
+			if old.GetReplicaNumber() != partitions[i].GetReplicaNumber() {
+				msg := "a collection with different replica number existed, release this collection first before changing its replica number"
+				log.Error(msg)
+				return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
+			}
+
+			return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
+		}
+	}
+
+	status := s.loadPartitions(ctx, partitions...)
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		for _, partition := range partitions {
+			s.meta.CollectionManager.RemovePartition(partition.GetPartitionID())
+		}
+		s.meta.ReplicaManager.RemoveCollection(partitions[0].GetCollectionID())
+		s.targetMgr.RemoveCollection(partitions[0].GetCollectionID())
+	}
+	return status, nil
 }
 
 func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error) {

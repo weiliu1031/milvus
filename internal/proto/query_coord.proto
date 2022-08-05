@@ -439,3 +439,9 @@ message PartitionLoadInfo {
   int32 replica_number = 3;
   LoadStatus status = 4;
 }
+
+message Replica {
+    int64 ID = 1;
+    int64 collectionID = 2;
+    repeated int64 nodes = 3;
+}

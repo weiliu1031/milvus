@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
@@ -53,4 +54,19 @@ func GroupNodesByReplica(replicaMgr *meta.ReplicaManager, collectionID int64, no
 		}
 	}
 	return ret
+}
+
+// AssignNodesToReplicas assigns nodes to the given replicas,
+// all given replicas must be the same collection,
+// the given replicas have to be not in ReplicaManager
+func AssignNodesToReplicas(nodeMgr *session.NodeManager, replicas ...*meta.Replica) {
+	replicaNumber := len(replicas)
+	nodes := nodeMgr.GetAll()
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].GetScore() < nodes[j].GetScore()
+	})
+
+	for i, node := range nodes {
+		replicas[i%replicaNumber].Nodes.Insert(node.ID())
+	}
 }
