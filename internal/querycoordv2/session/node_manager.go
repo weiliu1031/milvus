@@ -70,6 +70,18 @@ func (n *NodeInfo) Remaining() int64 {
 	return n.stats.getRemaining()
 }
 
+func (n *NodeInfo) SegmentCnt() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.stats.getSegmentCnt()
+}
+
+func (n *NodeInfo) ChannelCnt() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.stats.getChannelCnt()
+}
+
 func (n *NodeInfo) UpdateStats(opts ...StatsOption) {
 	n.mu.Lock()
 	for _, opt := range opts {
@@ -119,5 +131,17 @@ func WithCapacity(cap int64) StatsOption {
 func WithAvailable(available int64) StatsOption {
 	return func(n *NodeInfo) {
 		n.setAvailable(available)
+	}
+}
+
+func WithSegmentCnt(cnt int) StatsOption {
+	return func(n *NodeInfo) {
+		n.setSegmentCnt(cnt)
+	}
+}
+
+func WithChannelCnt(cnt int) StatsOption {
+	return func(n *NodeInfo) {
+		n.setChannelCnt(cnt)
 	}
 }

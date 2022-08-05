@@ -20,10 +20,11 @@ const (
 )
 
 type distHandler struct {
-	nodeID int64
-	client *session.Cluster
-	c      chan struct{}
-	wg     sync.WaitGroup
+	nodeID      int64
+	client      *session.Cluster
+	c           chan struct{}
+	wg          sync.WaitGroup
+	nodeManager *session.NodeManager
 }
 
 func (dh *distHandler) start(ctx context.Context) {
@@ -72,7 +73,13 @@ func (dh *distHandler) logFailureInfo(resp *querypb.GetDataDistributionResponse,
 }
 
 func (dh *distHandler) handleDistResp(resp *querypb.GetDataDistributionResponse) {
-
+	node := dh.nodeManager.Get(resp.GetNodeID())
+	if node != nil {
+		node.UpdateStats(
+			session.WithSegmentCnt(len(resp.GetSegmentIDs())),
+			session.WithChannelCnt(len(resp.GetChannels())),
+		)
+	}
 }
 
 func (dh *distHandler) close() {
