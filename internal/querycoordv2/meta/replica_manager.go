@@ -1,17 +1,16 @@
 package meta
 
 import (
-	"sort"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 type Replica struct {
-	ID           UniqueID
-	CollectionID UniqueID
-	Nodes        UniqueSet
+	*querypb.Replica
+	Nodes UniqueSet // a helper field for manipulating replica's Nodes slice field
 }
 
 type ReplicaManager struct {
@@ -20,6 +19,7 @@ type ReplicaManager struct {
 	idAllocator func() (int64, error)
 	nodeMgr     *session.NodeManager
 	replicas    map[UniqueID]*Replica
+	store       Store
 }
 
 func NewReplicaManager() *ReplicaManager {
@@ -35,25 +35,25 @@ func (m *ReplicaManager) Get(id UniqueID) *Replica {
 	return m.replicas[id]
 }
 
-func (m *ReplicaManager) Put(replicaNumber int32, collectionID UniqueID) ([]*Replica, error) {
+func (m *ReplicaManager) Spawn(collection int64, replicaNumber int32) ([]*Replica, error) {
 	var (
 		replicas = make([]*Replica, replicaNumber)
 		err      error
 	)
 	for i := range replicas {
-		replicas[i], err = m.spawn(collectionID)
+		replicas[i], err = m.spawn(collection)
 		if err != nil {
 			return nil, err
 		}
 	}
+	return replicas, err
+}
 
+func (m *ReplicaManager) Put(replicas ...*Replica) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	m.put(replicas...)
-	m.assignCollectionReplicas(replicas...)
-
-	return replicas, nil
+	return m.put(replicas...)
 }
 
 func (m *ReplicaManager) spawn(collectionID UniqueID) (*Replica, error) {
@@ -62,59 +62,42 @@ func (m *ReplicaManager) spawn(collectionID UniqueID) (*Replica, error) {
 		return nil, err
 	}
 	return &Replica{
-		ID:           id,
-		CollectionID: collectionID,
-		Nodes:        make(UniqueSet),
+		Replica: &querypb.Replica{
+			ID:           id,
+			CollectionID: collectionID,
+		},
+		Nodes: make(UniqueSet),
 	}, nil
 }
 
-func (m *ReplicaManager) put(replicas ...*Replica) {
+func (m *ReplicaManager) put(replicas ...*Replica) error {
 	for _, replica := range replicas {
+		err := m.store.SaveReplica(replica.Replica)
+		if err != nil {
+			return err
+		}
 		m.replicas[replica.ID] = replica
 	}
+	return nil
 }
 
-func (m *ReplicaManager) Remove(ids ...UniqueID) {
+func (m *ReplicaManager) Remove(ids ...UniqueID) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
 	for _, id := range ids {
+		replica, ok := m.replicas[id]
+		if !ok {
+			continue
+		}
+
+		err := m.store.ReleaseReplica(replica.GetCollectionID(), replica.GetID())
+		if err != nil {
+			return err
+		}
 		delete(m.replicas, id)
 	}
-}
-
-// Assign assigns nodes to the given replicas,
-// all given replicas must be the same collection,
-// tries to assign nodes to all replicas if no given replica
-func (m *ReplicaManager) Assign(replicaIDs ...UniqueID) {
-	m.rwmutex.Lock()
-	defer m.rwmutex.Unlock()
-
-	if len(replicaIDs) == 0 {
-		m.assignAllReplicas()
-	} else {
-		replicas := make([]*Replica, len(replicaIDs))
-		for i := range replicas {
-			replicas[i] = m.replicas[replicaIDs[i]]
-		}
-		m.assignCollectionReplicas(replicas...)
-	}
-}
-
-func (m *ReplicaManager) assignCollectionReplicas(replicas ...*Replica) {
-	replicaNumber := len(replicas)
-	nodes := m.nodeMgr.GetAll()
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].GetScore() < nodes[j].GetScore()
-	})
-
-	for i, node := range nodes {
-		replicas[i%replicaNumber].Nodes.Insert(node.ID())
-	}
-}
-
-func (m *ReplicaManager) assignAllReplicas() {
-	panic("not implemented")
+	return nil
 }
 
 // RemoveCollection removes replicas of given collection,

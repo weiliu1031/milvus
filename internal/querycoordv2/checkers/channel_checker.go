@@ -44,7 +44,7 @@ type channelSet map[*meta.DmChannel]struct{}
 type channelDistribution map[string]map[int64]channelSet
 
 func (checker *ChannelChecker) Check(ctx context.Context) []task.Task {
-	collections := checker.meta.CollectionManager.GetAll()
+	collections := checker.meta.CollectionManager.GetAllCollections()
 	channels := checker.dist.ChannelDistManager.GetAll()
 
 	channelDist := make(channelDistribution)

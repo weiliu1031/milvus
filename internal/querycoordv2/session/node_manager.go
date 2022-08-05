@@ -96,7 +96,12 @@ func (n *NodeInfo) PreAllocate(space int64) (bool, func()) {
 	n.mu.Lock()
 	succ := n.preAllocate(space)
 	n.mu.Unlock()
-	return succ, func() { n.releaseAllocation(space) }
+	isReleased := false
+	return succ, func() {
+		if !isReleased {
+			n.releaseAllocation(space)
+		}
+	}
 }
 
 func (n *NodeInfo) releaseAllocation(space int64) {

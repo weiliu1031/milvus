@@ -19,7 +19,7 @@ package typeutil
 // UniqueSet is set type, which contains only UniqueIDs,
 // the underlying type is map[UniqueID]struct{}.
 // Create a UniqueSet instance with make(UniqueSet) like creating a map instance.
-type UniqueSet map[UniqueID]struct{}
+type UniqueSet = Set[UniqueID]
 
 func NewUniqueSet(ids ...UniqueID) UniqueSet {
 	set := make(UniqueSet)
@@ -27,41 +27,46 @@ func NewUniqueSet(ids ...UniqueID) UniqueSet {
 	return set
 }
 
+type Set[T comparable] map[T]struct{}
+
+func NewSet[T comparable](elements ...T) Set[T] {
+	set := make(Set[T])
+	set.Insert(elements...)
+	return set
+}
+
 // Insert elements into the set,
 // do nothing if the id existed
-func (set UniqueSet) Insert(ids ...UniqueID) {
-	for i := range ids {
-		set[ids[i]] = struct{}{}
+func (set Set[T]) Insert(elements ...T) {
+	for i := range elements {
+		set[elements[i]] = struct{}{}
 	}
 }
 
 // Check whether the elements exist
-func (set UniqueSet) Contain(ids ...UniqueID) bool {
-	for i := range ids {
-		_, ok := set[ids[i]]
+func (set Set[T]) Contain(elements ...T) bool {
+	for i := range elements {
+		_, ok := set[elements[i]]
 		if !ok {
 			return false
 		}
 	}
-
 	return true
 }
 
 // Remove elements from the set,
 // do nothing if set is nil or id not exists
-func (set UniqueSet) Remove(ids ...UniqueID) {
-	for i := range ids {
-		delete(set, ids[i])
+func (set Set[T]) Remove(elements ...T) {
+	for i := range elements {
+		delete(set, elements[i])
 	}
 }
 
 // Get all elements in the set
-func (set UniqueSet) Collect() []UniqueID {
-	ids := make([]UniqueID, 0, len(set))
-
-	for id := range set {
-		ids = append(ids, id)
+func (set Set[T]) Collect() []T {
+	elements := make([]T, 0, len(set))
+	for elem := range set {
+		elements = append(elements, elem)
 	}
-
-	return ids
+	return elements
 }
