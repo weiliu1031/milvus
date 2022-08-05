@@ -88,9 +88,9 @@ func (m *SegmentDistManager) GetByCollectionAndNode(collectionID, nodeID UniqueI
 
 	ret := make([]*Segment, 0)
 	for _, segment := range m.segments[nodeID] {
-			if segment.CollectionID == collectionID {
-				ret = append(ret, segment)
-			}
+		if segment.CollectionID == collectionID {
+			ret = append(ret, segment)
+		}
 	}
 	return ret
 }

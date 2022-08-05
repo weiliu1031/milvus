@@ -4,8 +4,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/samber/lo"
 )
 
 type Collection struct {
@@ -14,10 +16,22 @@ type Collection struct {
 	CreatedAt      time.Time
 }
 
+func (collection *Collection) Clone() *Collection {
+	new := *collection
+	new.CollectionLoadInfo = proto.Clone(collection.CollectionLoadInfo).(*querypb.CollectionLoadInfo)
+	return &new
+}
+
 type Partition struct {
 	*querypb.PartitionLoadInfo
 	LoadPercentage int32
 	CreatedAt      time.Time
+}
+
+func (partition *Partition) Clone() *Partition {
+	new := *partition
+	new.PartitionLoadInfo = proto.Clone(partition.PartitionLoadInfo).(*querypb.PartitionLoadInfo)
+	return &new
 }
 
 type CollectionManager struct {
@@ -63,7 +77,7 @@ func (m *CollectionManager) Reload() {
 	}
 }
 
-func (m *CollectionManager) Get(id UniqueID) *Collection {
+func (m *CollectionManager) GetCollection(id UniqueID) *Collection {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
@@ -96,16 +110,18 @@ func (m *CollectionManager) GetReplicaNumber(id UniqueID) int32 {
 	return 0
 }
 
-func (m *CollectionManager) GetAll() []*Collection {
-	collections := make([]*Collection, 0, len(m.collections))
-
+func (m *CollectionManager) GetAllCollections() []*Collection {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	for _, collection := range m.collections {
-		collections = append(collections, collection)
-	}
-	return collections
+	return lo.Values(m.collections)
+}
+
+func (m *CollectionManager) GetAllPartitions() []*Partition {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	return lo.Values(m.parttions)
 }
 
 func (m *CollectionManager) GetPartitionsByCollection(collectionID UniqueID) []*Partition {
@@ -125,17 +141,26 @@ func (m *CollectionManager) getPartitionsByCollection(collectionID UniqueID) []*
 	return partitions
 }
 
-func (m *CollectionManager) Put(collection *Collection) error {
+func (m *CollectionManager) PutCollection(collection *Collection) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	return m.put(collection)
+	return m.putCollection(collection, true)
 }
 
-func (m *CollectionManager) put(collection *Collection) error {
-	err := m.store.SaveCollection(collection.CollectionLoadInfo)
-	if err != nil {
-		return err
+func (m *CollectionManager) PutCollectionWithoutSave(collection *Collection) {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	m.putCollection(collection, false)
+}
+
+func (m *CollectionManager) putCollection(collection *Collection, withSave bool) error {
+	if withSave {
+		err := m.store.SaveCollection(collection.CollectionLoadInfo)
+		if err != nil {
+			return err
+		}
 	}
 	m.collections[collection.CollectionID] = collection
 
@@ -151,7 +176,7 @@ func (m *CollectionManager) GetOrPut(collectionID UniqueID, collection *Collecti
 		return old, true, nil
 	}
 
-	err := m.put(collection)
+	err := m.putCollection(collection, true)
 	if err != nil {
 		return nil, false, err
 	}
@@ -173,6 +198,50 @@ func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 		return err
 	}
 	delete(m.collections, id)
+
+	return nil
+}
+
+func (m *CollectionManager) PutPartition(partition *Partition) error {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	return m.putPartition(partition, true)
+}
+
+func (m *CollectionManager) PutPartitionWithoutSave(partition *Partition) {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	m.putPartition(partition, false)
+}
+
+func (m *CollectionManager) putPartition(partition *Partition, withSave bool) error {
+	if withSave {
+		err := m.store.SavePartition(partition.PartitionLoadInfo)
+		if err != nil {
+			return err
+		}
+	}
+	m.parttions[partition.PartitionID] = partition
+
+	return nil
+}
+
+func (m *CollectionManager) RemovePartition(id UniqueID) error {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	partition, ok := m.parttions[id]
+	if !ok {
+		return nil
+	}
+
+	err := m.store.ReleasePartition(partition.CollectionID, partition.PartitionID)
+	if err != nil {
+		return err
+	}
+	delete(m.parttions, id)
 
 	return nil
 }

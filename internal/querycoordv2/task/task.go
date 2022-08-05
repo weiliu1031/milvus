@@ -297,6 +297,6 @@ type BaseTaskInfluence struct {
 	task Task
 }
 
-func (influence *BaseTaskInfluence) Task() {
-
+func (influence *BaseTaskInfluence) Task() Task {
+	return influence.Task()
 }
