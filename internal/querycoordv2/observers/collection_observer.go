@@ -88,12 +88,12 @@ func (observer *CollectionObserver) observeTimeout() {
 			continue
 		}
 
-		observer.meta.CollectionManager.RemoveCollection(partition.GetCollectionID())
-		if observer.meta.CollectionManager.GetReplicaNumber(partition.GetCollectionID()) <= 0 { // All partitions have been released
+		observer.meta.CollectionManager.RemovePartition(partition.GetPartitionID())
+		observer.targetMgr.RemovePartition(partition.GetPartitionID())
+		// All partitions have been released
+		if !observer.meta.CollectionManager.Exist(partition.GetCollectionID()) {
 			observer.meta.ReplicaManager.RemoveCollection(partition.GetCollectionID())
 			observer.targetMgr.RemoveCollection(partition.GetCollectionID())
-		} else {
-			observer.targetMgr.RemovePartition(partition.GetPartitionID())
 		}
 	}
 }

@@ -24,6 +24,7 @@ func NewTargetManager() *TargetManager {
 	}
 }
 
+// RemoveCollection removes all channels and segments in the given collection
 func (mgr *TargetManager) RemoveCollection(collectionID int64) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
@@ -40,6 +41,8 @@ func (mgr *TargetManager) RemoveCollection(collectionID int64) {
 	}
 }
 
+// RemovePartition removes all segment in the given partition,
+// NOTE: this doesn't remove any channel even the given one is the only partition
 func (mgr *TargetManager) RemovePartition(partitionID int64) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
@@ -51,14 +54,14 @@ func (mgr *TargetManager) RemovePartition(partitionID int64) {
 	}
 }
 
-func (mgr *TargetManager) AddSegment(segments ...*datapb.SegmentInfo ) {
+func (mgr *TargetManager) AddSegment(segments ...*datapb.SegmentInfo) {
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
 
 	mgr.addSegment(segments...)
 }
 
-func (mgr *TargetManager) addSegment(segments ...*datapb.SegmentInfo ) {
+func (mgr *TargetManager) addSegment(segments ...*datapb.SegmentInfo) {
 	for _, segment := range segments {
 		mgr.segments[segment.GetID()] = segment
 	}
@@ -80,7 +83,7 @@ func (mgr *TargetManager) GetSegments(collectionID int64, partitionIDs ...int64)
 	mgr.rwmutex.RLock()
 	defer mgr.rwmutex.RUnlock()
 
-	segments := make([]*datapb.SegmentInfo , 0)
+	segments := make([]*datapb.SegmentInfo, 0)
 	for _, segment := range mgr.segments {
 		if segment.CollectionID == collectionID &&
 			(len(partitionIDs) == 0 || funcutil.SliceContain(partitionIDs, segment.PartitionID)) {
@@ -91,11 +94,11 @@ func (mgr *TargetManager) GetSegments(collectionID int64, partitionIDs ...int64)
 	return segments
 }
 
-func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions ...int64) []*datapb.SegmentInfo  {
+func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions ...int64) []*datapb.SegmentInfo {
 	mgr.rwmutex.RLock()
 	defer mgr.rwmutex.RUnlock()
 
-	segments := make([]*datapb.SegmentInfo , 0)
+	segments := make([]*datapb.SegmentInfo, 0)
 	for _, segment := range mgr.segments {
 		if segment.CollectionID == collection &&
 			(len(partitions) == 0 || funcutil.SliceContain(partitions, segment.PartitionID)) {
