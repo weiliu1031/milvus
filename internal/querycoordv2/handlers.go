@@ -2,57 +2,184 @@ package querycoordv2
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 )
 
-func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection) *commonpb.Status {
+func (s *Server) preLoadCollection(req *querypb.LoadCollectionRequest) *commonpb.Status {
 	log := log.With(
-		zap.Int64("collection-id", collection.CollectionID),
+		zap.Int64("msg-id", req.Base.GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
 	)
+
+	collection := &meta.Collection{
+		CollectionLoadInfo: &querypb.CollectionLoadInfo{
+			CollectionID:  req.GetCollectionID(),
+			ReplicaNumber: req.GetReplicaNumber(),
+			Status:        querypb.LoadStatus_Loading,
+		},
+		CreatedAt: time.Now(),
+	}
+	old, ok, err := s.meta.CollectionManager.GetOrPut(collection)
+	if err != nil {
+		if errors.Is(err, meta.ErrLoadTypeMismatched) {
+			msg := "a collection with different LoadType existed"
+			log.Error(msg)
+			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+		}
+		msg := "failed to store collection"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+	}
+	if ok {
+		if old.GetReplicaNumber() != collection.GetReplicaNumber() {
+			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
+			log.Error(msg)
+			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+		}
+	}
+	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
+}
+
+func (s *Server) loadCollection(ctx context.Context, req *querypb.LoadCollectionRequest) *commonpb.Status {
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
 	// Create replicas
-	replicas, err := s.meta.ReplicaManager.Spawn(collection.GetCollectionID(), collection.GetReplicaNumber())
+	err := s.spawnReplicas(req.GetCollectionID(), req.GetReplicaNumber())
 	if err != nil {
 		msg := "failed to spawn replica for collection"
 		log.Error(msg, zap.Error(err))
 		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
 	}
-	utils.AssignNodesToReplicas(s.nodeMgr, replicas...)
-	err = s.meta.ReplicaManager.Put(replicas...)
-	if err != nil {
-		msg := "failed to save replica"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-	}
 
-	var dmChannels map[string][]*datapb.VchannelInfo
 	// Fetch channels and segments from DataCoord
-	partitions, err := s.broker.GetPartitions(ctx, collection.CollectionID)
+	partitions, err := s.broker.GetPartitions(ctx, req.GetCollectionID())
 	if err != nil {
 		msg := "failed to get partitions from RootCoord"
 		log.Error(msg, zap.Error(err))
 		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
 	}
+	err = s.registerTargets(ctx, req.GetCollectionID(), partitions...)
+	if err != nil {
+		msg := "failed to register channels and segments"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+	}
+
+	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
+}
+
+func (s *Server) preLoadPartition(req *querypb.LoadPartitionsRequest) *commonpb.Status {
+	log := log.With(
+		zap.Int64("msg-id", req.Base.GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	if len(req.GetPartitionIDs()) == 0 {
+		msg := "the PartitionIDs is empty"
+		log.Error(msg)
+		return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+	}
+
+	partitions := lo.Map(req.GetPartitionIDs(), func(partition int64, _ int) *meta.Partition {
+		return &meta.Partition{
+			PartitionLoadInfo: &querypb.PartitionLoadInfo{
+				CollectionID:  req.GetCollectionID(),
+				PartitionID:   partition,
+				ReplicaNumber: req.GetReplicaNumber(),
+				Status:        querypb.LoadStatus_Loading,
+			},
+			CreatedAt: time.Now(),
+		}
+	})
+
+	olds, exist, err := s.meta.CollectionManager.GetOrPutPartition(partitions...)
+	if err != nil {
+		if errors.Is(err, meta.ErrLoadTypeMismatched) {
+			msg := "a collection with different LoadType existed"
+			log.Error(msg)
+			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+		}
+		msg := "failed to store partitions"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+	}
+	if exist {
+		if olds[0].GetReplicaNumber() != req.GetReplicaNumber() {
+			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
+			log.Error(msg)
+			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+		} else if len(olds) < len(partitions) {
+			msg := fmt.Sprintf("some partitions %v of collection %v has been loaded into QueryNode, please release partitions firstly",
+				req.GetPartitionIDs(),
+				req.GetCollectionID())
+			log.Error(msg)
+			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
+		}
+	}
+	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
+}
+
+func (s *Server) loadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) *commonpb.Status {
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	// Create replicas
+	err := s.spawnReplicas(req.GetCollectionID(), req.GetReplicaNumber())
+	if err != nil {
+		msg := "failed to spawn replica for collection"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+	}
+
+	// Fetch channels and segments from DataCoord
+	err = s.registerTargets(ctx, req.GetCollectionID(), req.GetPartitionIDs()...)
+	if err != nil {
+		msg := "failed to register channels and segments"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+	}
+
+	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
+}
+
+func (s *Server) spawnReplicas(collection int64, replicaNumber int32) error {
+	replicas, err := s.meta.ReplicaManager.Spawn(collection, replicaNumber)
+	if err != nil {
+		return err
+	}
+	utils.AssignNodesToReplicas(s.nodeMgr, replicas...)
+	return s.meta.ReplicaManager.Put(replicas...)
+}
+
+func (s *Server) registerTargets(ctx context.Context, collection int64, partitions ...int64) error {
+	var dmChannels map[string][]*datapb.VchannelInfo
+
 	for _, partitionID := range partitions {
-		log := log.With(
-			zap.Int64("partition-id", partitionID),
-		)
-		vChannelInfos, binlogs, err := s.broker.GetRecoveryInfo(ctx, collection.CollectionID, partitionID)
+		vChannelInfos, binlogs, err := s.broker.GetRecoveryInfo(ctx, collection, partitionID)
 		if err != nil {
-			msg := "failed to GetRecoveryInfo from DataCoord"
-			log.Error(msg, zap.Error(err))
-			return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+			return err
 		}
 
+		// Register segments
 		for _, segmentBinlogs := range binlogs {
 			s.targetMgr.AddSegment(utils.SegmentBinlogs2SegmentInfo(
-				collection.CollectionID,
+				collection,
 				partitionID,
 				segmentBinlogs))
 		}
@@ -62,75 +189,12 @@ func (s *Server) loadCollection(ctx context.Context, collection *meta.Collection
 			dmChannels[channelName] = append(dmChannels[channelName], info)
 		}
 	}
-
-	// Register channels and segments
+	// Merge and register channels
 	for _, channels := range dmChannels {
 		dmChannel := utils.MergeDmChannelInfo(channels)
 		s.targetMgr.AddDmChannel(dmChannel)
 	}
-
-	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
-}
-
-func (s *Server) loadPartitions(ctx context.Context, partitions ...*meta.Partition) *commonpb.Status {
-	log := log.With(
-		zap.Int64("collection-id", partitions[0].CollectionID),
-	)
-
-	partitionIDs := lo.Map(partitions, func(partition *meta.Partition, _ int) int64 {
-		return partition.GetPartitionID()
-	})
-	log.Info("load partitions",
-		zap.Int64s("partition-ids", partitionIDs))
-
-	// Create replicas
-	replicas, err := s.meta.ReplicaManager.Spawn(partitions[0].GetCollectionID(), partitions[0].GetReplicaNumber())
-	if err != nil {
-		msg := "failed to spawn replica for collection"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-	}
-	utils.AssignNodesToReplicas(s.nodeMgr, replicas...)
-	err = s.meta.ReplicaManager.Put(replicas...)
-	if err != nil {
-		msg := "failed to save replica"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-	}
-
-	var dmChannels map[string][]*datapb.VchannelInfo
-	// Fetch channels and segments from DataCoord
-	for _, partition := range partitions {
-		log := log.With(
-			zap.Int64("partition-id", partition.GetPartitionID()),
-		)
-		vChannelInfos, binlogs, err := s.broker.GetRecoveryInfo(ctx, partition.GetCollectionID(), partition.GetPartitionID())
-		if err != nil {
-			msg := "failed to GetRecoveryInfo from DataCoord"
-			log.Error(msg, zap.Error(err))
-			return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-		}
-
-		for _, segmentBinlogs := range binlogs {
-			s.targetMgr.AddSegment(utils.SegmentBinlogs2SegmentInfo(
-				partition.GetCollectionID(),
-				partition.GetPartitionID(),
-				segmentBinlogs))
-		}
-
-		for _, info := range vChannelInfos {
-			channelName := info.GetChannelName()
-			dmChannels[channelName] = append(dmChannels[channelName], info)
-		}
-	}
-
-	// Register channels and segments
-	for _, channels := range dmChannels {
-		dmChannel := utils.MergeDmChannelInfo(channels)
-		s.targetMgr.AddDmChannel(dmChannel)
-	}
-
-	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
+	return nil
 }
 
 // checkAnyReplicaAvailable checks if the collection has enough distinct available shards. These shards

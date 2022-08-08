@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -8,6 +9,10 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/samber/lo"
+)
+
+var (
+	ErrLoadTypeMismatched = errors.New("LoadTypeMismatched")
 )
 
 type Collection struct {
@@ -82,6 +87,13 @@ func (m *CollectionManager) GetCollection(id UniqueID) *Collection {
 	defer m.rwmutex.RUnlock()
 
 	return m.collections[id]
+}
+
+func (m *CollectionManager) GetPartition(id UniqueID) *Partition {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	return m.parttions[id]
 }
 
 func (m *CollectionManager) GetLoadType(id UniqueID) querypb.LoadType {
@@ -202,13 +214,23 @@ func (m *CollectionManager) putCollection(collection *Collection, withSave bool)
 	return nil
 }
 
-func (m *CollectionManager) GetOrPut(collectionID UniqueID, collection *Collection) (*Collection, bool, error) {
+type OldResult struct {
+	*Collection
+	*Partition
+}
+
+func (m *CollectionManager) GetOrPut(collection *Collection) (*Collection, bool, error) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	old, ok := m.collections[collectionID]
+	old, ok := m.collections[collection.GetCollectionID()]
 	if ok {
 		return old, true, nil
+	}
+
+	partitions := m.getPartitionsByCollection(collection.GetCollectionID())
+	if len(partitions) > 0 {
+		return nil, false, ErrLoadTypeMismatched
 	}
 
 	err := m.putCollection(collection, true)
@@ -219,21 +241,32 @@ func (m *CollectionManager) GetOrPut(collectionID UniqueID, collection *Collecti
 	return collection, false, nil
 }
 
-func (m *CollectionManager) GetOrPutPartition(partition *Partition) (*Partition, bool, error) {
+func (m *CollectionManager) GetOrPutPartition(partitions ...*Partition) ([]*Partition, bool, error) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	old, ok := m.parttions[partition.GetPartitionID()]
+	_, ok := m.collections[partitions[0].GetCollectionID()]
 	if ok {
-		return old, true, nil
+		return nil, false, ErrLoadTypeMismatched
 	}
 
-	err := m.putPartition(partition, true)
+	olds := make([]*Partition, 0)
+	for _, partition := range partitions {
+		old, ok := m.parttions[partition.GetPartitionID()]
+		if ok {
+			olds = append(olds, old)
+		}
+	}
+	if len(olds) > 0 {
+		return olds, true, nil
+	}
+
+	err := m.putPartition(partitions, true)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return partition, false, nil
+	return partitions, false, nil
 }
 
 func (m *CollectionManager) RemoveCollection(id UniqueID) error {
@@ -251,7 +284,7 @@ func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 	}
 
 	partitions := lo.Map(m.getPartitionsByCollection(id),
-	func(partition *Partition, _ int) int64 {
+		func(partition *Partition, _ int) int64 {
 			return partition.GetPartitionID()
 		})
 	return m.removePartition(partitions...)
@@ -261,25 +294,29 @@ func (m *CollectionManager) PutPartition(partition *Partition) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	return m.putPartition(partition, true)
+	return m.putPartition([]*Partition{partition}, true)
 }
 
 func (m *CollectionManager) PutPartitionWithoutSave(partition *Partition) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	m.putPartition(partition, false)
+	m.putPartition([]*Partition{partition}, false)
 }
 
-func (m *CollectionManager) putPartition(partition *Partition, withSave bool) error {
+func (m *CollectionManager) putPartition(partitions []*Partition, withSave bool) error {
 	if withSave {
-		err := m.store.SavePartition(partition.PartitionLoadInfo)
+		loadInfos := lo.Map(partitions, func(partition *Partition, _ int) *querypb.PartitionLoadInfo {
+			return partition.PartitionLoadInfo
+		})
+		err := m.store.SavePartition(loadInfos...)
 		if err != nil {
 			return err
 		}
 	}
-	m.parttions[partition.PartitionID] = partition
-
+	for _, partition := range partitions {
+		m.parttions[partition.GetPartitionID()] = partition
+	}
 	return nil
 }
 

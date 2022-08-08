@@ -23,7 +23,7 @@ const (
 // Store is used to save and get from object storage.
 type Store interface {
 	SaveCollection(info *querypb.CollectionLoadInfo) error
-	SavePartition(info *querypb.PartitionLoadInfo) error
+	SavePartition(info ...*querypb.PartitionLoadInfo) error
 	SaveReplica(replica *querypb.Replica) error
 	GetCollections() ([]*querypb.CollectionLoadInfo, error)
 	GetPartitions() ([]*querypb.PartitionLoadInfo, error)
@@ -53,13 +53,17 @@ func (s MetaStore) SaveCollection(info *querypb.CollectionLoadInfo) error {
 	return s.cli.Save(k, string(v))
 }
 
-func (s MetaStore) SavePartition(info *querypb.PartitionLoadInfo) error {
-	k := encodePartitionLoadInfoKey(info.GetCollectionID(), info.GetPartitionID())
-	v, err := proto.Marshal(info)
-	if err != nil {
-		return err
+func (s MetaStore) SavePartition(info ...*querypb.PartitionLoadInfo) error {
+	kvs := make(map[string]string)
+	for _, partition := range info {
+		key := encodePartitionLoadInfoKey(partition.GetCollectionID(), partition.GetPartitionID())
+		value, err := proto.Marshal(partition)
+		if err != nil {
+			return err
+		}
+		kvs[key] = string(value)
 	}
-	return s.cli.Save(k, string(v))
+	return s.cli.MultiSave(kvs)
 }
 
 func (s MetaStore) SaveReplica(replica *querypb.Replica) error {

@@ -3,14 +3,12 @@ package querycoordv2
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -67,43 +65,21 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		zap.Any("schema", req.Schema),
 		zap.Int32("replica-number", req.ReplicaNumber))
 
-	if s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) != querypb.LoadType_LoadCollection {
-		msg := "a collection with different LoadType existed"
-		log.Error(msg)
-		return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
-	}
-
-	collection := &meta.Collection{
-		CollectionLoadInfo: &querypb.CollectionLoadInfo{
-			CollectionID:  req.GetCollectionID(),
-			ReplicaNumber: req.GetReplicaNumber(),
-			Status:        querypb.LoadStatus_Loading,
-		},
-		CreatedAt: time.Now(),
-	}
-
-	old, ok, err := s.meta.CollectionManager.GetOrPut(req.GetCollectionID(), collection)
-	if err != nil {
-		msg := "failed to store collection"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err), nil
-	}
-	if ok {
-		if old.GetReplicaNumber() != collection.GetReplicaNumber() {
-			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
-			log.Error(msg)
-			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
-		}
-
-		return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
-	}
-
-	status := s.loadCollection(ctx, collection)
+	status := s.preLoadCollection(req)
 	if status.ErrorCode != commonpb.ErrorCode_Success {
-		s.meta.CollectionManager.RemoveCollection(collection.CollectionID)
-		s.meta.ReplicaManager.RemoveCollection(collection.CollectionID)
-		s.targetMgr.RemoveCollection(collection.CollectionID)
+		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
+		return status, nil
 	}
+
+	status = s.loadCollection(ctx, req)
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
+		s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
+		s.targetMgr.RemoveCollection(req.GetCollectionID())
+		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
+	}
+
+	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
 	return status, nil
 }
 
@@ -154,53 +130,25 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 		zap.Int64("collection-id", req.GetCollectionID()),
 	)
 
-	log.Info("received load collection request",
+	log.Info("received load partitions request",
 		zap.Any("schema", req.Schema),
 		zap.Int32("replica-number", req.ReplicaNumber))
 
-	if s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) != querypb.LoadType_LoadPartition {
-		msg := "a collection with different LoadType existed"
-		log.Error(msg)
-		return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
-	}
-
-	partitions := make([]*meta.Partition, len(req.GetPartitionIDs()))
-	for i := range partitions {
-		partitions[i] = &meta.Partition{
-			PartitionLoadInfo: &querypb.PartitionLoadInfo{
-				CollectionID:  req.GetCollectionID(),
-				PartitionID:   req.GetPartitionIDs()[i],
-				ReplicaNumber: req.GetReplicaNumber(),
-				Status:        querypb.LoadStatus_Loading,
-			},
-			CreatedAt: time.Now(),
-		}
-
-		old, ok, err := s.meta.CollectionManager.GetOrPutPartition(partitions[i])
-		if err != nil {
-			msg := "failed to store partition"
-			log.Error(msg, zap.Error(err))
-			return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err), nil
-		}
-		if ok {
-			if old.GetReplicaNumber() != partitions[i].GetReplicaNumber() {
-				msg := "a collection with different replica number existed, release this collection first before changing its replica number"
-				log.Error(msg)
-				return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg), nil
-			}
-
-			return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
-		}
-	}
-
-	status := s.loadPartitions(ctx, partitions...)
+	status := s.preLoadPartition(req)
 	if status.ErrorCode != commonpb.ErrorCode_Success {
-		for _, partition := range partitions {
-			s.meta.CollectionManager.RemovePartition(partition.GetPartitionID())
-		}
-		s.meta.ReplicaManager.RemoveCollection(partitions[0].GetCollectionID())
-		s.targetMgr.RemoveCollection(partitions[0].GetCollectionID())
+		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
+		return status, nil
 	}
+
+	status = s.loadPartitions(ctx, req)
+	if status.ErrorCode != commonpb.ErrorCode_Success {
+		s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
+		s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
+		s.targetMgr.RemoveCollection(req.GetCollectionID())
+		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
+	}
+
+	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
 	return status, nil
 }
 

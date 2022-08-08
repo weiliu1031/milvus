@@ -43,6 +43,31 @@ func (set Set[T]) Insert(elements ...T) {
 	}
 }
 
+// Intersection returns the intersection with the given set
+func (set Set[T]) Intersection(other Set[T]) Set[T] {
+	ret := NewSet[T]()
+	for elem := range set {
+		if other.Contain(elem) {
+			ret.Insert(elem)
+		}
+	}
+	return ret
+}
+
+// Union returns the union with the given set
+func (set Set[T]) Union(other Set[T]) Set[T] {
+	ret := NewSet(set.Collect()...)
+	ret.Insert(other.Collect()...)
+	return ret
+}
+
+// Complement returns the complement with the given set
+func (set Set[T]) Complement(other Set[T]) Set[T] {
+	ret := NewSet(set.Collect()...)
+	ret.Remove(other.Collect()...)
+	return ret
+}
+
 // Check whether the elements exist
 func (set Set[T]) Contain(elements ...T) bool {
 	for i := range elements {
@@ -69,4 +94,9 @@ func (set Set[T]) Collect() []T {
 		elements = append(elements, elem)
 	}
 	return elements
+}
+
+// Len returns the number of elements in the set
+func (set Set[T]) Len() int {
+	return len(set)
 }
