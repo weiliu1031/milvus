@@ -23,6 +23,10 @@ func WrapStatus(code commonpb.ErrorCode, msg string, errs ...error) *commonpb.St
 	return status
 }
 
+func SuccessStatus() *commonpb.Status {
+	return WrapStatus(commonpb.ErrorCode_Success, "")
+}
+
 func SegmentBinlogs2SegmentInfo(collectionID int64, partitionID int64, segmentBinlogs *datapb.SegmentBinlogs) *datapb.SegmentInfo {
 	return &datapb.SegmentInfo{
 		ID:            segmentBinlogs.GetSegmentID(),

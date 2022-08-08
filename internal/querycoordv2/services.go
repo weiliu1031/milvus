@@ -15,10 +15,14 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	successStatus = utils.WrapStatus(commonpb.ErrorCode_Success, "")
+)
+
 func (s *Server) ShowCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
 	log := log.With(zap.Int64("msg-id", req.GetBase().GetMsgID()))
 
-	log.Info("show collections", zap.Int64s("collection-ids", req.GetCollectionIDs()))
+	log.Info("show collections", zap.Int64s("collections", req.GetCollectionIDs()))
 
 	collectionSet := typeutil.NewUniqueSet(req.GetCollectionIDs()...)
 	if len(req.GetCollectionIDs()) == 0 {
@@ -32,7 +36,7 @@ func (s *Server) ShowCollections(ctx context.Context, req *querypb.ShowCollectio
 	collections := collectionSet.Collect()
 
 	resp := &querypb.ShowCollectionsResponse{
-		Status:                utils.WrapStatus(commonpb.ErrorCode_Success, ""),
+		Status:                successStatus,
 		CollectionIDs:         collections,
 		InMemoryPercentages:   make([]int64, len(collectionSet)),
 		QueryServiceAvailable: make([]bool, len(collectionSet)),
@@ -64,6 +68,7 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 	log.Info("received load collection request",
 		zap.Any("schema", req.Schema),
 		zap.Int32("replica-number", req.ReplicaNumber))
+	metrics.QueryCoordLoadCount.WithLabelValues(metrics.TotalLabel).Inc()
 
 	status := s.preLoadCollection(req)
 	if status.ErrorCode != commonpb.ErrorCode_Success {
@@ -89,10 +94,13 @@ func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseColl
 		zap.Int64("collection-id", req.GetCollectionID()),
 	)
 
+	log.Info("release collection")
+	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.TotalLabel).Inc()
+
 	if !s.meta.CollectionManager.Exist(req.GetCollectionID()) {
 		log.Info("release collection end, the collection has not been loaded into QueryNode")
 		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
-		return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
+		return successStatus, nil
 	}
 
 	tr := timerecord.NewTimeRecorder("release-collection")
@@ -117,11 +125,59 @@ func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseColl
 	log.Info("collection removed")
 	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
 	metrics.QueryCoordReleaseLatency.WithLabelValues().Observe(float64(tr.ElapseSpan().Milliseconds()))
-	return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
+	return successStatus, nil
 }
 
 func (s *Server) ShowPartitions(ctx context.Context, req *querypb.ShowPartitionsRequest) (*querypb.ShowPartitionsResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("show partitions", zap.Int64s("partitions", req.GetPartitionIDs()))
+
+	// TODO(yah01): now, for load collection, the percentage of partition is equal to the percentage of collection,
+	// we can calculates the real percentage of partitions
+	percentages := make([]int64, len(req.GetPartitionIDs()))
+	isReleased := false
+	switch s.meta.GetLoadType(req.GetCollectionID()) {
+	case querypb.LoadType_LoadCollection:
+		percentage := s.meta.GetLoadPercentage(req.GetCollectionID())
+		if percentage < 0 {
+			isReleased = true
+			break
+		}
+		for i := range req.GetPartitionIDs() {
+			percentages[i] = int64(percentage)
+		}
+
+	case querypb.LoadType_LoadPartition:
+		for i, partitionID := range req.GetPartitionIDs() {
+			partition := s.meta.GetPartition(partitionID)
+			if partition == nil {
+				isReleased = true
+				break
+			}
+			percentages[i] = int64(partition.LoadPercentage)
+		}
+
+	default:
+		isReleased = true
+	}
+
+	if isReleased {
+		msg := fmt.Sprintf("collection %v not loaded", req.GetCollectionID())
+		log.Warn(msg)
+		return &querypb.ShowPartitionsResponse{
+			Status: utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg),
+		}, nil
+	}
+
+	return &querypb.ShowPartitionsResponse{
+		Status:              successStatus,
+		PartitionIDs:        req.GetPartitionIDs(),
+		InMemoryPercentages: percentages,
+	}, nil
 }
 
 func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) (*commonpb.Status, error) {
@@ -132,7 +188,9 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 
 	log.Info("received load partitions request",
 		zap.Any("schema", req.Schema),
-		zap.Int32("replica-number", req.ReplicaNumber))
+		zap.Int32("replica-number", req.ReplicaNumber),
+		zap.Int64s("partitions", req.GetPartitionIDs()))
+	metrics.QueryCoordLoadCount.WithLabelValues(metrics.TotalLabel).Inc()
 
 	status := s.preLoadPartition(req)
 	if status.ErrorCode != commonpb.ErrorCode_Success {
@@ -150,6 +208,7 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
 	return status, nil
+
 }
 
 func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error) {
