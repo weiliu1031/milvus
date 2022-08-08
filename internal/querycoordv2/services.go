@@ -6,11 +6,13 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/internal/util/timerecord"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 )
@@ -106,7 +108,40 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 }
 
 func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	if !s.meta.CollectionManager.Exist(req.GetCollectionID()) {
+		log.Info("release collection end, the collection has not been loaded into QueryNode")
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
+	}
+
+	tr := timerecord.NewTimeRecorder("release-collection")
+	err := s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
+	if err != nil {
+		msg := "failed to remove collection"
+		log.Error(msg, zap.Error(err))
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
+	}
+
+	err = s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
+	if err != nil {
+		msg := "failed to remove replicas"
+		log.Error(msg, zap.Error(err))
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
+	}
+
+	s.targetMgr.RemoveCollection(req.GetCollectionID())
+
+	log.Info("collection removed")
+	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
+	metrics.QueryCoordReleaseLatency.WithLabelValues().Observe(float64(tr.ElapseSpan().Milliseconds()))
+	return utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil
 }
 
 func (s *Server) ShowPartitions(ctx context.Context, req *querypb.ShowPartitionsRequest) (*querypb.ShowPartitionsResponse, error) {

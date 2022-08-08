@@ -124,15 +124,16 @@ func diffSet(targets []*datapb.SegmentInfo, dists []*meta.Segment) (lacks []*dat
 
 func findRepeatedSegments(dists []*meta.Segment) []*meta.Segment {
 	ret := make([]*meta.Segment, 0)
-	versionMap := make(map[int64]*meta.Segment)
+	versions := make(map[int64]*meta.Segment)
 	for _, s := range dists {
-		maxVer, ok := versionMap[s.GetID()]
+		maxVer, ok := versions[s.GetID()]
 		if !ok {
-			versionMap[s.GetID()] = s
+			versions[s.GetID()] = s
 			continue
 		}
 		if maxVer.Version <= s.Version {
 			ret = append(ret, maxVer)
+			versions[s.GetID()] = s
 		} else {
 			ret = append(ret, s)
 		}

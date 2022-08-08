@@ -101,16 +101,21 @@ func (m *ReplicaManager) Remove(ids ...UniqueID) error {
 }
 
 // RemoveCollection removes replicas of given collection,
-// this operation is slower than Remove, use Remove if the replicas' ID is known
-func (m *ReplicaManager) RemoveCollection(collectionID UniqueID) {
+// returns error if failed to remove replica from KV
+func (m *ReplicaManager) RemoveCollection(collectionID UniqueID) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
+	err := m.store.ReleaseReplicas(collectionID)
+	if err != nil {
+		return err
+	}
 	for id, replica := range m.replicas {
 		if replica.CollectionID == collectionID {
 			delete(m.replicas, id)
 		}
 	}
+	return nil
 }
 
 func (m *ReplicaManager) GetByCollection(collectionID UniqueID) []*Replica {

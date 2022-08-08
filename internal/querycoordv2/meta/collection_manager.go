@@ -130,6 +130,21 @@ func (m *CollectionManager) GetLoadPercentage(id UniqueID) int32 {
 	return -1
 }
 
+func (m *CollectionManager) Exist(id UniqueID) bool {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	_, ok := m.collections[id]
+	if ok {
+		return true
+	}
+	partitions := m.getPartitionsByCollection(id)
+	if len(partitions) > 0 {
+		return true
+	}
+	return false
+}
+
 func (m *CollectionManager) GetAllCollections() []*Collection {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
@@ -226,17 +241,20 @@ func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 	defer m.rwmutex.Unlock()
 
 	_, ok := m.collections[id]
-	if !ok {
+	if ok {
+		err := m.store.ReleaseCollection(id)
+		if err != nil {
+			return err
+		}
+		delete(m.collections, id)
 		return nil
 	}
 
-	err := m.store.ReleaseCollection(id)
-	if err != nil {
-		return err
-	}
-	delete(m.collections, id)
-
-	return nil
+	partitions := lo.Map(m.getPartitionsByCollection(id),
+	func(partition *Partition, _ int) int64 {
+			return partition.GetPartitionID()
+		})
+	return m.removePartition(partitions...)
 }
 
 func (m *CollectionManager) PutPartition(partition *Partition) error {
@@ -265,20 +283,22 @@ func (m *CollectionManager) putPartition(partition *Partition, withSave bool) er
 	return nil
 }
 
-func (m *CollectionManager) RemovePartition(id UniqueID) error {
+func (m *CollectionManager) RemovePartition(ids ...UniqueID) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	partition, ok := m.parttions[id]
-	if !ok {
-		return nil
-	}
+	return m.removePartition(ids...)
+}
 
-	err := m.store.ReleasePartition(partition.CollectionID, partition.PartitionID)
+func (m *CollectionManager) removePartition(ids ...UniqueID) error {
+	partition := m.parttions[ids[0]]
+	err := m.store.ReleasePartition(partition.CollectionID, ids...)
 	if err != nil {
 		return err
 	}
-	delete(m.parttions, id)
+	for _, id := range ids {
+		delete(m.parttions, id)
+	}
 
 	return nil
 }

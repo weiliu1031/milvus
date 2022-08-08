@@ -7,6 +7,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/samber/lo"
 )
 
 var (
@@ -28,7 +29,7 @@ type Store interface {
 	GetPartitions() ([]*querypb.PartitionLoadInfo, error)
 	GetReplicas(collectionID int64) ([]*querypb.Replica, error)
 	ReleaseCollection(id int64) error
-	ReleasePartition(collection, partition int64) error
+	ReleasePartition(collection int64, partitions ...int64) error
 	ReleaseReplicas(collectionID int64) error
 	ReleaseReplica(collection, replica int64) error
 }
@@ -123,9 +124,11 @@ func (s MetaStore) ReleaseCollection(id int64) error {
 	return s.cli.Remove(k)
 }
 
-func (s MetaStore) ReleasePartition(collection, partition int64) error {
-	k := encodePartitionLoadInfoKey(collection, partition)
-	return s.cli.Remove(k)
+func (s MetaStore) ReleasePartition(collection int64, partitions ...int64) error {
+	keys := lo.Map(partitions, func(partition int64, _ int) string {
+		return encodePartitionLoadInfoKey(collection, partition)
+	})
+	return s.cli.MultiRemove(keys)
 }
 
 func (s MetaStore) ReleaseReplicas(collectionID int64) error {
@@ -134,7 +137,7 @@ func (s MetaStore) ReleaseReplicas(collectionID int64) error {
 }
 
 func (s MetaStore) ReleaseReplica(collection, replica int64) error {
-	key := encodeReplicaKey(collection,replica)
+	key := encodeReplicaKey(collection, replica)
 	return s.cli.Remove(key)
 }
 
