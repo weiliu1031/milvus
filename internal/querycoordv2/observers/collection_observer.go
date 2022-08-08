@@ -16,39 +16,49 @@ const (
 )
 
 type CollectionObserver struct {
-	ctx context.Context
-
+	stopCh    chan struct{}
 	dist      *meta.DistributionManager
 	meta      *meta.Meta
 	targetMgr *meta.TargetManager
 }
 
 func NewCollectionObserver(
-	ctx context.Context,
 	dist *meta.DistributionManager,
 	meta *meta.Meta,
 	targetMgr *meta.TargetManager,
 ) *CollectionObserver {
 	return &CollectionObserver{
-		ctx:       ctx,
+		stopCh:    make(chan struct{}),
 		dist:      dist,
 		meta:      meta,
 		targetMgr: targetMgr,
 	}
 }
 
-func (observer *CollectionObserver) Start() {
+func (observer *CollectionObserver) Start(ctx context.Context) {
+	const observePeriod = time.Second
 	go func() {
+		ticker := time.NewTicker(observePeriod)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-observer.ctx.Done():
-				log.Info("CollectionObserver stopped")
+			case <-ctx.Done():
+				log.Info("CollectionObserver stopped due to context canceled")
+				return
 
-			default:
+			case <-observer.stopCh:
+				log.Info("CollectionObserver stopped")
+				return
+
+			case <-ticker.C:
 				observer.Observe()
 			}
 		}
 	}()
+}
+
+func (observer *CollectionObserver) Stop() {
+	close(observer.stopCh)
 }
 
 func (observer *CollectionObserver) Observe() {
