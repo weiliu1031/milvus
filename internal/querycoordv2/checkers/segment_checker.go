@@ -8,6 +8,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 )
 
 type SegmentChecker struct {
@@ -43,7 +44,7 @@ func (c *SegmentChecker) Description() string {
 func (c *SegmentChecker) Check(ctx context.Context) []task.Task {
 	collections := c.meta.CollectionManager.GetAllCollections()
 	partitions := c.meta.CollectionManager.GetAllPartitions()
-	collectionIDs := collect(collections, partitions)
+	collectionIDs := utils.Collect(collections, partitions)
 	tasks := make([]task.Task, 0)
 	for _, cid := range collectionIDs {
 		replicas := c.meta.ReplicaManager.GetByCollection(cid)
@@ -54,42 +55,22 @@ func (c *SegmentChecker) Check(ctx context.Context) []task.Task {
 	return tasks
 }
 
-func collect(collections []*meta.Collection, partitions []*meta.Partition) []int64 {
-	var ret []int64
-	m := make(map[int64]struct{})
-	ret, m = ids(collections, ret, m)
-	ret, m = ids(partitions, ret, m)
-	return ret
-}
-
-func ids[E interface{ GetCollectionID() int64 }](elems []E, res []int64, filter map[int64]struct{}) ([]int64, map[int64]struct{}) {
-	for _, e := range elems {
-		id := e.GetCollectionID()
-		if _, ok := filter[id]; ok {
-			continue
-		}
-		res = append(res, id)
-		filter[id] = struct{}{}
-	}
-	return res, filter
-}
-
 func (c *SegmentChecker) checkReplica(replica *meta.Replica) []task.Task {
 	ret := make([]task.Task, 0)
 	targets := c.targetMgr.GetSegmentsByCollection(replica.CollectionID)
 	dists := c.getSegmentsDist(replica)
 
 	// compare with targets to find the lack and redundancy of segments
-	lacks, redundancies := diffSet(targets, dists)
-	tasks := createLoadTasks(c.balancer, lacks, replica)
+	lacks, redundancies := diffSegments(targets, dists)
+	tasks := createSegmentLoadTasks(c.balancer, lacks, replica)
 	ret = append(ret, tasks...)
 
-	tasks = createReduceTasks(redundancies)
+	tasks = createSegmentReduceTasks(redundancies)
 	ret = append(ret, tasks...)
 
 	// compare inner dists to find repeated loaded segments
 	redundancies = findRepeatedSegments(dists)
-	tasks = createReduceTasks(redundancies)
+	tasks = createSegmentReduceTasks(redundancies)
 	ret = append(ret, tasks...)
 	return ret
 }
@@ -102,7 +83,7 @@ func (c *SegmentChecker) getSegmentsDist(replica *meta.Replica) []*meta.Segment 
 	return ret
 }
 
-func diffSet(targets []*datapb.SegmentInfo, dists []*meta.Segment) (lacks []*datapb.SegmentInfo, redundancies []*meta.Segment) {
+func diffSegments(targets []*datapb.SegmentInfo, dists []*meta.Segment) (lacks []*datapb.SegmentInfo, redundancies []*meta.Segment) {
 	distMap := make(map[int64]struct{})
 	targetMap := make(map[int64]struct{})
 	for _, s := range targets {
@@ -141,12 +122,12 @@ func findRepeatedSegments(dists []*meta.Segment) []*meta.Segment {
 	return ret
 }
 
-func createLoadTasks(balancer balance.Balance, segments []*datapb.SegmentInfo, replica *meta.Replica) []task.Task {
+func createSegmentLoadTasks(balancer balance.Balance, segments []*datapb.SegmentInfo, replica *meta.Replica) []task.Task {
 	// TODO(sunby)
 	return nil
 }
 
-func createReduceTasks(segments []*meta.Segment) []task.Task {
+func createSegmentReduceTasks(segments []*meta.Segment) []task.Task {
 	// TODO(sunby)
 	return nil
 
