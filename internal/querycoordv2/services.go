@@ -212,7 +212,66 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 }
 
 func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("release partitions", zap.Int64s("partition-ids", req.GetPartitionIDs()))
+	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.TotalLabel).Inc()
+
+	if len(req.GetPartitionIDs()) == 0 {
+		msg := "partitions is empty"
+		log.Warn(msg)
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
+	}
+
+	tr := timerecord.NewTimeRecorder("release-partitions")
+	loadedPartitions := s.meta.CollectionManager.GetPartitionsByCollection(req.GetCollectionID())
+	partitionIDs := typeutil.NewUniqueSet(req.GetPartitionIDs()...)
+	toRelease := make([]int64, 0)
+	switch s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) {
+	case querypb.LoadType_LoadPartition:
+		for _, partition := range loadedPartitions {
+			if partitionIDs.Contain(partition.GetPartitionID()) {
+				toRelease = append(toRelease, partition.GetPartitionID())
+			}
+		}
+
+	case querypb.LoadType_LoadCollection:
+		msg := "releasing some partitions after load collection is not supported"
+		log.Warn(msg)
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
+	}
+
+	if len(toRelease) == len(loadedPartitions) { // All partitions are released, clear all
+		err := s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
+		if err != nil {
+			msg := "failed to release partitions"
+			log.Warn(msg, zap.Error(err))
+			metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+			return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
+		}
+		s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
+		s.targetMgr.RemoveCollection(req.GetCollectionID())
+	} else {
+		err := s.meta.CollectionManager.RemovePartition(toRelease...)
+		if err != nil {
+			msg := "failed to release partitions"
+			log.Warn(msg, zap.Error(err))
+			metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+			return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
+		}
+		for _, partition := range toRelease {
+			s.targetMgr.RemovePartition(partition)
+		}
+	}
+
+	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
+	metrics.QueryCoordReleaseLatency.WithLabelValues().Observe(float64(tr.ElapseSpan().Milliseconds()))
+	return successStatus, nil
 }
 
 func (s *Server) GetPartitionStates(ctx context.Context, req *querypb.GetPartitionStatesRequest) (*querypb.GetPartitionStatesResponse, error) {

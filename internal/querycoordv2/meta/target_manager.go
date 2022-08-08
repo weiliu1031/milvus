@@ -45,7 +45,7 @@ func (mgr *TargetManager) RemovePartition(partitionID int64) {
 	defer mgr.rwmutex.Unlock()
 
 	for _, segment := range mgr.segments {
-		if segment.CollectionID == partitionID {
+		if segment.GetPartitionID() == partitionID {
 			delete(mgr.segments, segment.ID)
 		}
 	}
