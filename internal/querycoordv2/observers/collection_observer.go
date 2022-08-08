@@ -99,107 +99,116 @@ func (observer *CollectionObserver) observeTimeout() {
 }
 
 func (observer *CollectionObserver) observeLoadStatus() {
-	observer.observeCollectionLoadStatus()
-	observer.observePartitionLoadStatus()
-}
-
-func (observer *CollectionObserver) observeCollectionLoadStatus() {
 	collections := observer.meta.CollectionManager.GetAllCollections()
 	log.Info("observe collections status", zap.Int("collection-num", len(collections)))
 	for _, collection := range collections {
 		if collection.GetStatus() != querypb.LoadStatus_Loading {
 			continue
 		}
-		log := log.With(zap.Int64("collection-id", collection.GetCollectionID()))
-
-		segmentTargets := observer.targetMgr.GetSegmentsByCollection(collection.GetCollectionID())
-		channelTargets := observer.targetMgr.GetDmChannelsByCollection(collection.GetCollectionID())
-		targetNum := len(segmentTargets) + len(channelTargets)
-		log.Info("collection targets",
-			zap.Int("segment-target-num", len(segmentTargets)),
-			zap.Int("channel-target-num", len(channelTargets)),
-			zap.Int("total-target-num", targetNum))
-
-		loadedCount := 0
-		for _, segment := range segmentTargets {
-			group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
-				collection.GetCollectionID(),
-				observer.dist.LeaderViewManager.GetSegmentDist(segment.GetID()))
-			if len(group) >= int(collection.GetReplicaNumber()) {
-				loadedCount++
-			}
-		}
-		for _, channel := range channelTargets {
-			group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
-				collection.GetCollectionID(),
-				observer.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
-			if len(group) >= int(collection.GetReplicaNumber()) {
-				loadedCount++
-			}
-		}
-
-		collection = collection.Clone()
-		collection.LoadPercentage = int32(loadedCount / targetNum)
-		if loadedCount >= len(segmentTargets)+len(channelTargets) {
-			collection.Status = querypb.LoadStatus_Loaded
-			observer.meta.CollectionManager.PutCollection(collection)
-		} else {
-			observer.meta.CollectionManager.PutCollectionWithoutSave(collection)
-		}
-		log.Info("collection load status updated",
-			zap.Int32("load-percentage", collection.LoadPercentage),
-			zap.Int32("collection-status", int32(collection.GetStatus())))
+		observer.observeCollectionLoadStatus(collection)
 	}
-}
 
-func (observer *CollectionObserver) observePartitionLoadStatus() {
 	partitions := observer.meta.CollectionManager.GetAllPartitions()
 	log.Info("observe partitions status", zap.Int("collection-num", len(partitions)))
 	for _, partition := range partitions {
 		if partition.GetStatus() != querypb.LoadStatus_Loading {
 			continue
 		}
-		log := log.With(
-			zap.Int64("collection-id", partition.GetCollectionID()),
-			zap.Int64("partition-id", partition.GetPartitionID()),
-		)
-
-		segmentTargets := observer.targetMgr.GetSegmentsByCollection(partition.GetCollectionID(), partition.GetPartitionID())
-		channelTargets := observer.targetMgr.GetDmChannelsByCollection(partition.GetCollectionID())
-		targetNum := len(segmentTargets) + len(channelTargets)
-		log.Info("partition targets",
-			zap.Int("segment-target-num", len(segmentTargets)),
-			zap.Int("channel-target-num", len(channelTargets)),
-			zap.Int("total-target-num", targetNum))
-
-		loadedCount := 0
-		for _, segment := range segmentTargets {
-			group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
-				partition.GetCollectionID(),
-				observer.dist.LeaderViewManager.GetSegmentDist(segment.GetID()))
-			if len(group) >= int(partition.GetReplicaNumber()) {
-				loadedCount++
-			}
-		}
-		for _, channel := range channelTargets {
-			group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
-				partition.GetCollectionID(),
-				observer.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
-			if len(group) >= int(partition.GetReplicaNumber()) {
-				loadedCount++
-			}
-		}
-
-		partition = partition.Clone()
-		partition.LoadPercentage = int32(loadedCount / targetNum)
-		if loadedCount >= len(segmentTargets)+len(channelTargets) {
-			partition.Status = querypb.LoadStatus_Loaded
-			observer.meta.CollectionManager.PutPartition(partition)
-		} else {
-			observer.meta.CollectionManager.PutPartitionWithoutSave(partition)
-		}
-		log.Info("partition load status updated",
-			zap.Int32("load-percentage", partition.LoadPercentage),
-			zap.Int32("partition-status", int32(partition.GetStatus())))
+		observer.observePartitionLoadStatus(partition)
 	}
+}
+
+func (observer *CollectionObserver) observeCollectionLoadStatus(collection *meta.Collection) {
+	log := log.With(zap.Int64("collection-id", collection.GetCollectionID()))
+
+	segmentTargets := observer.targetMgr.GetSegmentsByCollection(collection.GetCollectionID())
+	channelTargets := observer.targetMgr.GetDmChannelsByCollection(collection.GetCollectionID())
+	targetNum := len(segmentTargets) + len(channelTargets)
+	log.Info("collection targets",
+		zap.Int("segment-target-num", len(segmentTargets)),
+		zap.Int("channel-target-num", len(channelTargets)),
+		zap.Int("total-target-num", targetNum))
+	if targetNum == 0 {
+		log.Info("load collection failed, will clear it later")
+		return
+	}
+
+	loadedCount := 0
+	for _, segment := range segmentTargets {
+		group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
+			collection.GetCollectionID(),
+			observer.dist.LeaderViewManager.GetSegmentDist(segment.GetID()))
+		if len(group) >= int(collection.GetReplicaNumber()) {
+			loadedCount++
+		}
+	}
+	for _, channel := range channelTargets {
+		group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
+			collection.GetCollectionID(),
+			observer.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
+		if len(group) >= int(collection.GetReplicaNumber()) {
+			loadedCount++
+		}
+	}
+
+	collection = collection.Clone()
+	collection.LoadPercentage = int32(loadedCount / targetNum)
+	if loadedCount >= len(segmentTargets)+len(channelTargets) {
+		collection.Status = querypb.LoadStatus_Loaded
+		observer.meta.CollectionManager.PutCollection(collection)
+	} else {
+		observer.meta.CollectionManager.PutCollectionWithoutSave(collection)
+	}
+	log.Info("collection load status updated",
+		zap.Int32("load-percentage", collection.LoadPercentage),
+		zap.Int32("collection-status", int32(collection.GetStatus())))
+}
+
+func (observer *CollectionObserver) observePartitionLoadStatus(partition *meta.Partition) {
+	log := log.With(
+		zap.Int64("collection-id", partition.GetCollectionID()),
+		zap.Int64("partition-id", partition.GetPartitionID()),
+	)
+
+	segmentTargets := observer.targetMgr.GetSegmentsByCollection(partition.GetCollectionID(), partition.GetPartitionID())
+	channelTargets := observer.targetMgr.GetDmChannelsByCollection(partition.GetCollectionID())
+	targetNum := len(segmentTargets) + len(channelTargets)
+	log.Info("partition targets",
+		zap.Int("segment-target-num", len(segmentTargets)),
+		zap.Int("channel-target-num", len(channelTargets)),
+		zap.Int("total-target-num", targetNum))
+	if targetNum == 0 {
+		log.Info("load partition failed, will clear it later")
+		return
+	}
+
+	loadedCount := 0
+	for _, segment := range segmentTargets {
+		group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
+			partition.GetCollectionID(),
+			observer.dist.LeaderViewManager.GetSegmentDist(segment.GetID()))
+		if len(group) >= int(partition.GetReplicaNumber()) {
+			loadedCount++
+		}
+	}
+	for _, channel := range channelTargets {
+		group := utils.GroupNodesByReplica(observer.meta.ReplicaManager,
+			partition.GetCollectionID(),
+			observer.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
+		if len(group) >= int(partition.GetReplicaNumber()) {
+			loadedCount++
+		}
+	}
+
+	partition = partition.Clone()
+	partition.LoadPercentage = int32(loadedCount / targetNum)
+	if loadedCount >= len(segmentTargets)+len(channelTargets) {
+		partition.Status = querypb.LoadStatus_Loaded
+		observer.meta.CollectionManager.PutPartition(partition)
+	} else {
+		observer.meta.CollectionManager.PutPartitionWithoutSave(partition)
+	}
+	log.Info("partition load status updated",
+		zap.Int32("load-percentage", partition.LoadPercentage),
+		zap.Int32("partition-status", int32(partition.GetStatus())))
 }
