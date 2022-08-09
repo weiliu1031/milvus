@@ -89,15 +89,9 @@ func (mgr *LeaderViewManager) GetChannelDist(channel string) []int64 {
 	return nodes
 }
 
-func (mgr *LeaderViewManager) GetLeaderView(shard string) []*LeaderView {
+func (mgr *LeaderViewManager) GetLeaderView(id int64) *LeaderView {
 	mgr.rwmutex.RLock()
 	defer mgr.rwmutex.RUnlock()
 
-	leaders := make([]*LeaderView, 0)
-	for _, view := range mgr.views {
-		if view.Channel == shard {
-			leaders = append(leaders, view)
-		}
-	}
-	return leaders
+	return mgr.views[id]
 }
