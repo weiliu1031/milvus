@@ -161,16 +161,24 @@ func (scheduler *Scheduler) Add(task Task) error {
 
 	task.SetID(scheduler.idAllocator())
 	scheduler.tasks.Insert(task.ID())
-
+	log := log.With(
+		zap.Int64("source-id", task.SourceID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.Int32("priority", task.Priority()),
+	)
 	switch task := task.(type) {
 	case *SegmentTask:
 		index := replicaSegmentIndex{task.ReplicaID(), task.segmentID}
 		scheduler.segmentTasks[index] = task
+		log.Info("task added", zap.Int64("segment-id", task.SegmentID()))
 
 	case *ChannelTask:
 		index := replicaChannelIndex{task.ReplicaID(), task.channel}
 		scheduler.channelTasks[index] = task
+		log.Info("task added", zap.String("channel", task.Channel()))
 	}
+	scheduler.waitQueue.Add(task)
 
 	return nil
 }
@@ -178,10 +186,23 @@ func (scheduler *Scheduler) Add(task Task) error {
 // check checks whether the task is valid to add,
 // must hold lock
 func (scheduler *Scheduler) preAdd(task Task) error {
+	if scheduler.waitQueue.Len() >= scheduler.waitQueue.Cap() {
+		return ErrTaskQueueFull
+	}
+
 	switch task := task.(type) {
 	case *SegmentTask:
 		index := replicaSegmentIndex{task.ReplicaID(), task.segmentID}
 		if old, ok := scheduler.segmentTasks[index]; ok {
+			if task.Priority() > old.Priority() {
+				log.Info("replace old task, the new one with higher priority",
+					zap.Int64("old-id", old.ID()),
+					zap.Int32("old-priority", old.Priority()),
+					zap.Int64("new-id", task.ID()),
+					zap.Int32("new-priority", task.Priority()),
+				)
+				return nil
+			}
 			log.Warn("failed to add task, a task processing the same segment existed",
 				zap.Int64("old-id", old.ID()),
 				zap.Int32("old-status", old.Status()))
@@ -192,6 +213,15 @@ func (scheduler *Scheduler) preAdd(task Task) error {
 	case *ChannelTask:
 		index := replicaChannelIndex{task.ReplicaID(), task.channel}
 		if old, ok := scheduler.channelTasks[index]; ok {
+			if task.Priority() > old.Priority() {
+				log.Info("replace old task, the new one with higher priority",
+					zap.Int64("old-id", old.ID()),
+					zap.Int32("old-priority", old.Priority()),
+					zap.Int64("new-id", task.ID()),
+					zap.Int32("new-priority", task.Priority()),
+				)
+				return nil
+			}
 			log.Warn("failed to add task, a task processing the same channel existed",
 				zap.Int64("old-id", old.ID()),
 				zap.Int32("old-status", old.Status()))
@@ -207,8 +237,15 @@ func (scheduler *Scheduler) preAdd(task Task) error {
 }
 
 func (scheduler *Scheduler) promote(task Task) error {
+	log := log.With(
+		zap.Int64("source-id", task.SourceID()),
+		zap.Int64("collection-id", task.CollectionID()),
+		zap.Int64("replica-id", task.ReplicaID()),
+		zap.Int64("task-id", task.ID()),
+	)
 	err := scheduler.prePromote(task)
 	if err != nil {
+		log.Info("failed to promote task", zap.Error(err))
 		return err
 	}
 
@@ -217,6 +254,7 @@ func (scheduler *Scheduler) promote(task Task) error {
 		return nil
 	}
 
+	log.Info("failed to promote task, will retry later", zap.Error(ErrTaskQueueFull))
 	return ErrTaskQueueFull
 }
 
@@ -319,7 +357,7 @@ func (scheduler *Scheduler) schedule(node int64) {
 // return true if the task is started and succeeds to commit the current action
 func (scheduler *Scheduler) process(task Task) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.SourceID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()))
 
 	if scheduler.checkTimeout(task) {
@@ -391,7 +429,7 @@ func (scheduler *Scheduler) remove(task Task) {
 
 func (scheduler *Scheduler) checkTimeout(task Task) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.SourceID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()))
 
 	select {
@@ -406,7 +444,7 @@ func (scheduler *Scheduler) checkTimeout(task Task) bool {
 
 func (scheduler *Scheduler) checkStale(task Task) bool {
 	log := log.With(
-		zap.Int64("msg-id", task.SourceID()),
+		zap.Int64("source-id", task.SourceID()),
 		zap.Int64("task-id", task.ID()))
 
 	switch task := task.(type) {
