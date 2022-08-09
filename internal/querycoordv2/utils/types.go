@@ -23,10 +23,6 @@ func WrapStatus(code commonpb.ErrorCode, msg string, errs ...error) *commonpb.St
 	return status
 }
 
-func SuccessStatus() *commonpb.Status {
-	return WrapStatus(commonpb.ErrorCode_Success, "")
-}
-
 func SegmentBinlogs2SegmentInfo(collectionID int64, partitionID int64, segmentBinlogs *datapb.SegmentBinlogs) *datapb.SegmentInfo {
 	return &datapb.SegmentInfo{
 		ID:            segmentBinlogs.GetSegmentID(),
@@ -37,6 +33,24 @@ func SegmentBinlogs2SegmentInfo(collectionID int64, partitionID int64, segmentBi
 		Binlogs:       segmentBinlogs.GetFieldBinlogs(),
 		Statslogs:     segmentBinlogs.GetStatslogs(),
 		Deltalogs:     segmentBinlogs.GetDeltalogs(),
+	}
+}
+
+func MergeMetaSegmentIntoSegmentInfo(info *querypb.SegmentInfo, segments ...*meta.Segment) {
+	first := segments[0]
+	if info.GetSegmentID() == 0 {
+		*info = querypb.SegmentInfo{
+			SegmentID:    first.GetID(),
+			CollectionID: first.GetCollectionID(),
+			PartitionID:  first.GetPartitionID(),
+			NumRows:      first.GetNumOfRows(),
+			DmChannel:    first.GetInsertChannel(),
+			NodeIds:      make([]int64, 0),
+		}
+	}
+
+	for _, segment := range segments {
+		info.NodeIds = append(info.NodeIds, segment.Node)
 	}
 }
 

@@ -215,3 +215,18 @@ func (s *Server) checkAnyReplicaAvailable(collectionID int64) bool {
 	}
 	return false
 }
+
+func (s *Server) getAllSegmentInfo() []*querypb.SegmentInfo {
+	segments := s.dist.SegmentDistManager.GetAll()
+	infos := make(map[int64]*querypb.SegmentInfo)
+	for _, segment := range segments {
+		info, ok := infos[segment.GetID()]
+		if !ok {
+			info = &querypb.SegmentInfo{}
+			infos[segment.GetID()] = info
+		}
+		utils.MergeMetaSegmentIntoSegmentInfo(info, segment)
+	}
+
+	return lo.Values(infos)
+}

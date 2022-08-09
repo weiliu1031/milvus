@@ -336,7 +336,36 @@ func (s *Server) GetPartitionStates(ctx context.Context, req *querypb.GetPartiti
 }
 
 func (s *Server) GetSegmentInfo(ctx context.Context, req *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("get segment info", zap.Int64s("segment-ids", req.GetSegmentIDs()))
+
+	infos := make([]*querypb.SegmentInfo, 0, len(req.GetSegmentIDs()))
+	if len(req.GetSegmentIDs()) == 0 {
+		infos = s.getAllSegmentInfo()
+	} else {
+		for _, segmentID := range req.GetSegmentIDs() {
+			segments := s.dist.SegmentDistManager.Get(segmentID)
+			if len(segments) == 0 {
+				msg := fmt.Sprintf("segment %v not found in any node", segmentID)
+				log.Warn(msg, zap.Int64("segment-id", segmentID))
+				return &querypb.GetSegmentInfoResponse{
+					Status: utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg),
+				}, nil
+			}
+			info := &querypb.SegmentInfo{}
+			utils.MergeMetaSegmentIntoSegmentInfo(info, segments...)
+			infos = append(infos, info)
+		}
+	}
+
+	return &querypb.GetSegmentInfoResponse{
+		Status: successStatus,
+		Infos:  infos,
+	}, nil
 }
 
 func (s *Server) LoadBalance(ctx context.Context, req *querypb.LoadBalanceRequest) (*commonpb.Status, error) {

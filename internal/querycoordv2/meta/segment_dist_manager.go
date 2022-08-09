@@ -36,6 +36,21 @@ func (m *SegmentDistManager) Update(nodeID UniqueID, segments ...*Segment) {
 	m.segments[nodeID] = segments
 }
 
+func (m *SegmentDistManager) Get(id UniqueID) []*Segment {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	ret := make([]*Segment, 0)
+	for _, segments := range m.segments {
+		for _, segment := range segments {
+			if segment.GetID() == id {
+				ret = append(ret, segment)
+			}
+		}
+	}
+	return ret
+}
+
 // GetAll returns all segments
 func (m *SegmentDistManager) GetAll() []*Segment {
 	m.rwmutex.RLock()
