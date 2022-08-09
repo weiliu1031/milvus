@@ -2,21 +2,35 @@ package meta
 
 import "sync"
 
-type leaderView struct {
+type LeaderView struct {
 	ID           int64
 	CollectionID int64
 	Channel      string
 	Segments     map[int64]int64 // SegmentID -> NodeID
 }
 
+func (view *LeaderView) Clone() *LeaderView {
+	segments := make(map[int64]int64)
+	for k, v := range view.Segments {
+		segments[k] = v
+	}
+
+	return &LeaderView{
+		ID:           view.ID,
+		CollectionID: view.CollectionID,
+		Channel:      view.Channel,
+		Segments:     segments,
+	}
+}
+
 type LeaderViewManager struct {
 	rwmutex sync.RWMutex
-	views   map[int64]*leaderView
+	views   map[int64]*LeaderView
 }
 
 func NewLeaderViewManager() *LeaderViewManager {
 	return &LeaderViewManager{
-		views: make(map[int64]*leaderView),
+		views: make(map[int64]*LeaderView),
 	}
 }
 
@@ -39,7 +53,7 @@ func (mgr *LeaderViewManager) Update(leaderID int64, channel string, segments ma
 	mgr.rwmutex.Lock()
 	defer mgr.rwmutex.Unlock()
 
-	mgr.views[leaderID] = &leaderView{
+	mgr.views[leaderID] = &LeaderView{
 		ID:       leaderID,
 		Channel:  channel,
 		Segments: segments,
@@ -73,4 +87,17 @@ func (mgr *LeaderViewManager) GetChannelDist(channel string) []int64 {
 		}
 	}
 	return nodes
+}
+
+func (mgr *LeaderViewManager) GetLeaderView(shard string) []*LeaderView {
+	mgr.rwmutex.RLock()
+	defer mgr.rwmutex.RUnlock()
+
+	leaders := make([]*LeaderView, 0)
+	for _, view := range mgr.views {
+		if view.Channel == shard {
+			leaders = append(leaders, view)
+		}
+	}
+	return leaders
 }

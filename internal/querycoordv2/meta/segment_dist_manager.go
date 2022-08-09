@@ -96,6 +96,22 @@ func (m *SegmentDistManager) GetByCollection(collectionID UniqueID) []*Segment {
 	return ret
 }
 
+// GetByShard returns all segments of the given collection.
+func (m *SegmentDistManager) GetByShard(shard string) []*Segment {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	ret := make([]*Segment, 0)
+	for _, segments := range m.segments {
+		for _, segment := range segments {
+			if segment.GetInsertChannel() == shard {
+				ret = append(ret, segment)
+			}
+		}
+	}
+	return ret
+}
+
 // GetByCollectionAndNode returns all segments of the given collection and node.
 func (m *SegmentDistManager) GetByCollectionAndNode(collectionID, nodeID UniqueID) []*Segment {
 	m.rwmutex.RLock()

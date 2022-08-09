@@ -56,6 +56,21 @@ func GroupNodesByReplica(replicaMgr *meta.ReplicaManager, collectionID int64, no
 	return ret
 }
 
+// GroupSegmentsByReplica groups segments by replica,
+// returns ReplicaID -> Segments
+func GroupSegmentsByReplica(replicaMgr *meta.ReplicaManager, collectionID int64, segments []*meta.Segment) map[int64][]*meta.Segment {
+	ret := make(map[int64][]*meta.Segment)
+	replicas := replicaMgr.GetByCollection(collectionID)
+	for _, replica := range replicas {
+		for _, segment := range segments {
+			if replica.Nodes.Contain(segment.Node) {
+				ret[replica.ID] = append(ret[replica.ID], segment)
+			}
+		}
+	}
+	return ret
+}
+
 // AssignNodesToReplicas assigns nodes to the given replicas,
 // all given replicas must be the same collection,
 // the given replicas have to be not in ReplicaManager
