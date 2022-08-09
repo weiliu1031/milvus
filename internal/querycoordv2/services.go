@@ -275,7 +275,64 @@ func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePart
 }
 
 func (s *Server) GetPartitionStates(ctx context.Context, req *querypb.GetPartitionStatesRequest) (*querypb.GetPartitionStatesResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("get partition states", zap.Int64s("partition-ids", req.GetPartitionIDs()))
+
+	msg := "partition not loaded"
+	notLoadResp := &querypb.GetPartitionStatesResponse{
+		Status: utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg),
+	}
+
+	states := make([]*querypb.PartitionStates, 0, len(req.GetPartitionIDs()))
+	switch s.meta.GetLoadType(req.GetCollectionID()) {
+	case querypb.LoadType_LoadCollection:
+		collection := s.meta.GetCollection(req.GetCollectionID())
+		state := querypb.PartitionState_PartialInMemory
+		if collection.LoadPercentage >= 100 {
+			state = querypb.PartitionState_InMemory
+		}
+		releasedPartitions := typeutil.NewUniqueSet(collection.GetReleasedPartitions()...)
+		for _, partition := range req.GetPartitionIDs() {
+			if releasedPartitions.Contain(partition) {
+				log.Warn(msg)
+				return notLoadResp, nil
+			}
+			states = append(states, &querypb.PartitionStates{
+				PartitionID: partition,
+				State:       state,
+			})
+		}
+
+	case querypb.LoadType_LoadPartition:
+		for _, partitionID := range req.GetPartitionIDs() {
+			partition := s.meta.GetPartition(partitionID)
+			if partition == nil {
+				log.Warn(msg, zap.Int64("partition-id", partitionID))
+				return notLoadResp, nil
+			}
+			state := querypb.PartitionState_PartialInMemory
+			if partition.LoadPercentage >= 100 {
+				state = querypb.PartitionState_InMemory
+			}
+			states = append(states, &querypb.PartitionStates{
+				PartitionID: partitionID,
+				State:       state,
+			})
+		}
+
+	default:
+		log.Warn(msg)
+		return notLoadResp, nil
+	}
+
+	return &querypb.GetPartitionStatesResponse{
+		Status:                successStatus,
+		PartitionDescriptions: states,
+	}, nil
 }
 
 func (s *Server) GetSegmentInfo(ctx context.Context, req *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
