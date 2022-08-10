@@ -1,47 +1,10 @@
 package querycoordv2
 
 import (
-	"context"
-
-	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/samber/lo"
 )
-
-func (s *Server) registerTargets(ctx context.Context,
-	targetMgr *meta.TargetManager,
-	broker *meta.CoordinatorBroker,
-	collection int64, partitions ...int64) error {
-	var dmChannels map[string][]*datapb.VchannelInfo
-
-	for _, partitionID := range partitions {
-		vChannelInfos, binlogs, err := s.broker.GetRecoveryInfo(ctx, collection, partitionID)
-		if err != nil {
-			return err
-		}
-
-		// Register segments
-		for _, segmentBinlogs := range binlogs {
-			s.targetMgr.AddSegment(utils.SegmentBinlogs2SegmentInfo(
-				collection,
-				partitionID,
-				segmentBinlogs))
-		}
-
-		for _, info := range vChannelInfos {
-			channelName := info.GetChannelName()
-			dmChannels[channelName] = append(dmChannels[channelName], info)
-		}
-	}
-	// Merge and register channels
-	for _, channels := range dmChannels {
-		dmChannel := utils.MergeDmChannelInfo(channels)
-		s.targetMgr.AddDmChannel(dmChannel)
-	}
-	return nil
-}
 
 // checkAnyReplicaAvailable checks if the collection has enough distinct available shards. These shards
 // may come from different replica group. We only need these shards to form a replica that serves query
