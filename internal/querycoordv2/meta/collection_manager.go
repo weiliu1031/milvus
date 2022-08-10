@@ -230,11 +230,11 @@ func (m *CollectionManager) RemoveCollection(id UniqueID) error {
 	return m.removePartition(partitions...)
 }
 
-func (m *CollectionManager) PutPartition(partition *Partition) error {
+func (m *CollectionManager) PutPartition(partitions ...*Partition) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	return m.putPartition([]*Partition{partition}, true)
+	return m.putPartition(partitions, true)
 }
 
 func (m *CollectionManager) PutPartitionWithoutSave(partition *Partition) {

@@ -2,95 +2,13 @@ package querycoordv2
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
-	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/samber/lo"
-	"go.uber.org/zap"
 )
-
-func (s *Server) preLoadPartition(req *querypb.LoadPartitionsRequest) *commonpb.Status {
-	log := log.With(
-		zap.Int64("msg-id", req.Base.GetMsgID()),
-		zap.Int64("collection-id", req.GetCollectionID()),
-	)
-
-	if len(req.GetPartitionIDs()) == 0 {
-		msg := "the PartitionIDs is empty"
-		log.Error(msg)
-		return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-	}
-
-	partitions := lo.Map(req.GetPartitionIDs(), func(partition int64, _ int) *meta.Partition {
-		return &meta.Partition{
-			PartitionLoadInfo: &querypb.PartitionLoadInfo{
-				CollectionID:  req.GetCollectionID(),
-				PartitionID:   partition,
-				ReplicaNumber: req.GetReplicaNumber(),
-				Status:        querypb.LoadStatus_Loading,
-			},
-			CreatedAt: time.Now(),
-		}
-	})
-
-	olds, exist, err := s.meta.CollectionManager.GetOrPutPartition(partitions...)
-	if err != nil {
-		if errors.Is(err, meta.ErrLoadTypeMismatched) {
-			msg := "a collection with different LoadType existed"
-			log.Error(msg)
-			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-		}
-		msg := "failed to store partitions"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-	}
-	if exist {
-		if olds[0].GetReplicaNumber() != req.GetReplicaNumber() {
-			msg := "a collection with different replica number existed, release this collection first before changing its replica number"
-			log.Error(msg)
-			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-		} else if len(olds) < len(partitions) {
-			msg := fmt.Sprintf("some partitions %v of collection %v has been loaded into QueryNode, please release partitions firstly",
-				req.GetPartitionIDs(),
-				req.GetCollectionID())
-			log.Error(msg)
-			return utils.WrapStatus(commonpb.ErrorCode_IllegalArgument, msg)
-		}
-	}
-	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
-}
-
-func (s *Server) loadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) *commonpb.Status {
-	log := log.With(
-		zap.Int64("msg-id", req.GetBase().GetMsgID()),
-		zap.Int64("collection-id", req.GetCollectionID()),
-	)
-
-	// Create replicas
-	err := s.spawnReplicas(req.GetCollectionID(), req.GetReplicaNumber())
-	if err != nil {
-		msg := "failed to spawn replica for collection"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-	}
-
-	// Fetch channels and segments from DataCoord
-	err = s.registerTargets(ctx, req.GetCollectionID(), req.GetPartitionIDs()...)
-	if err != nil {
-		msg := "failed to register channels and segments"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
-	}
-
-	return utils.WrapStatus(commonpb.ErrorCode_Success, "")
-}
 
 func (s *Server) registerTargets(ctx context.Context,
 	targetMgr *meta.TargetManager,

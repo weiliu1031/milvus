@@ -185,22 +185,24 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 		zap.Int64s("partitions", req.GetPartitionIDs()))
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.TotalLabel).Inc()
 
-	status := s.preLoadPartition(req)
-	if status.ErrorCode != commonpb.ErrorCode_Success {
+	loadJob := job.NewLoadPartitionJob(ctx,
+		req,
+		s.dist,
+		s.meta,
+		s.targetMgr,
+		s.broker,
+		s.nodeMgr)
+	s.jobScheduler.Add(loadJob)
+	err := loadJob.Wait()
+	if err != nil && !errors.Is(err, job.ErrCollectionLoaded) {
+		msg := "failed to load partitions"
+		log.Warn(msg, zap.Error(err))
 		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
-		return status, nil
-	}
-
-	status = s.loadPartitions(ctx, req)
-	if status.ErrorCode != commonpb.ErrorCode_Success {
-		s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
-		s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
-		s.targetMgr.RemoveCollection(req.GetCollectionID())
-		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
 	}
 
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
-	return status, nil
+	return successStatus, nil
 
 }
 
@@ -221,45 +223,17 @@ func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePart
 	}
 
 	tr := timerecord.NewTimeRecorder("release-partitions")
-	loadedPartitions := s.meta.CollectionManager.GetPartitionsByCollection(req.GetCollectionID())
-	partitionIDs := typeutil.NewUniqueSet(req.GetPartitionIDs()...)
-	toRelease := make([]int64, 0)
-	switch s.meta.CollectionManager.GetLoadType(req.GetCollectionID()) {
-	case querypb.LoadType_LoadPartition:
-		for _, partition := range loadedPartitions {
-			if partitionIDs.Contain(partition.GetPartitionID()) {
-				toRelease = append(toRelease, partition.GetPartitionID())
-			}
-		}
-
-	case querypb.LoadType_LoadCollection:
-		msg := "releasing some partitions after load collection is not supported"
-		log.Warn(msg)
+	releaseJob := job.NewReleasePartitionJob(ctx,
+		req,
+		s.meta,
+		s.targetMgr)
+	s.jobScheduler.Add(releaseJob)
+	err := releaseJob.Wait()
+	if err != nil {
+		msg := "failed to release partitions"
+		log.Error(msg, zap.Error(err))
 		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
-		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
-	}
-
-	if len(toRelease) == len(loadedPartitions) { // All partitions are released, clear all
-		err := s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
-		if err != nil {
-			msg := "failed to release partitions"
-			log.Warn(msg, zap.Error(err))
-			metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
-			return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
-		}
-		s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
-		s.targetMgr.RemoveCollection(req.GetCollectionID())
-	} else {
-		err := s.meta.CollectionManager.RemovePartition(toRelease...)
-		if err != nil {
-			msg := "failed to release partitions"
-			log.Warn(msg, zap.Error(err))
-			metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
-			return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
-		}
-		for _, partition := range toRelease {
-			s.targetMgr.RemovePartition(partition)
-		}
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
 	}
 
 	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
