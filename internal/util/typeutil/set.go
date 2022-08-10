@@ -16,6 +16,10 @@
 
 package typeutil
 
+import (
+	"sync"
+)
+
 // UniqueSet is set type, which contains only UniqueIDs,
 // the underlying type is map[UniqueID]struct{}.
 // Create a UniqueSet instance with make(UniqueSet) like creating a map instance.
@@ -99,4 +103,54 @@ func (set Set[T]) Collect() []T {
 // Len returns the number of elements in the set
 func (set Set[T]) Len() int {
 	return len(set)
+}
+
+type ConcurrentSet[T comparable] struct {
+	inner sync.Map
+}
+
+func NewConcurrentSet[T comparable]() *ConcurrentSet[T] {
+	return &ConcurrentSet[T]{}
+}
+
+// Insert elements into the set,
+// do nothing if the id existed
+func (set *ConcurrentSet[T]) Upsert(elements ...T) {
+	for i := range elements {
+		set.inner.Store(elements[i], struct{}{})
+	}
+}
+
+func (set *ConcurrentSet[T]) Insert(element T) bool {
+	_, exist := set.inner.LoadOrStore(element, struct{}{})
+	return !exist
+}
+
+// Check whether the elements exist
+func (set *ConcurrentSet[T]) Contain(elements ...T) bool {
+	for i := range elements {
+		_, ok := set.inner.Load(elements[i])
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// Remove elements from the set,
+// do nothing if set is nil or id not exists
+func (set *ConcurrentSet[T]) Remove(elements ...T) {
+	for i := range elements {
+		set.inner.Delete(elements[i])
+	}
+}
+
+// Get all elements in the set
+func (set *ConcurrentSet[T]) Collect() []T {
+	elements := make([]T, 0)
+	set.inner.Range(func(key, value any) bool {
+		elements = append(elements, key.(T))
+		return true
+	})
+	return elements
 }

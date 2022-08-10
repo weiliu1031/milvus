@@ -5,6 +5,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/jobs"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
@@ -18,7 +19,8 @@ type Server struct {
 	cluster   *session.Cluster
 	nodeMgr   *session.NodeManager
 
-	scheduler *task.Scheduler
+	jobScheduler *jobs.JobScheduler
+	scheduler    *task.Scheduler
 }
 
 func (s *Server) Init() error {

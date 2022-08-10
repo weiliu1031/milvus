@@ -2,6 +2,7 @@ package querycoordv2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -9,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/job"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -70,22 +72,22 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		zap.Int32("replica-number", req.ReplicaNumber))
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.TotalLabel).Inc()
 
-	status := s.preLoadCollection(req)
-	if status.ErrorCode != commonpb.ErrorCode_Success {
+	loadJob := job.NewLoadCollectionJob(ctx,
+		req,
+		s.dist,
+		s.meta,
+		s.targetMgr,
+		s.broker,
+		s.nodeMgr)
+	s.jobScheduler.Add(loadJob)
+	err := loadJob.Wait()
+	if err != nil && !errors.Is(err, job.ErrCollectionLoaded) {
 		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
-		return status, nil
-	}
-
-	status = s.loadCollection(ctx, req)
-	if status.ErrorCode != commonpb.ErrorCode_Success {
-		s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
-		s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
-		s.targetMgr.RemoveCollection(req.GetCollectionID())
-		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
 	}
 
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
-	return status, nil
+	return successStatus, nil
 }
 
 func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {

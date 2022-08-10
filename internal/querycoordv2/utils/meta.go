@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/samber/lo"
@@ -84,4 +85,49 @@ func AssignNodesToReplicas(nodeMgr *session.NodeManager, replicas ...*meta.Repli
 	for i, node := range nodes {
 		replicas[i%replicaNumber].Nodes.Insert(node.ID())
 	}
+}
+
+// SpawnReplicas spawns replicas for given collection, and assign nodes to them
+func SpawnReplicas(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeManager, collection int64, replicaNumber int32) error {
+	replicas, err := replicaMgr.Spawn(collection, replicaNumber)
+	if err != nil {
+		return err
+	}
+	AssignNodesToReplicas(nodeMgr, replicas...)
+	return replicaMgr.Put(replicas...)
+}
+
+// RegisterTargets fetch channels and segments of given collection(partitions) from DataCoord,
+// and then registers them on Target Manager
+func RegisterTargets(ctx context.Context,
+	targetMgr *meta.TargetManager,
+	broker *meta.CoordinatorBroker,
+	collection int64, partitions ...int64) error {
+	var dmChannels map[string][]*datapb.VchannelInfo
+
+	for _, partitionID := range partitions {
+		vChannelInfos, binlogs, err := broker.GetRecoveryInfo(ctx, collection, partitionID)
+		if err != nil {
+			return err
+		}
+
+		// Register segments
+		for _, segmentBinlogs := range binlogs {
+			targetMgr.AddSegment(SegmentBinlogs2SegmentInfo(
+				collection,
+				partitionID,
+				segmentBinlogs))
+		}
+
+		for _, info := range vChannelInfos {
+			channelName := info.GetChannelName()
+			dmChannels[channelName] = append(dmChannels[channelName], info)
+		}
+	}
+	// Merge and register channels
+	for _, channels := range dmChannels {
+		dmChannel := MergeDmChannelInfo(channels)
+		targetMgr.AddDmChannel(dmChannel)
+	}
+	return nil
 }

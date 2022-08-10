@@ -23,6 +23,11 @@ func WrapStatus(code commonpb.ErrorCode, msg string, errs ...error) *commonpb.St
 	return status
 }
 
+// WrapError wraps error with given message
+func WrapError(msg string, err error) error {
+	return fmt.Errorf(msg+"[%w]", err)
+}
+
 func SegmentBinlogs2SegmentInfo(collectionID int64, partitionID int64, segmentBinlogs *datapb.SegmentBinlogs) *datapb.SegmentInfo {
 	return &datapb.SegmentInfo{
 		ID:            segmentBinlogs.GetSegmentID(),

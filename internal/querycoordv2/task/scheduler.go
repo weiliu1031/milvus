@@ -380,13 +380,13 @@ func (scheduler *Scheduler) process(task Task) bool {
 	log = log.With(zap.Int("step", step))
 	switch task.Status() {
 	case TaskStatusStarted:
-		log.Debug("execute task")
+		log.Info("execute task")
 		if scheduler.executor.Execute(task, step, actions[step]) {
 			return true
 		}
 
 	case TaskStatusSucceeded:
-		log.Debug("task succeeded")
+		log.Info("task succeeded")
 
 	case TaskStatusCanceled, TaskStatusStale:
 		log.Warn("failed to execute task", zap.Error(task.Err()))
