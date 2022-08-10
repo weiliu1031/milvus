@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
@@ -65,6 +66,16 @@ func (job *BaseJob) Wait() error {
 	<-job.doneCh
 	return job.err
 }
+
+func (job *BaseJob) PreExecute() error {
+	return nil
+}
+
+func (job *BaseJob) Execute() error {
+	return nil
+}
+
+func (job *BaseJob) PostExecute() {}
 
 type LoadCollectionJob struct {
 	*BaseJob
@@ -186,5 +197,61 @@ func (job *LoadCollectionJob) PostExecute() error {
 	if job.Error() != nil {
 		job.targetMgr.RemoveCollection(job.req.GetCollectionID())
 	}
+	return nil
+}
+
+type ReleaseCollectionJob struct {
+	*BaseJob
+	req       *querypb.ReleaseCollectionRequest
+	meta      *meta.Meta
+	targetMgr *meta.TargetManager
+}
+
+func NewReleaseCollectionJob(ctx context.Context,
+	req *querypb.ReleaseCollectionRequest,
+	meta *meta.Meta,
+	targetMgr *meta.TargetManager,
+) *ReleaseCollectionJob {
+	return &ReleaseCollectionJob{
+		BaseJob:   NewBaseJob(ctx),
+		req:       req,
+		meta:      meta,
+		targetMgr: targetMgr,
+	}
+}
+
+func (job *ReleaseCollectionJob) PreExecute() error {
+	return nil
+}
+
+func (job *ReleaseCollectionJob) Execute() error {
+	req := job.req
+	log := log.With(
+		zap.Int64("msg-id", req.GetBase().GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+	if !job.meta.CollectionManager.Exist(req.GetCollectionID()) {
+		log.Info("release collection end, the collection has not been loaded into QueryNode")
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
+		return nil
+	}
+
+	err := job.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
+	if err != nil {
+		msg := "failed to remove collection"
+		log.Error(msg, zap.Error(err))
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapError(msg, err)
+	}
+
+	err = job.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
+	if err != nil {
+		msg := "failed to remove replicas"
+		log.Error(msg, zap.Error(err))
+		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
+		return utils.WrapError(msg, err)
+	}
+
+	job.targetMgr.RemoveCollection(req.GetCollectionID())
 	return nil
 }

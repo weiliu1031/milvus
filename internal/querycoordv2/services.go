@@ -67,7 +67,7 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		zap.Int64("collection-id", req.GetCollectionID()),
 	)
 
-	log.Info("received load collection request",
+	log.Info("load collection request received",
 		zap.Any("schema", req.Schema),
 		zap.Int32("replica-number", req.ReplicaNumber))
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.TotalLabel).Inc()
@@ -82,8 +82,10 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 	s.jobScheduler.Add(loadJob)
 	err := loadJob.Wait()
 	if err != nil && !errors.Is(err, job.ErrCollectionLoaded) {
+		msg := "failed to load collection"
+		log.Warn(msg, zap.Error(err))
 		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
-		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
 	}
 
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
@@ -96,35 +98,24 @@ func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseColl
 		zap.Int64("collection-id", req.GetCollectionID()),
 	)
 
-	log.Info("release collection")
+	log.Info("release collection request received")
 	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.TotalLabel).Inc()
-
-	if !s.meta.CollectionManager.Exist(req.GetCollectionID()) {
-		log.Info("release collection end, the collection has not been loaded into QueryNode")
-		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
-		return successStatus, nil
-	}
-
 	tr := timerecord.NewTimeRecorder("release-collection")
-	err := s.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
+
+	releaseJob := job.NewReleaseCollectionJob(ctx,
+		req,
+		s.meta,
+		s.targetMgr)
+	s.jobScheduler.Add(releaseJob)
+	err := releaseJob.Wait()
 	if err != nil {
-		msg := "failed to remove collection"
+		msg := "failed to release collection"
 		log.Error(msg, zap.Error(err))
 		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
 		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
 	}
 
-	err = s.meta.ReplicaManager.RemoveCollection(req.GetCollectionID())
-	if err != nil {
-		msg := "failed to remove replicas"
-		log.Error(msg, zap.Error(err))
-		metrics.QueryCoordReleaseCount.WithLabelValues(metrics.FailLabel).Inc()
-		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
-	}
-
-	s.targetMgr.RemoveCollection(req.GetCollectionID())
-
-	log.Info("collection removed")
+	log.Info("collection released")
 	metrics.QueryCoordReleaseCount.WithLabelValues(metrics.SuccessLabel).Inc()
 	metrics.QueryCoordReleaseLatency.WithLabelValues().Observe(float64(tr.ElapseSpan().Milliseconds()))
 	return successStatus, nil
