@@ -22,7 +22,7 @@ var (
 )
 
 func WrapErrNodeNotFound(nodeID int64) error {
-	return fmt.Errorf("[%w(%v)]", ErrNodeNotFound, nodeID)
+	return fmt.Errorf("%w(%v)", ErrNodeNotFound, nodeID)
 }
 
 // Cluster is used to send requests to QueryNodes and manage connections

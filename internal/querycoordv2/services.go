@@ -11,6 +11,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/job"
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
@@ -419,5 +420,52 @@ func (s *Server) GetReplicas(ctx context.Context, req *milvuspb.GetReplicasReque
 }
 
 func (s *Server) GetShardLeaders(ctx context.Context, req *querypb.GetShardLeadersRequest) (*querypb.GetShardLeadersResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.Base.GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("get shard leaders request received")
+	resp := &querypb.GetShardLeadersResponse{
+		Status: successStatus,
+	}
+
+	channels := s.targetMgr.GetDmChannelsByCollection(req.GetCollectionID())
+	if len(channels) == 0 {
+		msg := "failed to get channels"
+		log.Warn(msg, zap.Error(meta.ErrCollectionNotFound))
+		resp.Status = utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, meta.ErrCollectionNotFound)
+		return resp, nil
+	}
+
+	for _, channel := range channels {
+		log := log.With(zap.String("channel", channel.GetChannelName()))
+
+		leaders := s.dist.LeaderViewManager.GetLeadersByShard(channel.GetChannelName())
+		ids := make([]int64, 0, len(leaders))
+		addrs := make([]string, 0, len(leaders))
+		for _, leader := range leaders {
+			info := s.nodeMgr.Get(leader.ID)
+			if info == nil {
+				continue
+			}
+			ids = append(ids, info.ID())
+			addrs = append(addrs, info.Addr())
+		}
+
+		if len(ids) == 0 {
+			msg := fmt.Sprintf("channel %s is not avaiable in any replica", channel.GetChannelName())
+			log.Warn(msg)
+			resp.Status = utils.WrapStatus(commonpb.ErrorCode_NoReplicaAvailable, msg)
+			resp.Shards = nil
+			return resp, nil
+		}
+
+		resp.Shards = append(resp.Shards, &querypb.ShardLeadersList{
+			ChannelName: channel.GetChannelName(),
+			NodeIds:     ids,
+			NodeAddrs:   addrs,
+		})
+	}
+	return resp, nil
 }
