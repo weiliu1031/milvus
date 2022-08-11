@@ -62,7 +62,7 @@ type Task interface {
 	callbacks() ([]func(), []func())
 }
 
-type BaseTask struct {
+type baseTask struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -82,10 +82,10 @@ type BaseTask struct {
 	failureCallbacks []func()
 }
 
-func NewBaseTask(ctx context.Context, timeout time.Duration, sourceID, collectionID, replicaID UniqueID) *BaseTask {
+func newBaseTask(ctx context.Context, timeout time.Duration, sourceID, collectionID, replicaID UniqueID) *baseTask {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 
-	return &BaseTask{
+	return &baseTask{
 		sourceID:     sourceID,
 		collectionID: collectionID,
 		replicaID:    replicaID,
@@ -97,59 +97,59 @@ func NewBaseTask(ctx context.Context, timeout time.Duration, sourceID, collectio
 	}
 }
 
-func (task *BaseTask) Context() context.Context {
+func (task *baseTask) Context() context.Context {
 	return task.ctx
 }
 
-func (task *BaseTask) SourceID() UniqueID {
+func (task *baseTask) SourceID() UniqueID {
 	return task.sourceID
 }
 
-func (task *BaseTask) ID() UniqueID {
+func (task *baseTask) ID() UniqueID {
 	return task.id
 }
 
-func (task *BaseTask) SetID(id UniqueID) {
+func (task *baseTask) SetID(id UniqueID) {
 	task.id = id
 }
 
-func (task *BaseTask) CollectionID() UniqueID {
+func (task *baseTask) CollectionID() UniqueID {
 	return task.collectionID
 }
 
-func (task *BaseTask) ReplicaID() UniqueID {
+func (task *baseTask) ReplicaID() UniqueID {
 	return task.replicaID
 }
 
-func (task *BaseTask) LoadType() querypb.LoadType {
+func (task *baseTask) LoadType() querypb.LoadType {
 	return task.loadType
 }
 
-func (task *BaseTask) Status() TaskStatus {
+func (task *baseTask) Status() TaskStatus {
 	return atomic.LoadInt32(&task.status)
 }
 
-func (task *BaseTask) SetStatus(status TaskStatus) {
+func (task *baseTask) SetStatus(status TaskStatus) {
 	atomic.StoreInt32(&task.status, status)
 }
 
-func (task *BaseTask) Priority() TaskPriority {
+func (task *baseTask) Priority() TaskPriority {
 	return task.priority
 }
 
-func (task *BaseTask) SetPriority(priority TaskPriority) {
+func (task *baseTask) SetPriority(priority TaskPriority) {
 	task.priority = priority
 }
 
-func (task *BaseTask) Err() error {
+func (task *baseTask) Err() error {
 	return task.err
 }
 
-func (task *BaseTask) SetErr(err error) {
+func (task *baseTask) SetErr(err error) {
 	task.err = err
 }
 
-func (task *BaseTask) Cancel() {
+func (task *baseTask) Cancel() {
 	task.cancel()
 
 	for step := task.Step(); step < len(task.actions); step++ {
@@ -157,15 +157,15 @@ func (task *BaseTask) Cancel() {
 	}
 }
 
-func (task *BaseTask) Actions() []Action {
+func (task *baseTask) Actions() []Action {
 	return task.actions
 }
 
-func (task *BaseTask) Step() int {
+func (task *baseTask) Step() int {
 	return task.step
 }
 
-func (task *BaseTask) IsFinished(distMgr *meta.DistributionManager) bool {
+func (task *baseTask) IsFinished(distMgr *meta.DistributionManager) bool {
 	if task.Status() != TaskStatusStarted {
 		return false
 	}
@@ -179,7 +179,7 @@ func (task *BaseTask) IsFinished(distMgr *meta.DistributionManager) bool {
 	return task.Step() >= len(actions)
 }
 
-func (task *BaseTask) IsRelatedTo(node UniqueID) bool {
+func (task *baseTask) IsRelatedTo(node UniqueID) bool {
 	for _, action := range task.actions {
 		if action.Node() == node {
 			return true
@@ -189,29 +189,29 @@ func (task *BaseTask) IsRelatedTo(node UniqueID) bool {
 	return false
 }
 
-func (task *BaseTask) PreExecute() error {
+func (task *baseTask) PreExecute() error {
 	return nil
 }
 
-func (task *BaseTask) OnSuccess(fn func()) {
+func (task *baseTask) OnSuccess(fn func()) {
 	task.successCallbacks = append(task.successCallbacks, fn)
 }
 
-func (task *BaseTask) OnFailure(fn func()) {
+func (task *baseTask) OnFailure(fn func()) {
 	task.failureCallbacks = append(task.failureCallbacks, fn)
 }
 
-func (task *BaseTask) OnDone(fn func()) {
+func (task *baseTask) OnDone(fn func()) {
 	task.OnSuccess(fn)
 	task.OnFailure(fn)
 }
 
-func (task *BaseTask) callbacks() ([]func(), []func()) {
+func (task *baseTask) callbacks() ([]func(), []func()) {
 	return task.successCallbacks, task.failureCallbacks
 }
 
 type SegmentTask struct {
-	*BaseTask
+	*baseTask
 
 	segmentID UniqueID
 }
@@ -219,7 +219,12 @@ type SegmentTask struct {
 // NewSegmentTask creates a SegmentTask with actions,
 // all actions must process the same segment,
 // empty actions is not allowed
-func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
+func NewSegmentTask(ctx context.Context,
+	timeout time.Duration,
+	sourceID,
+	collectionID,
+	replicaID UniqueID,
+	actions ...Action) *SegmentTask {
 	if len(actions) == 0 {
 		panic("empty actions is not allowed")
 	}
@@ -237,9 +242,10 @@ func NewSegmentTask(base *BaseTask, actions ...Action) *SegmentTask {
 		}
 	}
 
+	base := newBaseTask(ctx, timeout, sourceID, collectionID, replicaID)
 	base.actions = actions
 	return &SegmentTask{
-		BaseTask: base,
+		baseTask: base,
 
 		segmentID: segmentID,
 	}
@@ -250,7 +256,7 @@ func (task *SegmentTask) SegmentID() UniqueID {
 }
 
 type ChannelTask struct {
-	*BaseTask
+	*baseTask
 
 	channel string
 }
@@ -258,7 +264,12 @@ type ChannelTask struct {
 // NewChannelTask creates a ChannelTask with actions,
 // all actions must process the same channel, and the same type of channel
 // empty actions is not allowed
-func NewChannelTask(base *BaseTask, actions ...Action) *ChannelTask {
+func NewChannelTask(ctx context.Context,
+	timeout time.Duration,
+	sourceID,
+	collectionID,
+	replicaID UniqueID,
+	actions ...Action) *ChannelTask {
 	if len(actions) == 0 {
 		panic("empty actions is not allowed")
 	}
@@ -276,9 +287,10 @@ func NewChannelTask(base *BaseTask, actions ...Action) *ChannelTask {
 		}
 	}
 
+	base := newBaseTask(ctx, timeout, sourceID, collectionID, replicaID)
 	base.actions = actions
 	return &ChannelTask{
-		BaseTask: base,
+		baseTask: base,
 
 		channel: channel,
 	}
