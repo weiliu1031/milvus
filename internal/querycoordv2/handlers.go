@@ -8,6 +8,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
@@ -187,4 +188,50 @@ func (s *Server) tryGetNodesMetrics(ctx context.Context, req *milvuspb.GetMetric
 		ret = append(ret, resp)
 	}
 	return ret
+}
+
+func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*milvuspb.ReplicaInfo, error) {
+	info := utils.Replica2ReplicaInfo(replica.Replica)
+
+	channels := s.targetMgr.GetDmChannelsByCollection(replica.GetCollectionID())
+	if len(channels) == 0 {
+		msg := "failed to get channels, collection not loaded"
+		log.Warn(msg)
+		return nil, utils.WrapError(msg, meta.ErrCollectionNotFound)
+	}
+	var segments []*meta.Segment
+	if withShardNodes {
+		segments = s.dist.SegmentDistManager.GetByCollection(replica.GetCollectionID())
+	}
+
+	for _, channel := range channels {
+		leader, ok := s.dist.ChannelDistManager.GetShardLeader(replica, channel.GetChannelName())
+		var leaderInfo *session.NodeInfo
+		if ok {
+			leaderInfo = s.nodeMgr.Get(leader)
+		}
+		if leaderInfo == nil {
+			msg := "failed to get shard leader, the collection not loaded or leader is offline"
+			log.Warn(msg)
+			return nil, utils.WrapError(msg, session.WrapErrNodeNotFound(leader))
+		}
+
+		shard := &milvuspb.ShardReplica{
+			LeaderID:      leader,
+			LeaderAddr:    leaderInfo.Addr(),
+			DmChannelName: channel.GetChannelName(),
+			NodeIds:       []int64{leader},
+		}
+		if withShardNodes {
+			shardNodes := lo.FilterMap(segments, func(segment *meta.Segment, _ int) (int64, bool) {
+				if replica.Nodes.Contain(segment.Node) {
+					return segment.Node, true
+				}
+				return 0, false
+			})
+			shard.NodeIds = append(shard.NodeIds, shardNodes...)
+		}
+		info.ShardReplicas = append(info.ShardReplicas, shard)
+	}
+	return info, nil
 }

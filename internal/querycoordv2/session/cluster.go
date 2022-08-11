@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -16,21 +17,12 @@ import (
 
 const updateTickerDuration = 1 * time.Minute
 
-type ErrNodeNotFound struct {
-	nodeID int64
-}
+var (
+	ErrNodeNotFound = errors.New("NodeNotFound")
+)
 
-func (err *ErrNodeNotFound) Error() string {
-	return fmt.Sprintf("node %d not found", err.nodeID)
-}
-
-func newErrNodeNotFound(nodeID int64) *ErrNodeNotFound {
-	return &ErrNodeNotFound{nodeID}
-}
-
-var IsErrNodeNotFound = func(err error) bool {
-	_, ok := err.(*ErrNodeNotFound)
-	return ok
+func WrapErrNodeNotFound(nodeID int64) error {
+	return fmt.Errorf("[%w(%v)]", ErrNodeNotFound, nodeID)
 }
 
 // Cluster is used to send requests to QueryNodes and manage connections
@@ -185,7 +177,7 @@ func (c *Cluster) GetMetrics(ctx context.Context, nodeID int64, req *milvuspb.Ge
 func (c *Cluster) send(ctx context.Context, nodeID int64, fn func(cli *grpcquerynodeclient.Client)) error {
 	node := c.nodeManager.Get(nodeID)
 	if node == nil {
-		return newErrNodeNotFound(nodeID)
+		return WrapErrNodeNotFound(nodeID)
 	}
 
 	cli, err := c.clients.getOrCreate(ctx, node)

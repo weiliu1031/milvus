@@ -385,7 +385,37 @@ func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest
 }
 
 func (s *Server) GetReplicas(ctx context.Context, req *milvuspb.GetReplicasRequest) (*milvuspb.GetReplicasResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(
+		zap.Int64("msg-id", req.Base.GetMsgID()),
+		zap.Int64("collection-id", req.GetCollectionID()),
+	)
+
+	log.Info("get replicas request received", zap.Bool("with-shard-nodes", req.GetWithShardNodes()))
+	resp := &milvuspb.GetReplicasResponse{
+		Status:   successStatus,
+		Replicas: make([]*milvuspb.ReplicaInfo, 0),
+	}
+
+	replicas := s.meta.ReplicaManager.GetByCollection(req.GetCollectionID())
+	if len(replicas) == 0 {
+		msg := "failed to get replicas, collection not loaded"
+		log.Warn(msg)
+		resp.Status = utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg)
+		return resp, nil
+	}
+
+	for _, replica := range replicas {
+		info, err := s.fillReplicaInfo(replica, req.GetWithShardNodes())
+		if err != nil {
+			msg := "failed to get replica info"
+			log.Warn(msg,
+				zap.Int64("replica-id", replica.GetID()),
+				zap.Error(err))
+			resp.Status = utils.WrapStatus(commonpb.ErrorCode_MetaFailed, msg, err)
+		}
+		resp.Replicas = append(resp.Replicas, info)
+	}
+	return resp, nil
 }
 
 func (s *Server) GetShardLeaders(ctx context.Context, req *querypb.GetShardLeadersRequest) (*querypb.GetShardLeadersResponse, error) {
