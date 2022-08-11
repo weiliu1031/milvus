@@ -34,8 +34,8 @@ func (scheduler *JobScheduler) Start(ctx context.Context) {
 }
 
 func (scheduler *JobScheduler) Stop() {
-	scheduler.wg.Wait()
 	close(scheduler.stopCh)
+	scheduler.wg.Wait()
 }
 
 func (scheduler *JobScheduler) schedule(ctx context.Context) {
@@ -46,9 +46,12 @@ func (scheduler *JobScheduler) schedule(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				log.Info("JobManager stopped due to context canceled")
+				return
 
 			case <-scheduler.stopCh:
 				log.Info("JobManager stopped")
+				return
 
 			case job := <-scheduler.waitQueue:
 				queue, ok := scheduler.queues[job.CollectionID()]
@@ -87,6 +90,9 @@ func (scheduler *JobScheduler) Add(job Job) {
 }
 
 func (scheduler *JobScheduler) startProcessor(collection int64, queue jobQueue) {
+	if scheduler.isStopped() {
+		return
+	}
 	if !scheduler.processors.Insert(collection) {
 		return
 	}
@@ -109,7 +115,9 @@ func (scheduler *JobScheduler) processQueue(collection int64, queue jobQueue) {
 }
 
 func (scheduler *JobScheduler) process(job Job) {
-	log := log.With(zap.Int64("collection-id", job.CollectionID()))
+	log := log.With(
+		zap.Int64("msg-id", job.MsgID()),
+		zap.Int64("collection-id", job.CollectionID()))
 
 	defer func() {
 		log.Info("start to post-execute job")

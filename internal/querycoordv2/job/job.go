@@ -22,6 +22,7 @@ import (
 // 2. Execute(), skip this step if PreExecute() failed
 // 3. PostExecute()
 type Job interface {
+	MsgID() int64
 	CollectionID() int64
 	// PreExecute does checks, DO NOT persists any thing within this stage,
 	PreExecute() error
@@ -37,16 +38,23 @@ type Job interface {
 
 type BaseJob struct {
 	ctx          context.Context
+	msgID        int64
 	collectionID int64
 	err          error
 	doneCh       chan struct{}
 }
 
-func NewBaseJob(ctx context.Context) *BaseJob {
+func NewBaseJob(ctx context.Context, msgID, collectionID int64) *BaseJob {
 	return &BaseJob{
-		ctx:    ctx,
-		doneCh: make(chan struct{}),
+		ctx:          ctx,
+		msgID:        msgID,
+		collectionID: collectionID,
+		doneCh:       make(chan struct{}),
 	}
+}
+
+func (job *BaseJob) MsgID() int64 {
+	return job.msgID
 }
 
 func (job *BaseJob) CollectionID() int64 {
@@ -101,7 +109,7 @@ func NewLoadCollectionJob(
 	nodeMgr *session.NodeManager,
 ) *LoadCollectionJob {
 	return &LoadCollectionJob{
-		BaseJob:   NewBaseJob(ctx),
+		BaseJob:   NewBaseJob(ctx, req.Base.GetMsgID(), req.GetCollectionID()),
 		req:       req,
 		dist:      dist,
 		meta:      meta,
@@ -215,7 +223,7 @@ func NewReleaseCollectionJob(ctx context.Context,
 	targetMgr *meta.TargetManager,
 ) *ReleaseCollectionJob {
 	return &ReleaseCollectionJob{
-		BaseJob:   NewBaseJob(ctx),
+		BaseJob:   NewBaseJob(ctx, req.Base.GetMsgID(), req.GetCollectionID()),
 		req:       req,
 		meta:      meta,
 		targetMgr: targetMgr,
@@ -275,7 +283,7 @@ func NewLoadPartitionJob(
 	nodeMgr *session.NodeManager,
 ) *LoadPartitionJob {
 	return &LoadPartitionJob{
-		BaseJob:   NewBaseJob(ctx),
+		BaseJob:   NewBaseJob(ctx, req.Base.GetMsgID(), req.GetCollectionID()),
 		req:       req,
 		dist:      dist,
 		meta:      meta,
@@ -398,7 +406,7 @@ func NewReleasePartitionJob(ctx context.Context,
 	targetMgr *meta.TargetManager,
 ) *ReleasePartitionJob {
 	return &ReleasePartitionJob{
-		BaseJob:   NewBaseJob(ctx),
+		BaseJob:   NewBaseJob(ctx, req.Base.GetMsgID(), req.GetCollectionID()),
 		req:       req,
 		meta:      meta,
 		targetMgr: targetMgr,

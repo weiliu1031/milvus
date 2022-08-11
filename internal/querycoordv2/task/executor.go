@@ -204,20 +204,24 @@ func (ex *Executor) releaseSegment(task *SegmentTask, action *SegmentAction) {
 	}
 
 	// Get shard leader for the given replica and segment
-	replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
-	if replica == nil {
-		log.Warn("failed to get replica for given collection and node")
-		return
+	dstNode := action.Node()
+	if ex.meta.CollectionManager.Exist(task.CollectionID()) {
+		replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
+		if replica == nil {
+			log.Warn("failed to get replica for given collection and node")
+			return
+		}
+		leader, ok := ex.dist.GetShardLeader(replica, targetSegment.GetInsertChannel())
+		if !ok {
+			log.Warn("no shard leader for the segment to execute loading", zap.String("shard", targetSegment.GetInsertChannel()))
+			return
+		}
+		dstNode = leader
+		log = log.With(zap.Int64("shard-leader", leader))
 	}
-	leader, ok := ex.dist.GetShardLeader(replica, targetSegment.GetInsertChannel())
-	if !ok {
-		log.Warn("no shard leader for the segment to execute loading", zap.String("shard", targetSegment.GetInsertChannel()))
-		return
-	}
-	log = log.With(zap.Int64("shard-leader", leader))
 
 	req := packReleaseSegmentRequest(task, action)
-	status, err := ex.cluster.ReleaseSegments(ctx, leader, req)
+	status, err := ex.cluster.ReleaseSegments(ctx, dstNode, req)
 	if err != nil {
 		log.Warn("failed to release segment, it may be a false failure", zap.Error(err))
 		return
