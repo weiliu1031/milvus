@@ -9,16 +9,20 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 )
 
 type Server struct {
-	meta      *meta.Meta
-	dist      *meta.DistributionManager
-	targetMgr *meta.TargetManager
-	broker    *meta.CoordinatorBroker
-	cluster   *session.Cluster
-	nodeMgr   *session.NodeManager
+	session             *sessionutil.Session
+	metricsCacheManager *metricsinfo.MetricsCacheManager
 
+	meta         *meta.Meta
+	dist         *meta.DistributionManager
+	targetMgr    *meta.TargetManager
+	broker       *meta.CoordinatorBroker
+	cluster      *session.Cluster
+	nodeMgr      *session.NodeManager
 	jobScheduler *job.JobScheduler
 	scheduler    *task.Scheduler
 }

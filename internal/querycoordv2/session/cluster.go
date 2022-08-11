@@ -9,6 +9,7 @@ import (
 	grpcquerynodeclient "github.com/milvus-io/milvus/internal/distributed/querynode/client"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"go.uber.org/zap"
 )
@@ -160,6 +161,20 @@ func (c *Cluster) GetDataDistribution(ctx context.Context, nodeID int64, req *qu
 	var err error
 	err1 := c.send(ctx, nodeID, func(cli *grpcquerynodeclient.Client) {
 		resp, err = cli.GetDataDistribution(ctx, req)
+	})
+	if err1 != nil {
+		return nil, err1
+	}
+	return resp, err
+}
+
+func (c *Cluster) GetMetrics(ctx context.Context, nodeID int64, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
+	var (
+		resp *milvuspb.GetMetricsResponse
+		err  error
+	)
+	err1 := c.send(ctx, nodeID, func(cli *grpcquerynodeclient.Client) {
+		resp, err = cli.GetMetrics(ctx, req)
 	})
 	if err1 != nil {
 		return nil, err1

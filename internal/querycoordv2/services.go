@@ -12,6 +12,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/job"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
@@ -340,7 +341,47 @@ func (s *Server) LoadBalance(ctx context.Context, req *querypb.LoadBalanceReques
 }
 
 func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
-	panic("not implemented") // TODO: Implement
+	log := log.With(zap.Int64("msg-id", req.Base.GetMsgID()))
+
+	log.Info("get metrics request received",
+		zap.String("metric-type", req.GetRequest()))
+	resp := &milvuspb.GetMetricsResponse{
+		Status: successStatus,
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole,
+			utils.Params.QueryCoordCfg.GetNodeID()),
+	}
+
+	metricType, err := metricsinfo.ParseMetricType(req.GetRequest())
+	if err != nil {
+		msg := "failed to parse metric type"
+		log.Warn(msg, zap.Error(err))
+		resp.Status = utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err)
+		return resp, nil
+	}
+
+	if metricType != metricsinfo.SystemInfoMetrics {
+		msg := "invalid metric type"
+		err := errors.New(metricsinfo.MsgUnimplementedMetric)
+		log.Warn(msg, zap.Error(err))
+		resp.Status = utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err)
+		return resp, nil
+	}
+
+	metrics, err := s.metricsCacheManager.GetSystemInfoMetrics()
+	if err != nil {
+		log.Warn("failed to read metrics from cache, re-calculate it", zap.Error(err))
+		metrics = resp
+		metrics.Response, err = s.getSystemInfoMetrics(ctx, req)
+		if err != nil {
+			msg := "failed to get system info metrics"
+			log.Warn(msg, zap.Error(err))
+			resp.Status = utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err)
+			return resp, nil
+		}
+	}
+
+	s.metricsCacheManager.UpdateSystemInfoMetrics(metrics)
+	return metrics, nil
 }
 
 func (s *Server) GetReplicas(ctx context.Context, req *milvuspb.GetReplicasRequest) (*milvuspb.GetReplicasResponse, error) {
