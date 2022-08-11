@@ -475,7 +475,7 @@ func (scheduler *Scheduler) checkStale(task Task) bool {
 			zap.Int("step", step))
 
 		if scheduler.nodeMgr.Get(action.Node()) == nil {
-			log.Warn("the task is stale, the target node is offline")
+			log.Warn("the task is stale, target node is offline")
 
 			return true
 		}

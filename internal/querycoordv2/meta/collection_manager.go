@@ -190,11 +190,29 @@ func (m *CollectionManager) PutCollection(collection *Collection) error {
 	return m.putCollection(collection, true)
 }
 
-func (m *CollectionManager) PutCollectionWithoutSave(collection *Collection) {
+func (m *CollectionManager) UpdateCollection(collection *Collection) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
+	_, ok := m.collections[collection.GetCollectionID()]
+	if !ok {
+		return ErrCollectionNotFound
+	}
+
+	return m.putCollection(collection, true)
+}
+
+func (m *CollectionManager) UpdateCollectionInMemory(collection *Collection) bool {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	_, ok := m.collections[collection.GetCollectionID()]
+	if !ok {
+		return false
+	}
+
 	m.putCollection(collection, false)
+	return true
 }
 
 func (m *CollectionManager) putCollection(collection *Collection, withSave bool) error {
@@ -237,11 +255,29 @@ func (m *CollectionManager) PutPartition(partitions ...*Partition) error {
 	return m.putPartition(partitions, true)
 }
 
-func (m *CollectionManager) PutPartitionWithoutSave(partition *Partition) {
+func (m *CollectionManager) UpdatePartition(partition *Partition) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
+	_, ok := m.parttions[partition.GetPartitionID()]
+	if !ok {
+		return ErrPartitionNotFound
+	}
+
+	return m.putPartition([]*Partition{partition}, true)
+}
+
+func (m *CollectionManager) UpdatePartitionInMemory(partition *Partition) bool {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	_, ok := m.parttions[partition.GetPartitionID()]
+	if !ok {
+		return false
+	}
+
 	m.putPartition([]*Partition{partition}, false)
+	return true
 }
 
 func (m *CollectionManager) putPartition(partitions []*Partition, withSave bool) error {

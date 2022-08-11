@@ -129,7 +129,7 @@ func (observer *CollectionObserver) observeCollectionLoadStatus(collection *meta
 		zap.Int("channel-target-num", len(channelTargets)),
 		zap.Int("total-target-num", targetNum))
 	if targetNum == 0 {
-		log.Info("load collection failed, will clear it later")
+		log.Info("collection released, skip it")
 		return
 	}
 
@@ -155,9 +155,9 @@ func (observer *CollectionObserver) observeCollectionLoadStatus(collection *meta
 	collection.LoadPercentage = int32(loadedCount / targetNum)
 	if loadedCount >= len(segmentTargets)+len(channelTargets) {
 		collection.Status = querypb.LoadStatus_Loaded
-		observer.meta.CollectionManager.PutCollection(collection)
+		observer.meta.CollectionManager.UpdateCollection(collection)
 	} else {
-		observer.meta.CollectionManager.PutCollectionWithoutSave(collection)
+		observer.meta.CollectionManager.UpdateCollectionInMemory(collection)
 	}
 	log.Info("collection load status updated",
 		zap.Int32("load-percentage", collection.LoadPercentage),
@@ -178,7 +178,7 @@ func (observer *CollectionObserver) observePartitionLoadStatus(partition *meta.P
 		zap.Int("channel-target-num", len(channelTargets)),
 		zap.Int("total-target-num", targetNum))
 	if targetNum == 0 {
-		log.Info("load partition failed, will clear it later")
+		log.Info("partition released, skip it")
 		return
 	}
 
@@ -206,7 +206,7 @@ func (observer *CollectionObserver) observePartitionLoadStatus(partition *meta.P
 		partition.Status = querypb.LoadStatus_Loaded
 		observer.meta.CollectionManager.PutPartition(partition)
 	} else {
-		observer.meta.CollectionManager.PutPartitionWithoutSave(partition)
+		observer.meta.CollectionManager.UpdatePartitionInMemory(partition)
 	}
 	log.Info("partition load status updated",
 		zap.Int32("load-percentage", partition.LoadPercentage),
