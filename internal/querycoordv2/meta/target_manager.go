@@ -114,6 +114,7 @@ func (mgr *TargetManager) HandoffSegment(dest *datapb.SegmentInfo, sources ...in
 	defer mgr.rwmutex.Unlock()
 
 	dest.CompactionFrom = sources
+	dest.CreatedByCompaction = true
 	mgr.addSegment(dest)
 }
 
