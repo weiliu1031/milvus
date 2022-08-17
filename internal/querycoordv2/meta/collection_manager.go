@@ -6,6 +6,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/samber/lo"
 )
@@ -64,7 +65,7 @@ func (m *CollectionManager) Recover() error {
 
 	for _, collection := range collections {
 		percentage := int32(0)
-		if collection.GetStatus() == querypb.LoadStatus_Loaded {
+		if collection.GetStatus() != querypb.LoadStatus_Loaded {
 			percentage = 100
 		}
 		m.collections[collection.CollectionID] = &Collection{
@@ -83,7 +84,7 @@ func (m *CollectionManager) Recover() error {
 			LoadPercentage:    percentage,
 		}
 	}
-	
+
 	return nil
 }
 
@@ -157,6 +158,21 @@ func (m *CollectionManager) Exist(id UniqueID) bool {
 	}
 	partitions := m.getPartitionsByCollection(id)
 	return len(partitions) > 0
+}
+
+// GetAll returns the collection ID of all loaded collections and partitions
+func (m *CollectionManager) GetAll() []int64 {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	ids := typeutil.NewUniqueSet()
+	for _, collection := range m.collections {
+		ids.Insert(collection.GetCollectionID())
+	}
+	for _, partition := range m.parttions {
+		ids.Insert(partition.GetCollectionID())
+	}
+	return ids.Collect()
 }
 
 func (m *CollectionManager) GetAllCollections() []*Collection {

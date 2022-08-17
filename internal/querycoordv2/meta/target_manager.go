@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -21,6 +22,22 @@ func NewTargetManager() *TargetManager {
 		segments:        make(map[int64]*datapb.SegmentInfo),
 		growingSegments: make(typeutil.UniqueSet),
 		dmChannels:      make(map[string]*DmChannel),
+	}
+}
+
+func (mgr *TargetManager) Recover(
+	meta *Meta,
+	broker *CoordinatorBroker,
+) error {
+	for _, collection := range meta.GetAll() {
+		if meta.GetLoadType(collection) == querypb.LoadType_LoadCollection {
+			partitions, err := broker.GetPartitions(job.ctx, req.GetCollectionID())
+			if err != nil {
+				msg := "failed to get partitions from RootCoord"
+				log.Error(msg, zap.Error(err))
+				return utils.WrapError(msg, err)
+			}
+		}
 	}
 }
 
@@ -194,16 +211,13 @@ func (mgr *TargetManager) GetDmChannelsByCollection(collectionID int64) []*DmCha
 }
 
 func (mgr *TargetManager) GetSegment(id int64) *datapb.SegmentInfo {
-  mgr.rwmutex.RLock()
-  defer mgr.rwmutex.RUnlock()
+	mgr.rwmutex.RLock()
+	defer mgr.rwmutex.RUnlock()
 
-  for _, s :=range  mgr.segments {
-    if s.GetID() == id {
-      return s
-    }
-  }
-  return nil
+	for _, s := range mgr.segments {
+		if s.GetID() == id {
+			return s
+		}
+	}
+	return nil
 }
-
-
-

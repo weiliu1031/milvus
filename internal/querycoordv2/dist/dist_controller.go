@@ -10,12 +10,12 @@ import (
 )
 
 type DistController struct {
-	mu       sync.RWMutex
-	handlers map[int64]*distHandler
-	client   *session.Cluster
-  nodeManager *session.NodeManager
-  dist *meta.DistributionManager
-  scheduler *task.Scheduler
+	mu          sync.RWMutex
+	handlers    map[int64]*distHandler
+	client      *session.Cluster
+	nodeManager *session.NodeManager
+	dist        *meta.DistributionManager
+	scheduler   *task.Scheduler
 }
 
 func (dc *DistController) StartDistInstance(ctx context.Context, nodeID int64) {
@@ -24,7 +24,7 @@ func (dc *DistController) StartDistInstance(ctx context.Context, nodeID int64) {
 	if _, ok := dc.handlers[nodeID]; ok {
 		return
 	}
-	h := newDistHandler(ctx, nodeID, dc.client, dc.nodeManager,dc.scheduler, dc.dist)
+	h := newDistHandler(ctx, nodeID, dc.client, dc.nodeManager, dc.scheduler, dc.dist)
 	dc.handlers[nodeID] = h
 }
 
@@ -46,16 +46,16 @@ func (dc *DistController) Close() {
 }
 
 func NewDistController(
-  client *session.Cluster,
-  nodeManager *session.NodeManager,
-  dist *meta.DistributionManager,
-  scheduler *task.Scheduler,
+	client *session.Cluster,
+	nodeManager *session.NodeManager,
+	dist *meta.DistributionManager,
+	scheduler *task.Scheduler,
 ) *DistController {
-  return &DistController{
-    handlers: make(map[int64]*distHandler),
-    client: client,
-    nodeManager: nodeManager,
-    dist: dist,
-    scheduler: scheduler,
-  }
+	return &DistController{
+		handlers:    make(map[int64]*distHandler),
+		client:      client,
+		nodeManager: nodeManager,
+		dist:        dist,
+		scheduler:   scheduler,
+	}
 }

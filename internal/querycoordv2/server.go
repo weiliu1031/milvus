@@ -17,6 +17,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
 	"github.com/milvus-io/milvus/internal/querycoordv2/job"
@@ -25,6 +26,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -32,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/samber/lo"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
@@ -186,6 +189,14 @@ func (s *Server) Init() error {
 	log.Debug("init session")
 	s.nodeMgr = session.NewNodeManager()
 	s.cluster = session.NewCluster(s.nodeMgr)
+	sessions, revision, err := s.session.GetSessions(typeutil.QueryNodeRole)
+	if err != nil {
+		return err
+	}
+	for _, node := range sessions {
+		s.nodeMgr.Add(session.NewNodeInfo(node.ServerID, node.Address))
+	}
+	go s.watchNodes(revision)
 
 	// Init schedulers
 	log.Debug("init schedulers")
@@ -225,7 +236,7 @@ func (s *Server) Init() error {
 	log.Debug("init balancer")
 	s.balancer = balance.NewRowCountBasedBalancer(
 		s.scheduler,
-		s.nodeMgr, 
+		s.nodeMgr,
 		s.dist,
 	)
 
@@ -341,4 +352,78 @@ func (s *Server) SetIndexCoord(indexCoord types.IndexCoord) error {
 
 	s.indexCoord = indexCoord
 	return nil
+}
+
+func (s *Server) recover() error {
+	// Recover target managers
+	for _, collection := range s.meta.GetAll() {
+		var (
+			partitions []int64
+			err        error
+		)
+		if s.meta.GetLoadType(collection) == querypb.LoadType_LoadCollection {
+			partitions, err = s.broker.GetPartitions(s.ctx, collection)
+			if err != nil {
+				msg := "failed to get partitions from RootCoord"
+				log.Error(msg, zap.Error(err))
+				return utils.WrapError(msg, err)
+			}
+		} else {
+			partitions = lo.Map(s.meta.GetPartitionsByCollection(collection), func(partition *meta.Partition, _ int) int64 {
+				return partition.GetPartitionID()
+			})
+		}
+		err = utils.RegisterTargets(
+			s.ctx,
+			s.targetMgr,
+			s.broker,
+			collection,
+			partitions...,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) watchNodes(revision int64) {
+	eventChan := s.session.WatchServices(typeutil.QueryNodeRole, revision, nil)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+
+		case event, ok := <-eventChan:
+			if !ok {
+				// ErrCompacted is handled inside SessionWatcher
+				log.Error("Session Watcher channel closed", zap.Int64("server id", s.session.ServerID))
+				go s.Stop()
+				if s.session.TriggerKill {
+					if p, err := os.FindProcess(os.Getpid()); err == nil {
+						p.Signal(syscall.SIGINT)
+					}
+				}
+				return
+			}
+
+			switch event.EventType {
+			case sessionutil.SessionAddEvent:
+				serverID := event.Session.ServerID
+				addr := event.Session.Address
+				log.Info("add node to NodeManager",
+					zap.Int64("node-id", serverID),
+					zap.String("addr", addr),
+				)
+				s.nodeMgr.Add(session.NewNodeInfo(serverID, addr))
+				s.metricsCacheManager.InvalidateSystemInfoMetrics()
+
+			case sessionutil.SessionDelEvent:
+				serverID := event.Session.ServerID
+				log.Info("a node down, remove it", zap.Int64("node-id", serverID))
+				s.nodeMgr.Remove(serverID)
+			}
+		}
+	}
 }
