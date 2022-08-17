@@ -64,24 +64,31 @@ func (m *CollectionManager) Recover() error {
 	}
 
 	for _, collection := range collections {
-		percentage := int32(0)
+		// Collections not loaded done should be deprecated
 		if collection.GetStatus() != querypb.LoadStatus_Loaded {
-			percentage = 100
+			m.store.ReleaseCollection(collection.GetCollectionID())
+			continue
 		}
+
 		m.collections[collection.CollectionID] = &Collection{
 			CollectionLoadInfo: collection,
-			LoadPercentage:     percentage,
 		}
 	}
 
-	for _, partition := range partitions {
-		percentage := int32(0)
-		if partition.GetStatus() == querypb.LoadStatus_Loaded {
-			percentage = 100
-		}
-		m.parttions[partition.PartitionID] = &Partition{
-			PartitionLoadInfo: partition,
-			LoadPercentage:    percentage,
+	for collection, partitions := range partitions {
+		for _, partition := range partitions {
+			// Partitions not loaded done should be deprecated
+			if partition.GetStatus() != querypb.LoadStatus_Loaded {
+				partitionIDs := lo.Map(partitions, func(partition *querypb.PartitionLoadInfo, _ int) int64 {
+					return partition.GetPartitionID()
+				})
+				m.store.ReleasePartition(collection, partitionIDs...)
+				break
+			}
+
+			m.parttions[partition.PartitionID] = &Partition{
+				PartitionLoadInfo: partition,
+			}
 		}
 	}
 

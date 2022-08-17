@@ -103,7 +103,7 @@ func (observer *CollectionObserver) observeLoadStatus() {
 	collections := observer.meta.CollectionManager.GetAllCollections()
 	log.Info("observe collections status", zap.Int("collection-num", len(collections)))
 	for _, collection := range collections {
-		if collection.GetStatus() != querypb.LoadStatus_Loading {
+		if collection.LoadPercentage < 100 {
 			continue
 		}
 		observer.observeCollectionLoadStatus(collection)
@@ -112,7 +112,7 @@ func (observer *CollectionObserver) observeLoadStatus() {
 	partitions := observer.meta.CollectionManager.GetAllPartitions()
 	log.Info("observe partitions status", zap.Int("collection-num", len(partitions)))
 	for _, partition := range partitions {
-		if partition.GetStatus() != querypb.LoadStatus_Loading {
+		if partition.LoadPercentage < 100 {
 			continue
 		}
 		observer.observePartitionLoadStatus(partition)

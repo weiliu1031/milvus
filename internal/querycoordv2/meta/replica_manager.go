@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
@@ -22,6 +23,13 @@ func (replica *Replica) AddNode(nodes ...int64) {
 func (replica *Replica) RemoveNode(nodes ...int64) {
 	replica.Nodes.Remove(nodes...)
 	replica.Replica.Nodes = replica.Nodes.Collect()
+}
+
+func (replica *Replica) Clone() *Replica {
+	return &Replica{
+		Replica: proto.Clone(replica).(*querypb.Replica),
+		Nodes:   typeutil.NewUniqueSet(replica.Replica.Nodes...),
+	}
 }
 
 type ReplicaManager struct {

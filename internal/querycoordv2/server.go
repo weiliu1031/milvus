@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
+	"github.com/milvus-io/milvus/internal/querycoordv2/dist"
 	"github.com/milvus-io/milvus/internal/querycoordv2/job"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/observers"
@@ -47,6 +50,7 @@ var (
 type Server struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
 	status              atomic.Value
 	etcdCli             *clientv3.Client
 	session             *sessionutil.Session
@@ -74,6 +78,9 @@ type Server struct {
 	// Schedulers
 	jobScheduler *job.JobScheduler
 	scheduler    *task.Scheduler
+
+	// HeartBeat
+	distController *dist.DistController
 
 	// Checkers
 	checkerController *checkers.CheckerController
@@ -162,6 +169,8 @@ func (s *Server) Init() error {
 		CollectionManager: meta.NewCollectionManager(store),
 		ReplicaManager:    meta.NewReplicaManager(s.idAllocator, store),
 	}
+
+	log.Debug("recover meta...")
 	err = s.meta.CollectionManager.Recover()
 	if err != nil {
 		log.Error("failed to recover collections")
@@ -172,6 +181,7 @@ func (s *Server) Init() error {
 		log.Error("failed to recover replicas")
 		return err
 	}
+
 	s.dist = &meta.DistributionManager{
 		SegmentDistManager: meta.NewSegmentDistManager(),
 		ChannelDistManager: meta.NewChannelDistManager(),
@@ -189,14 +199,6 @@ func (s *Server) Init() error {
 	log.Debug("init session")
 	s.nodeMgr = session.NewNodeManager()
 	s.cluster = session.NewCluster(s.nodeMgr)
-	sessions, revision, err := s.session.GetSessions(typeutil.QueryNodeRole)
-	if err != nil {
-		return err
-	}
-	for _, node := range sessions {
-		s.nodeMgr.Add(session.NewNodeInfo(node.ServerID, node.Address))
-	}
-	go s.watchNodes(revision)
 
 	// Init schedulers
 	log.Debug("init schedulers")
@@ -209,6 +211,15 @@ func (s *Server) Init() error {
 		s.broker,
 		s.cluster,
 		s.nodeMgr,
+	)
+
+	// Init heartbeat
+	log.Debug("init dist controller")
+	s.distController = dist.NewDistController(
+		s.cluster,
+		s.nodeMgr,
+		s.dist,
+		s.scheduler,
 	)
 
 	// Init checker controller
@@ -245,6 +256,27 @@ func (s *Server) Init() error {
 }
 
 func (s *Server) Start() error {
+	log.Info("start watcher...")
+	sessions, revision, err := s.session.GetSessions(typeutil.QueryNodeRole)
+	if err != nil {
+		return err
+	}
+	for _, node := range sessions {
+		s.nodeMgr.Add(session.NewNodeInfo(node.ServerID, node.Address))
+	}
+	s.checkReplicas()
+	for _, node := range sessions {
+		s.handleNodeUp(node.ServerID)
+	}
+	s.wg.Add(1)
+	go s.watchNodes(revision)
+
+	log.Info("start recovering dist and target")
+	err = s.recover()
+	if err != nil {
+		return err
+	}
+
 	log.Info("start job scheduler...")
 	s.jobScheduler.Start(s.ctx)
 
@@ -272,6 +304,8 @@ func (s *Server) Stop() error {
 	s.leaderObserver.Stop()
 
 	s.session.Revoke(time.Second)
+
+	s.wg.Wait()
 	return nil
 }
 
@@ -355,6 +389,9 @@ func (s *Server) SetIndexCoord(indexCoord types.IndexCoord) error {
 }
 
 func (s *Server) recover() error {
+	// Fix replicas
+	s.checkReplicas()
+
 	// Recover target managers
 	for _, collection := range s.meta.GetAll() {
 		var (
@@ -385,10 +422,15 @@ func (s *Server) recover() error {
 		}
 	}
 
+	// Recover dist
+	s.distController.SyncAll(s.ctx)
+
 	return nil
 }
 
 func (s *Server) watchNodes(revision int64) {
+	defer s.wg.Done()
+
 	eventChan := s.session.WatchServices(typeutil.QueryNodeRole, revision, nil)
 	for {
 		select {
@@ -398,7 +440,7 @@ func (s *Server) watchNodes(revision int64) {
 		case event, ok := <-eventChan:
 			if !ok {
 				// ErrCompacted is handled inside SessionWatcher
-				log.Error("Session Watcher channel closed", zap.Int64("server id", s.session.ServerID))
+				log.Error("Session Watcher channel closed", zap.Int64("server-id", s.session.ServerID))
 				go s.Stop()
 				if s.session.TriggerKill {
 					if p, err := os.FindProcess(os.Getpid()); err == nil {
@@ -410,19 +452,81 @@ func (s *Server) watchNodes(revision int64) {
 
 			switch event.EventType {
 			case sessionutil.SessionAddEvent:
-				serverID := event.Session.ServerID
+				nodeID := event.Session.ServerID
 				addr := event.Session.Address
 				log.Info("add node to NodeManager",
-					zap.Int64("node-id", serverID),
-					zap.String("addr", addr),
+					zap.Int64("node-id", nodeID),
+					zap.String("node-addr", addr),
 				)
-				s.nodeMgr.Add(session.NewNodeInfo(serverID, addr))
+				s.nodeMgr.Add(session.NewNodeInfo(nodeID, addr))
+				s.handleNodeUp(nodeID)
 				s.metricsCacheManager.InvalidateSystemInfoMetrics()
 
 			case sessionutil.SessionDelEvent:
-				serverID := event.Session.ServerID
-				log.Info("a node down, remove it", zap.Int64("node-id", serverID))
-				s.nodeMgr.Remove(serverID)
+				nodeID := event.Session.ServerID
+				log.Info("a node down, remove it", zap.Int64("node-id", nodeID))
+				s.nodeMgr.Remove(nodeID)
+				s.handleNodeDown(nodeID)
+				s.metricsCacheManager.InvalidateSystemInfoMetrics()
+			}
+		}
+	}
+}
+
+func (s *Server) handleNodeUp(node int64) {
+	log := log.With(zap.Int64("node-id", node))
+	s.distController.StartDistInstance(s.ctx, node)
+
+	for _, collection := range s.meta.CollectionManager.GetAll() {
+		log := log.With(zap.Int64("collection-id", collection))
+		replica := s.meta.ReplicaManager.GetByCollectionAndNode(collection, node)
+		if replica == nil {
+			replicas := s.meta.ReplicaManager.GetByCollection(collection)
+			sort.Slice(replicas, func(i, j int) bool {
+				return replicas[i].Nodes.Len() < replicas[j].Nodes.Len()
+			})
+			// TODO(yah01): this may fail, need a component to check whether a node is assigned
+			err := s.meta.ReplicaManager.AddNode(replicas[0].GetID(), node)
+			if err != nil {
+				log.Warn("failed to assign node to collection's replicas", zap.Int64("replica-id", replica.GetID()))
+			}
+		}
+	}
+}
+
+func (s *Server) handleNodeDown(node int64) {
+	log := log.With(zap.Int64("node-id", node))
+	s.distController.Remove(node)
+
+	for _, collection := range s.meta.CollectionManager.GetAll() {
+		log := log.With(zap.Int64("collection-id", collection))
+		replica := s.meta.ReplicaManager.GetByCollectionAndNode(collection, node)
+		if replica == nil {
+			continue
+		}
+		err := s.meta.ReplicaManager.RemoveNode(replica.GetID(), node)
+		if err != nil {
+			log.Warn("failed to remove node from collection's replicas", zap.Int64("replica-id", replica.GetID()))
+		}
+	}
+}
+
+// checkReplicas checks whether replica contains offline node, and remove those nodes
+func (s *Server) checkReplicas() {
+	for _, collection := range s.meta.CollectionManager.GetAll() {
+		replicas := s.meta.ReplicaManager.GetByCollection(collection)
+		for _, replica := range replicas {
+			replica := replica.Clone()
+			toRemove := make([]int64, 0)
+			for node := range replica.Nodes {
+				if s.nodeMgr.Get(node) == nil {
+					toRemove = append(toRemove, node)
+				}
+			}
+
+			if len(toRemove) > 0 {
+				replica.RemoveNode(toRemove...)
+				s.meta.ReplicaManager.Put(replica)
 			}
 		}
 	}

@@ -26,7 +26,7 @@ type Store interface {
 	SavePartition(info ...*querypb.PartitionLoadInfo) error
 	SaveReplica(replica *querypb.Replica) error
 	GetCollections() ([]*querypb.CollectionLoadInfo, error)
-	GetPartitions() ([]*querypb.PartitionLoadInfo, error)
+	GetPartitions() (map[int64][]*querypb.PartitionLoadInfo, error)
 	GetReplicas() ([]*querypb.Replica, error)
 	ReleaseCollection(id int64) error
 	ReleasePartition(collection int64, partitions ...int64) error
@@ -91,18 +91,18 @@ func (s MetaStore) GetCollections() ([]*querypb.CollectionLoadInfo, error) {
 	return ret, nil
 }
 
-func (s MetaStore) GetPartitions() ([]*querypb.PartitionLoadInfo, error) {
+func (s MetaStore) GetPartitions() (map[int64][]*querypb.PartitionLoadInfo, error) {
 	_, values, err := s.cli.LoadWithPrefix(partitionLoadInfoPrefix)
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]*querypb.PartitionLoadInfo, 0, len(values))
+	ret := make(map[int64][]*querypb.PartitionLoadInfo)
 	for _, v := range values {
 		info := querypb.PartitionLoadInfo{}
 		if err := proto.Unmarshal([]byte(v), &info); err != nil {
 			return nil, err
 		}
-		ret = append(ret, &info)
+		ret[info.GetCollectionID()] = append(ret[info.GetCollectionID()], &info)
 	}
 	return ret, nil
 }
