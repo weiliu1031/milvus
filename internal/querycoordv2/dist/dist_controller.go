@@ -37,6 +37,15 @@ func (dc *DistController) Remove(nodeID int64) {
 	}
 }
 
+func (dc *DistController) SyncAll(ctx context.Context) {
+  dc.mu.RLock()
+  defer dc.mu.RUnlock()
+
+  for _, h := range dc.handlers {
+    h.getDistribution(ctx)
+  }
+}
+
 func (dc *DistController) Close() {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()

@@ -32,6 +32,7 @@ type distHandler struct {
 	scheduler   *task.Scheduler
 	dist        *meta.DistributionManager
 	target      *meta.TargetManager
+	mu          sync.Mutex
 }
 
 func (dh *distHandler) start(ctx context.Context) {
@@ -44,9 +45,12 @@ func (dh *distHandler) start(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			logger.Info("close dist handler due to context done")
+			return
 		case <-dh.c:
 			logger.Info("close dist handelr")
+			return
 		case <-ticker.C:
+			dh.mu.Lock()
 			cctx, cancel := context.WithTimeout(ctx, distReqTimeout)
 			resp, err := dh.client.GetDataDistribution(cctx, dh.nodeID, nil)
 			cancel()
@@ -63,6 +67,7 @@ func (dh *distHandler) start(ctx context.Context) {
 				log.RatedInfo(30.0, fmt.Sprintf("can not get data distribution from node %d for %d times", dh.nodeID, failures))
 				// TODO: kill the querynode server and stop the loop?
 			}
+			dh.mu.Unlock()
 		}
 	}
 }
@@ -88,9 +93,9 @@ func (dh *distHandler) handleDistResp(resp *querypb.GetDataDistributionResponse)
 		)
 	}
 
-  dh.updateSegmentsDistribution(resp)
-  dh.updateChannelsDistribution(resp)
-  dh.updateLeaderView(resp)
+	dh.updateSegmentsDistribution(resp)
+	dh.updateChannelsDistribution(resp)
+	dh.updateLeaderView(resp)
 
 	dh.scheduler.Dispatch(dh.nodeID)
 }
@@ -148,18 +153,32 @@ func (dh *distHandler) updateChannelsDistribution(resp *querypb.GetDataDistribut
 }
 
 func (dh *distHandler) updateLeaderView(resp *querypb.GetDataDistributionResponse) {
-  updates := make([]*meta.LeaderView, 0, len(resp.GetLeaderViews()))
-  for _, lview := range resp.GetLeaderViews() {
-    view := &meta.LeaderView{
-      ID: resp.GetNodeID(),
-      CollectionID: lview.GetCollection(),
-      Channel: lview.GetChannel(),
-      Segments: lview.GetSegmentNodePairs(),
-    }
-    updates = append(updates, view)
-  }
+	updates := make([]*meta.LeaderView, 0, len(resp.GetLeaderViews()))
+	for _, lview := range resp.GetLeaderViews() {
+		view := &meta.LeaderView{
+			ID:           resp.GetNodeID(),
+			CollectionID: lview.GetCollection(),
+			Channel:      lview.GetChannel(),
+			Segments:     lview.GetSegmentNodePairs(),
+		}
+		updates = append(updates, view)
+	}
 
-  dh.dist.LeaderViewManager.Update(updates...)
+	dh.dist.LeaderViewManager.Update(updates...)
+}
+
+func (dh *distHandler) getDistribution(ctx context.Context) {
+	dh.mu.Lock()
+	defer dh.mu.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, distReqTimeout)
+	resp, err := dh.client.GetDataDistribution(cctx, dh.nodeID, nil)
+	cancel()
+
+	if err != nil || resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		dh.logFailureInfo(resp, err)
+	} else {
+		dh.handleDistResp(resp)
+	}
 }
 
 func (dh *distHandler) close() {
