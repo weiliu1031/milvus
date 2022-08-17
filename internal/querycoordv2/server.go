@@ -293,11 +293,14 @@ func (s *Server) Start() error {
 func (s *Server) Stop() error {
 	s.cancel()
 
-	log.Info("stop job scheduler...")
-	s.jobScheduler.Stop()
+	log.Info("stop dist controller...")
+	s.distController.Stop()
 
 	log.Info("stop checker controller...")
 	s.checkerController.Stop()
+
+	log.Info("stop job scheduler...")
+	s.jobScheduler.Stop()
 
 	log.Info("stop observers...")
 	s.collectionObserver.Stop()

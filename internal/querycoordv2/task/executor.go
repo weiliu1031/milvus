@@ -238,7 +238,7 @@ func (ex *Executor) executeDmChannelAction(task *ChannelTask, action *ChannelAct
 		ex.subDmChannel(task, action)
 
 	case ActionTypeReduce:
-		// TODO(yah01): unsub DmChannel
+		ex.unsubDmChannel(task, action)
 
 	default:
 		panic(fmt.Sprintf("invalid action type: %+v", action.Type()))

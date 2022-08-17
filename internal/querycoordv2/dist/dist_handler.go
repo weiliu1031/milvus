@@ -181,7 +181,7 @@ func (dh *distHandler) getDistribution(ctx context.Context) {
 	}
 }
 
-func (dh *distHandler) close() {
+func (dh *distHandler) stop() {
 	close(dh.c)
 	dh.wg.Wait()
 }
