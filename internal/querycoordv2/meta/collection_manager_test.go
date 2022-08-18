@@ -229,7 +229,7 @@ func (suite *CollectionManagerSuite) loadAll() {
 
 func (suite *CollectionManagerSuite) clearMemory() {
 	suite.mgr.collections = make(map[int64]*Collection)
-	suite.mgr.parttions = make(map[int64]*Partition)
+	suite.mgr.partitions = make(map[int64]*Partition)
 }
 
 func TestCollectionManager(t *testing.T) {
