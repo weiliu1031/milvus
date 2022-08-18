@@ -70,7 +70,7 @@ func (c *SegmentChecker) checkReplica(ctx context.Context, replica *meta.Replica
 
 	// compare with targets to find the lack and redundancy of segments
 	lacks, redundancies := diffSegments(targets, dists)
-	tasks := c.createSegmentLoadTasks(ctx,  lacks, replica)
+	tasks := c.createSegmentLoadTasks(ctx, lacks, replica)
 	ret = append(ret, tasks...)
 
 	tasks = c.createSegmentReduceTasks(ctx, redundancies, replica.GetID())
@@ -78,7 +78,7 @@ func (c *SegmentChecker) checkReplica(ctx context.Context, replica *meta.Replica
 
 	// compare inner dists to find repeated loaded segments
 	redundancies = findRepeatedSegments(dists)
-  redundancies = c.filterExistedOnLeader(replica, redundancies)
+	redundancies = c.filterExistedOnLeader(replica, redundancies)
 	tasks = c.createSegmentReduceTasks(ctx, redundancies, replica.GetID())
 	ret = append(ret, tasks...)
 	return ret
@@ -132,21 +132,28 @@ func findRepeatedSegments(dists []*meta.Segment) []*meta.Segment {
 }
 
 func (c *SegmentChecker) filterExistedOnLeader(replica *meta.Replica, segments []*meta.Segment) []*meta.Segment {
-  filtered := make([]*meta.Segment, 0, len(segments))
-  for _, s :=range segments {
-    leaderID, ok :=  c.dist.ChannelDistManager.GetShardLeader(replica, s.GetInsertChannel())
-    if !ok {
-      continue
-    }
-    leaderView := c.dist.LeaderViewManager.GetLeaderView(leaderID)
-    node, ok :=  leaderView.Segments[s.GetID()]
-    if ok && node == s.Node {
-      // if this segment is serving on leader, do not remove it for search available
-      continue
-    }
-    filtered = append(filtered, s)
-  }
-  return filtered
+	filtered := make([]*meta.Segment, 0, len(segments))
+	for _, s := range segments {
+		leaderID, ok := c.dist.ChannelDistManager.GetShardLeader(replica, s.GetInsertChannel())
+		if !ok {
+			continue
+		}
+		onLeader := false
+		leaderViews := c.dist.LeaderViewManager.GetLeaderView(leaderID)
+		for _, view := range leaderViews {
+			node, ok := view.Segments[s.GetID()]
+			if ok && node == s.Node {
+				onLeader = true
+				break
+			}
+		}
+		if onLeader {
+			// if this segment is serving on leader, do not remove it for search available
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered
 }
 
 func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []*datapb.SegmentInfo, replica *meta.Replica) []task.Task {
@@ -163,13 +170,13 @@ func (c *SegmentChecker) createSegmentReduceTasks(ctx context.Context, segments 
 	for _, s := range segments {
 		action := task.NewSegmentAction(s.Node, task.ActionTypeReduce, s.GetID())
 		ret = append(ret, task.NewSegmentTask(
-      ctx, 
-      segmentTaskTimeout, 
-      c.ID(), 
-      s.GetCollectionID(), 
-      replicaID, 
-      action,
-    ))
+			ctx,
+			segmentTaskTimeout,
+			c.ID(),
+			s.GetCollectionID(),
+			replicaID,
+			action,
+		))
 	}
 	return ret
 }
@@ -187,13 +194,13 @@ func (c *SegmentChecker) createSegmentTaskFromPlans(ctx context.Context, plans [
 			actions = append(actions, action)
 		}
 		task := task.NewSegmentTask(
-      ctx, 
-      segmentTaskTimeout, 
-      c.ID(), 
-      p.Segment.GetCollectionID(), 
-      replicaID, 
-      actions...,
-    )
+			ctx,
+			segmentTaskTimeout,
+			c.ID(),
+			p.Segment.GetCollectionID(),
+			replicaID,
+			actions...,
+		)
 		ret = append(ret, task)
 	}
 	return ret
