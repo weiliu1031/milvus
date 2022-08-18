@@ -288,6 +288,9 @@ func (s *Server) Start() error {
 	s.collectionObserver.Start(s.ctx)
 	s.leaderObserver.Start(s.ctx)
 
+	s.status.Store(internalpb.StateCode_Healthy)
+	log.Info("QueryCoord started")
+
 	return nil
 }
 
@@ -393,9 +396,6 @@ func (s *Server) SetIndexCoord(indexCoord types.IndexCoord) error {
 }
 
 func (s *Server) recover() error {
-	// Fix replicas
-	s.checkReplicas()
-
 	// Recover target managers
 	for _, collection := range s.meta.GetAll() {
 		var (
@@ -518,6 +518,7 @@ func (s *Server) handleNodeDown(node int64) {
 // checkReplicas checks whether replica contains offline node, and remove those nodes
 func (s *Server) checkReplicas() {
 	for _, collection := range s.meta.CollectionManager.GetAll() {
+		log := log.With(zap.Int64("collection-id", collection))
 		replicas := s.meta.ReplicaManager.GetByCollection(collection)
 		for _, replica := range replicas {
 			replica := replica.Clone()
@@ -527,10 +528,18 @@ func (s *Server) checkReplicas() {
 					toRemove = append(toRemove, node)
 				}
 			}
+			log := log.With(
+				zap.Int64("replica-id", replica.GetID()),
+				zap.Int64s("offline-nodes", toRemove),
+			)
 
+			log.Debug("some nodes are offline, remove them from replica")
 			if len(toRemove) > 0 {
 				replica.RemoveNode(toRemove...)
-				s.meta.ReplicaManager.Put(replica)
+				err := s.meta.ReplicaManager.Put(replica)
+				if err != nil {
+					log.Warn("failed to remove offline nodes from replica")
+				}
 			}
 		}
 	}
