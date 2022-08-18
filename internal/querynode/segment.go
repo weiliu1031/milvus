@@ -77,6 +77,7 @@ type Segment struct {
 	segmentID    UniqueID
 	partitionID  UniqueID
 	collectionID UniqueID
+  version UniqueID
 
 	vChannelID   Channel
 	lastMemSize  int64
@@ -134,6 +135,7 @@ func (s *Segment) getType() segmentType {
 	defer s.typeMu.RUnlock()
 	return s.segmentType
 }
+
 
 func (s *Segment) setIndexedFieldInfo(fieldID UniqueID, info *IndexedFieldInfo) {
 	s.indexedFieldMutex.Lock()

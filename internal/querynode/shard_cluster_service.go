@@ -159,3 +159,14 @@ func (s *ShardClusterService) HandoffVChannelSegments(vchannel string, info *que
 	}
 	return err
 }
+
+func (s *ShardClusterService) GetShardClusters() []*ShardCluster {
+  ret := make([]*ShardCluster, 0)
+  s.clusters.Range(func(key, value any) bool {
+    ret = append(ret, value.(*ShardCluster))
+    return true
+  })
+  return ret
+}
+
+

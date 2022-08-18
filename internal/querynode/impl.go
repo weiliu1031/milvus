@@ -1152,9 +1152,56 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 
 	log.Debug("get data distribution request received")
 
-	// TODO: implement this interface
+	growingSegments := node.metaReplica.getGrowingSegments()
+	sealedSegments := node.metaReplica.getSealedSegments()
+	shardClusters := node.ShardClusterService.GetShardClusters()
+
+	growinsgSegmentIDs := make([]int64, 0, len(growingSegments))
+	for _, s := range growingSegments {
+		growinsgSegmentIDs = append(growinsgSegmentIDs, s.ID())
+	}
+
+	segmentVersionInfos := make([]*querypb.SegmentVersionInfo, 0, len(sealedSegments))
+	for _, s := range sealedSegments {
+		info := &querypb.SegmentVersionInfo{
+			ID:         s.ID(),
+			Collection: s.collectionID,
+			Partition:  s.partitionID,
+			Channel:    s.vChannelID,
+			Version:    s.version,
+		}
+		segmentVersionInfos = append(segmentVersionInfos, info)
+	}
+
+	channelVersionInfos := make([]*querypb.ChannelVersionInfo, 0, len(shardClusters))
+	leaderViews := make([]*querypb.LeaderView, 0, len(shardClusters))
+	for _, sc := range shardClusters {
+		segmentInfos := sc.GetSegmentInfos()
+		mapping := make(map[int64]int64)
+		for _, info := range segmentInfos {
+			mapping[info.segmentID] = info.nodeID
+		}
+		view := &querypb.LeaderView{
+			Collection:       sc.collectionID,
+			Channel:          sc.vchannelName,
+			SegmentNodePairs: mapping,
+		}
+		leaderViews = append(leaderViews, view)
+
+		channelInfo := &querypb.ChannelVersionInfo{
+			Channel:    sc.vchannelName,
+			Collection: sc.collectionID,
+			Version:    sc.getVersion(),
+		}
+		channelVersionInfos = append(channelVersionInfos, channelInfo)
+	}
 
 	return &querypb.GetDataDistributionResponse{
-		Status: &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success},
+		Status:            &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success},
+		NodeID:            node.session.ServerID,
+		GrowingSegmentIDs: growinsgSegmentIDs,
+		Segments:          segmentVersionInfos,
+		Channels:          channelVersionInfos,
+		LeaderViews:       leaderViews,
 	}, nil
 }

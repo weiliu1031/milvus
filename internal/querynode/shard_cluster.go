@@ -132,6 +132,7 @@ type ShardCluster struct {
 	collectionID int64
 	replicaID    int64
 	vchannelName string
+  version int64
 
 	nodeDetector    ShardNodeDetector
 	segmentDetector ShardSegmentDetector
@@ -991,3 +992,19 @@ func (sc *ShardCluster) Query(ctx context.Context, req *querypb.QueryRequest, wi
 
 	return results, nil
 }
+
+func (sc *ShardCluster) GetSegmentInfos()  []shardSegmentInfo{
+  ret := make([]shardSegmentInfo, 0, len(sc.segments))
+  for _, info := range sc.segments {
+    ret = append(ret, info)
+  }
+  return ret
+}
+
+func (sc *ShardCluster) getVersion() int64{
+  sc.mut.RLock()
+  defer sc.mut.RUnlock()
+  return sc.version
+}
+
+

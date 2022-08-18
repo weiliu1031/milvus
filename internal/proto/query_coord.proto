@@ -60,6 +60,7 @@ service QueryNode {
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
 
   rpc GetDataDistribution(GetDataDistributionRequest) returns (GetDataDistributionResponse) {}
+  rpc SyncDistribution(SyncDistributionRequest) returns (common.Status) {}
 }
 
 //--------------------QueryCoord grpc request and response proto------------------
@@ -464,7 +465,23 @@ message PartitionLoadInfo {
 }
 
 message Replica {
-    int64 ID = 1;
-    int64 collectionID = 2;
-    repeated int64 nodes = 3;
+  int64 ID = 1;
+  int64 collectionID = 2;
+  repeated int64 nodes = 3;
+}
+
+enum SyncType {
+  Remove = 0;
+  Set = 1;
+}
+
+message SyncAction {
+  SyncType type = 1;
+  int64 segmentID = 2;
+  int64 nodeID = 3;
+}
+
+message SyncDistributionRequest {
+  common.MsgBase base = 1;
+  repeated SyncAction actions = 2;
 }

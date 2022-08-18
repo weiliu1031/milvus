@@ -114,6 +114,9 @@ type ReplicaInterface interface {
 	freeAll()
 	// printReplica prints the collections, partitions and segments in the collectionReplica
 	printReplica()
+
+  getGrowingSegments() []*Segment
+  getSealedSegments() []*Segment
 }
 
 // collectionReplica is the data replication of memory data in query node.
@@ -749,6 +752,27 @@ func (replica *metaReplica) freeAll() {
 	replica.sealedSegments = make(map[UniqueID]*Segment)
 }
 
+func  (replica *metaReplica) getGrowingSegments() []*Segment {
+  replica.mu.RLock()
+  defer replica.mu.RUnlock()
+
+  ret := make([]*Segment, 0, len(replica.growingSegments))
+  for _, s := range replica.growingSegments {
+    ret = append(ret, s)
+  }
+  return ret
+}
+
+func  (replica *metaReplica) getSealedSegments() []*Segment {
+  replica.mu.RLock()
+  defer replica.mu.RUnlock()
+
+  ret := make([]*Segment, 0, len(replica.sealedSegments))
+  for _, s := range replica.sealedSegments {
+    ret = append(ret, s)
+  }
+  return ret
+}
 // newCollectionReplica returns a new ReplicaInterface
 func newCollectionReplica(pool *concurrency.Pool) ReplicaInterface {
 	var replica ReplicaInterface = &metaReplica{
