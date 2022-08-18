@@ -98,10 +98,9 @@ func (mgr *LeaderViewManager) GetChannelDist(channel string) []int64 {
 
 	nodes := make([]int64, 0)
 	for leaderID, views := range mgr.views {
-		for _, view := range views {
-			if view.Channel == channel {
-				nodes = append(nodes, leaderID)
-			}
+		_, ok := views[channel]
+		if ok {
+			nodes = append(nodes, leaderID)
 		}
 	}
 	return nodes

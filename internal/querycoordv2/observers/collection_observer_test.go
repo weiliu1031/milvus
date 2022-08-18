@@ -1,6 +1,8 @@
 package observers
 
 import (
+	"context"
+	"testing"
 	"time"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -21,9 +23,9 @@ type CollectionObserverSuite struct {
 	partitions     map[int64][]int64 // CollectionID -> PartitionIDs
 	channels       map[int64][]*meta.DmChannel
 	segments       map[int64][]*datapb.SegmentInfo // CollectionID -> []datapb.SegmentInfo
-	loadTypes      []querypb.LoadType
-	replicaNumber  []int32
-	loadPercentage []int32
+	loadTypes      map[int64]querypb.LoadType
+	replicaNumber  map[int64]int32
+	loadPercentage map[int64]int32
 	nodes          []int64
 
 	// Mocks
@@ -99,12 +101,18 @@ func (suite *CollectionObserverSuite) SetupSuite() {
 			},
 		},
 	}
-	suite.loadTypes = []querypb.LoadType{
-		querypb.LoadType_LoadCollection,
-		querypb.LoadType_LoadPartition,
+	suite.loadTypes = map[int64]querypb.LoadType{
+		100: querypb.LoadType_LoadCollection,
+		101: querypb.LoadType_LoadPartition,
 	}
-	suite.replicaNumber = []int32{1, 2}
-	suite.loadPercentage = []int32{0, 50}
+	suite.replicaNumber = map[int64]int32{
+		100: 1,
+		101: 1,
+	}
+	suite.loadPercentage = map[int64]int32{
+		100: 0,
+		101: 50,
+	}
 	suite.nodes = []int64{1, 2, 3}
 }
 
@@ -129,42 +137,112 @@ func (suite *CollectionObserverSuite) SetupTest() {
 		suite.meta,
 		suite.targetMgr,
 	)
+
+	suite.loadAll()
 }
 
-func (suite *CollectionObserverSuite) TestObserveTimeout() {
+func (suite *CollectionObserverSuite) TearDownTest() {
+	suite.ob.Stop()
+}
 
+func (suite *CollectionObserverSuite) TestObserve() {
+	const (
+		timeout = 2 * time.Second
+	)
+	// Not timeout
+	suite.ob.loadTimeout = timeout
+	suite.ob.Start(context.Background())
+
+	// Collection 100 loaded before timeout,
+	// collection 101 timeout
+	suite.dist.LeaderViewManager.Update(&meta.LeaderView{
+		ID:           1,
+		CollectionID: 100,
+		Channel:      "100-dmc0",
+		Segments:     map[int64]int64{1: 1},
+	})
+	suite.dist.LeaderViewManager.Update(&meta.LeaderView{
+		ID:           2,
+		CollectionID: 100,
+		Channel:      "100-dmc1",
+		Segments:     map[int64]int64{2: 2},
+	})
+	suite.Eventually(func() bool {
+		return suite.isCollectionLoaded(suite.collections[0]) &&
+			suite.isCollectionTimeout(suite.collections[1])
+	}, timeout*2, suite.ob.loadTimeout/10)
+}
+
+func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool {
+	exist := suite.meta.Exist(collection)
+	percentage := suite.meta.GetLoadPercentage(collection)
+	status := suite.meta.GetStatus(collection)
+	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
+	channels := suite.targetMgr.GetDmChannelsByCollection(collection)
+	segments := suite.targetMgr.GetSegmentsByCollection(collection)
+
+	return exist &&
+		percentage == 100 &&
+		status == querypb.LoadStatus_Loaded &&
+		len(replicas) == int(suite.replicaNumber[collection]) &&
+		len(channels) == len(suite.channels[collection]) &&
+		len(segments) == len(suite.segments[collection])
+}
+
+func (suite *CollectionObserverSuite) isCollectionTimeout(collection int64) bool {
+	exist := suite.meta.Exist(collection)
+	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
+	channels := suite.targetMgr.GetDmChannelsByCollection(collection)
+	segments := suite.targetMgr.GetSegmentsByCollection(collection)
+
+	return !(exist || len(replicas) > 0 || len(channels) > 0 || len(segments) > 0)
 }
 
 func (suite *CollectionObserverSuite) loadAll() {
-	for i, collection := range suite.collections {
-		status := querypb.LoadStatus_Loaded
-		if suite.loadPercentage[i] < 100 {
-			status = querypb.LoadStatus_Loading
-		}
+	for _, collection := range suite.collections {
+		suite.load(collection)
+	}
+}
 
-		if suite.loadTypes[i] == querypb.LoadType_LoadCollection {
-			suite.meta.PutCollection(&meta.Collection{
-				CollectionLoadInfo: &querypb.CollectionLoadInfo{
+func (suite *CollectionObserverSuite) load(collection int64) {
+	// Mock meta data
+	replicas, err := suite.meta.ReplicaManager.Spawn(collection, suite.replicaNumber[collection])
+	suite.NoError(err)
+	for _, replica := range replicas {
+		replica.AddNode(suite.nodes...)
+	}
+	err = suite.meta.ReplicaManager.Put(replicas...)
+	suite.NoError(err)
+
+	if suite.loadTypes[collection] == querypb.LoadType_LoadCollection {
+		suite.meta.PutCollection(&meta.Collection{
+			CollectionLoadInfo: &querypb.CollectionLoadInfo{
+				CollectionID:  collection,
+				ReplicaNumber: suite.replicaNumber[collection],
+				Status:        querypb.LoadStatus_Loading,
+			},
+			LoadPercentage: 0,
+			CreatedAt:      time.Now(),
+		})
+	} else {
+		for _, partition := range suite.partitions[collection] {
+			suite.meta.PutPartition(&meta.Partition{
+				PartitionLoadInfo: &querypb.PartitionLoadInfo{
 					CollectionID:  collection,
-					ReplicaNumber: suite.replicaNumber[i],
-					Status:        status,
+					PartitionID:   partition,
+					ReplicaNumber: suite.replicaNumber[collection],
+					Status:        querypb.LoadStatus_Loading,
 				},
-				LoadPercentage: suite.loadPercentage[i],
+				LoadPercentage: 0,
 				CreatedAt:      time.Now(),
 			})
-		} else {
-			for _, partition := range suite.partitions[collection] {
-				suite.meta.PutPartition(&meta.Partition{
-					PartitionLoadInfo: &querypb.PartitionLoadInfo{
-						CollectionID:  collection,
-						PartitionID:   partition,
-						ReplicaNumber: suite.replicaNumber[i],
-						Status:        status,
-					},
-					LoadPercentage: suite.loadPercentage[i],
-					CreatedAt:      time.Now(),
-				})
-			}
 		}
 	}
+
+	suite.targetMgr.AddDmChannel(suite.channels[collection]...)
+	suite.targetMgr.AddSegment(suite.segments[collection]...)
+}
+
+func TestCollectionObserver(t *testing.T) {
+	suite.Run(t, new(CollectionObserverSuite))
 }

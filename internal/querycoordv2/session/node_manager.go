@@ -55,13 +55,6 @@ type NodeInfo struct {
 	addr string
 }
 
-func (n *NodeInfo) NewNodeInfo(id int64, addr string) *NodeInfo {
-	return &NodeInfo{
-		id:   id,
-		addr: addr,
-	}
-}
-
 func (n *NodeInfo) ID() int64 {
 	return n.id
 }

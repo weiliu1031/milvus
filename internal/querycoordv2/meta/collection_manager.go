@@ -39,14 +39,14 @@ type CollectionManager struct {
 	rwmutex sync.RWMutex
 
 	collections map[UniqueID]*Collection
-	parttions   map[UniqueID]*Partition
+	partitions  map[UniqueID]*Partition
 	store       Store
 }
 
 func NewCollectionManager(store Store) *CollectionManager {
 	return &CollectionManager{
 		collections: make(map[int64]*Collection),
-		parttions:   make(map[int64]*Partition),
+		partitions:  make(map[int64]*Partition),
 		store:       store,
 	}
 }
@@ -86,7 +86,7 @@ func (m *CollectionManager) Recover() error {
 				break
 			}
 
-			m.parttions[partition.PartitionID] = &Partition{
+			m.partitions[partition.PartitionID] = &Partition{
 				PartitionLoadInfo: partition,
 			}
 		}
@@ -106,7 +106,7 @@ func (m *CollectionManager) GetPartition(id UniqueID) *Partition {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	return m.parttions[id]
+	return m.partitions[id]
 }
 
 func (m *CollectionManager) GetLoadType(id UniqueID) querypb.LoadType {
@@ -155,6 +155,26 @@ func (m *CollectionManager) GetLoadPercentage(id UniqueID) int32 {
 	return -1
 }
 
+func (m *CollectionManager) GetStatus(id UniqueID) querypb.LoadStatus {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	collection, ok := m.collections[id]
+	if ok {
+		return collection.GetStatus()
+	}
+	partitions := m.getPartitionsByCollection(id)
+	if len(partitions) == 0 {
+		return querypb.LoadStatus_Invalid
+	}
+	for _, partition := range partitions {
+		if partition.GetStatus() == querypb.LoadStatus_Loading {
+			return querypb.LoadStatus_Loading
+		}
+	}
+	return querypb.LoadStatus_Loaded
+}
+
 func (m *CollectionManager) Exist(id UniqueID) bool {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
@@ -176,7 +196,7 @@ func (m *CollectionManager) GetAll() []int64 {
 	for _, collection := range m.collections {
 		ids.Insert(collection.GetCollectionID())
 	}
-	for _, partition := range m.parttions {
+	for _, partition := range m.partitions {
 		ids.Insert(partition.GetCollectionID())
 	}
 	return ids.Collect()
@@ -193,7 +213,7 @@ func (m *CollectionManager) GetAllPartitions() []*Partition {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	return lo.Values(m.parttions)
+	return lo.Values(m.partitions)
 }
 
 func (m *CollectionManager) GetPartitionsByCollection(collectionID UniqueID) []*Partition {
@@ -205,7 +225,7 @@ func (m *CollectionManager) GetPartitionsByCollection(collectionID UniqueID) []*
 
 func (m *CollectionManager) getPartitionsByCollection(collectionID UniqueID) []*Partition {
 	partitions := make([]*Partition, 0)
-	for _, partition := range m.parttions {
+	for _, partition := range m.partitions {
 		if partition.CollectionID == collectionID {
 			partitions = append(partitions, partition)
 		}
@@ -268,7 +288,7 @@ func (m *CollectionManager) UpdatePartition(partition *Partition) error {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	_, ok := m.parttions[partition.GetPartitionID()]
+	_, ok := m.partitions[partition.GetPartitionID()]
 	if !ok {
 		return ErrPartitionNotFound
 	}
@@ -280,7 +300,7 @@ func (m *CollectionManager) UpdatePartitionInMemory(partition *Partition) bool {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
 
-	_, ok := m.parttions[partition.GetPartitionID()]
+	_, ok := m.partitions[partition.GetPartitionID()]
 	if !ok {
 		return false
 	}
@@ -300,7 +320,7 @@ func (m *CollectionManager) putPartition(partitions []*Partition, withSave bool)
 		}
 	}
 	for _, partition := range partitions {
-		m.parttions[partition.GetPartitionID()] = partition
+		m.partitions[partition.GetPartitionID()] = partition
 	}
 	return nil
 }
@@ -334,13 +354,13 @@ func (m *CollectionManager) RemovePartition(ids ...UniqueID) error {
 }
 
 func (m *CollectionManager) removePartition(ids ...UniqueID) error {
-	partition := m.parttions[ids[0]]
+	partition := m.partitions[ids[0]]
 	err := m.store.ReleasePartition(partition.CollectionID, ids...)
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
-		delete(m.parttions, id)
+		delete(m.partitions, id)
 	}
 
 	return nil

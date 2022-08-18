@@ -87,7 +87,7 @@ func AssignNodesToReplicas(nodeMgr *session.NodeManager, replicas ...*meta.Repli
 	}
 }
 
-// SpawnReplicas spawns replicas for given collection, and assign nodes to them
+// SpawnReplicas spawns replicas for given collection, assign nodes to them, and save them
 func SpawnReplicas(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeManager, collection int64, replicaNumber int32) error {
 	replicas, err := replicaMgr.Spawn(collection, replicaNumber)
 	if err != nil {
