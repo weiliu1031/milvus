@@ -6,6 +6,7 @@ import (
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/mocks"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/stretchr/testify/suite"
@@ -14,19 +15,29 @@ import (
 type CollectionManagerSuite struct {
 	suite.Suite
 
+	// Data
 	collections    []int64
+	partitions     map[int64][]int64 // CollectionID -> PartitionIDs
 	loadTypes      []querypb.LoadType
 	replicaNumber  []int32
 	loadPercentage []int32
-	partitions     map[int64][]int64 // CollectionID -> PartitionIDs
-	store          Store
-	mgr            *CollectionManager
+
+	// Mocks
+	store Store
+
+	// Test object
+	mgr *CollectionManager
 }
 
 func (suite *CollectionManagerSuite) SetupSuite() {
 	Params.Init()
 
 	suite.collections = []int64{100, 101, 102}
+	suite.partitions = map[int64][]int64{
+		100: {10},
+		101: {11, 12},
+		102: {13, 14, 15},
+	}
 	suite.loadTypes = []querypb.LoadType{
 		querypb.LoadType_LoadCollection,
 		querypb.LoadType_LoadPartition,
@@ -34,15 +45,10 @@ func (suite *CollectionManagerSuite) SetupSuite() {
 	}
 	suite.replicaNumber = []int32{1, 2, 3}
 	suite.loadPercentage = []int32{0, 50, 100}
-	suite.partitions = map[int64][]int64{
-		100: {10},
-		101: {11, 12},
-		102: {13, 14, 15},
-	}
 }
 
 func (suite *CollectionManagerSuite) SetupTest() {
-	config := generateEtcdConfig()
+	config := mocks.GenerateEtcdConfig()
 	etcd, err := etcd.GetEtcdClient(&config)
 	suite.Require().NoError(err)
 	kv := etcdkv.NewEtcdKV(etcd, config.MetaRootPath)

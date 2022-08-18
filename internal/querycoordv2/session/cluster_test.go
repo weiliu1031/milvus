@@ -56,9 +56,9 @@ func (suite *ClusterTestSuite) setupCluster() {
 	nodeManager := NewNodeManager()
 	for i, lis := range suite.listners {
 		node := NewNodeInfo(int64(i), lis.Addr().String())
-		nodeManager.Add(&node)
+		nodeManager.Add(node)
 	}
-	suite.cluster = NewCluster(&nodeManager)
+	suite.cluster = NewCluster(nodeManager)
 }
 
 func (suite *ClusterTestSuite) createTestServers() []querypb.QueryNodeServer {

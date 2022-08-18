@@ -165,10 +165,7 @@ func (s *Server) Init() error {
 	// Init meta
 	log.Debug("init meta")
 	store := meta.NewMetaStore(s.kv)
-	s.meta = &meta.Meta{
-		CollectionManager: meta.NewCollectionManager(store),
-		ReplicaManager:    meta.NewReplicaManager(s.idAllocator, store),
-	}
+	s.meta = meta.NewMeta(s.idAllocator, store)
 
 	log.Debug("recover meta...")
 	err = s.meta.CollectionManager.Recover()

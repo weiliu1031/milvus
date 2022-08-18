@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/querycoordv2/mocks"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/stretchr/testify/suite"
@@ -29,13 +30,13 @@ func (suite *ReplicaManagerSuite) SetupSuite() {
 }
 
 func (suite *ReplicaManagerSuite) SetupTest() {
-	config := generateEtcdConfig()
+	config := mocks.GenerateEtcdConfig()
 	etcd, err := etcd.GetEtcdClient(&config)
 	suite.Require().NoError(err)
 	kv := etcdkv.NewEtcdKV(etcd, config.MetaRootPath)
 	suite.store = NewMetaStore(kv)
 
-	suite.idAllocator = randomIncrementIDAllocator()
+	suite.idAllocator = mocks.RandomIncrementIDAllocator()
 	suite.mgr = NewReplicaManager(suite.idAllocator, suite.store)
 	suite.spawnAndPutAll()
 }
@@ -49,7 +50,7 @@ func (suite *ReplicaManagerSuite) TestSpawn() {
 		suite.Len(replicas, int(suite.replicaNumbers[i]))
 	}
 
-	mgr.idAllocator = errorIDAllocator()
+	mgr.idAllocator = mocks.ErrorIDAllocator()
 	for i, collection := range suite.collections {
 		_, err := mgr.Spawn(collection, suite.replicaNumbers[i])
 		suite.Error(err)
