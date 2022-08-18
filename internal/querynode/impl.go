@@ -328,6 +328,14 @@ func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmC
 	panic("not implemented")
 }
 
+// WatchDeltaChannels create consumers on dmChannels to receive Incremental data，which is the important part of real-time query
+// Deprecated
+func (node *QueryNode) WatchDeltaChannels(ctx context.Context, in *querypb.WatchDeltaChannelsRequest) (*commonpb.Status, error) {
+	return &commonpb.Status{
+		ErrorCode: commonpb.ErrorCode_Success,
+	}, nil
+}
+
 // LoadSegments load historical data into query node, historical data can be vector data or index
 func (node *QueryNode) LoadSegments(ctx context.Context, in *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
 	code := node.stateCode.Load().(internalpb.StateCode)
