@@ -37,18 +37,18 @@ func FilterReleased[E interface{ GetCollectionID() int64 }](elems []E, collectio
 }
 
 func FindMaxVersionSegments(segments []*meta.Segment) []*meta.Segment {
-  versions := make(map[int64]int64)
-  segMap := make(map[int64]*meta.Segment)
-  for _, s := range segments {
-    v, ok := versions[s.GetID()]
-    if !ok || v < s.Version{
-      versions[s.GetID()] = s.Version
-      segMap[s.GetID()] = s
-    }
-  }
-  ret := make([]*meta.Segment,0)
-  for _, s := range segMap {
-    ret = append(ret, s)
-  }
-  return ret
+	versions := make(map[int64]int64)
+	segMap := make(map[int64]*meta.Segment)
+	for _, s := range segments {
+		v, ok := versions[s.GetID()]
+		if !ok || v < s.Version {
+			versions[s.GetID()] = s.Version
+			segMap[s.GetID()] = s
+		}
+	}
+	ret := make([]*meta.Segment, 0)
+	for _, s := range segMap {
+		ret = append(ret, s)
+	}
+	return ret
 }

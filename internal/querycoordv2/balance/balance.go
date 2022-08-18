@@ -88,8 +88,8 @@ func (b *RoundRobinBalancer) Balance() ([]SegmentAssignPlan, []ChannelAssignPlan
 }
 
 func NewRoundRobinBalancer(scheduler *task.Scheduler, nodeManager *session.NodeManager) *RoundRobinBalancer {
-  return &RoundRobinBalancer{
-    scheduler: scheduler,
-    nodeManager: nodeManager,
-  }
+	return &RoundRobinBalancer{
+		scheduler:   scheduler,
+		nodeManager: nodeManager,
+	}
 }

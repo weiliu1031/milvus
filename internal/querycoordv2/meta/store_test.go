@@ -3,7 +3,6 @@ package meta
 import (
 	"testing"
 
-	memkv "github.com/milvus-io/milvus/internal/kv/mem"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -13,8 +12,8 @@ type StoreTestSuite struct {
 }
 
 func (suite *StoreTestSuite) SetupTest() {
-	kv := memkv.NewMemoryKV()
-	suite.store = NewMetaStore(kv)
+	//kv := memkv.NewMemoryKV()
+	//suite.store = NewMetaStore(kv)
 }
 
 func (suite *StoreTestSuite) TearDownTest() {}

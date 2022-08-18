@@ -10,7 +10,9 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 )
+
 const channelTaskTimeout = 10 * time.Second
+
 // TODO(sunby): have too much similar codes with SegmentChecker
 type ChannelChecker struct {
 	baseChecker
@@ -47,7 +49,7 @@ func (c *ChannelChecker) Check(ctx context.Context) []task.Task {
 	for _, cid := range collectionIDs {
 		replicas := c.meta.ReplicaManager.GetByCollection(cid)
 		for _, r := range replicas {
-			tasks = append(tasks, c.checkReplica(ctx,r)...)
+			tasks = append(tasks, c.checkReplica(ctx, r)...)
 		}
 	}
 
@@ -121,33 +123,31 @@ func findRepeatedChannels(dists []*meta.DmChannel) []*meta.DmChannel {
 	return ret
 }
 
-func (c *ChannelChecker)createChannelLoadTask(ctx context.Context,  channels []*meta.DmChannel, replica *meta.Replica) []task.Task {
-  plans:= c.balancer.AssignChannel(channels, replica.Nodes.Collect())
-  ret := make([]task.Task, 0, len(plans))
-  for _, p := range plans {
-    actions := make([]task.Action, 0)
-    if p.To != -1 {
-      action := task.NewChannelAction(p.To, task.ActionTypeGrow, p.Channel.GetChannelName())
-      actions = append(actions, action)
-    }
-    if p.From != -1 {
-      action := task.NewChannelAction(p.From, task.ActionTypeReduce, p.Channel.GetChannelName())
-      actions = append(actions, action)
-    }
-    task := task.NewChannelTask(ctx, channelTaskTimeout, c.ID(), p.Channel.GetCollectionID(), replica.GetID(), actions...)
-    ret  = append(ret, task)
-  }
+func (c *ChannelChecker) createChannelLoadTask(ctx context.Context, channels []*meta.DmChannel, replica *meta.Replica) []task.Task {
+	plans := c.balancer.AssignChannel(channels, replica.Nodes.Collect())
+	ret := make([]task.Task, 0, len(plans))
+	for _, p := range plans {
+		actions := make([]task.Action, 0)
+		if p.To != -1 {
+			action := task.NewChannelAction(p.To, task.ActionTypeGrow, p.Channel.GetChannelName())
+			actions = append(actions, action)
+		}
+		if p.From != -1 {
+			action := task.NewChannelAction(p.From, task.ActionTypeReduce, p.Channel.GetChannelName())
+			actions = append(actions, action)
+		}
+		task := task.NewChannelTask(ctx, channelTaskTimeout, c.ID(), p.Channel.GetCollectionID(), replica.GetID(), actions...)
+		ret = append(ret, task)
+	}
 	return ret
 }
 
-func (c *ChannelChecker)createChannelReduceTasks(ctx context.Context, channels []*meta.DmChannel, replicaID int64) []task.Task {
-  ret := make([]task.Task, 0, len(channels))
-  for _, ch := range channels {
-    action := task.NewChannelAction(ch.Node, task.ActionTypeReduce, ch.GetChannelName())
-    task:= task.NewChannelTask(ctx, channelTaskTimeout, c.ID(), ch.GetCollectionID(), replicaID, action)
-    ret = append(ret, task)
-  }
+func (c *ChannelChecker) createChannelReduceTasks(ctx context.Context, channels []*meta.DmChannel, replicaID int64) []task.Task {
+	ret := make([]task.Task, 0, len(channels))
+	for _, ch := range channels {
+		action := task.NewChannelAction(ch.Node, task.ActionTypeReduce, ch.GetChannelName())
+		task := task.NewChannelTask(ctx, channelTaskTimeout, c.ID(), ch.GetCollectionID(), replicaID, action)
+		ret = append(ret, task)
+	}
 	return ret
 }
-
-

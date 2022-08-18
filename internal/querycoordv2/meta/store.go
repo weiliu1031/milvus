@@ -5,9 +5,13 @@ import (
 	"fmt"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/milvus-io/milvus/internal/kv"
-	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/samber/lo"
+	clientv3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 )
 
 var (
@@ -19,6 +23,8 @@ const (
 	partitionLoadInfoPrefix  = "querycoord-partition-loadinfo"
 	replicaPrefix            = "querycoord-replica"
 )
+
+type WatchStoreChan = clientv3.WatchChan
 
 // Store is used to save and get from object storage.
 type Store interface {
@@ -32,13 +38,15 @@ type Store interface {
 	ReleasePartition(collection int64, partitions ...int64) error
 	ReleaseReplicas(collectionID int64) error
 	ReleaseReplica(collection, replica int64) error
+	RemoveHandoffEvent(segmentInfo *datapb.SegmentInfo) error
+	WatchHandoffEvent(revision int64) WatchStoreChan
 }
 
 type MetaStore struct {
-	cli kv.TxnKV
+	cli kv.MetaKv
 }
 
-func NewMetaStore(cli kv.TxnKV) MetaStore {
+func NewMetaStore(cli kv.MetaKv) MetaStore {
 	return MetaStore{
 		cli: cli,
 	}
@@ -145,6 +153,15 @@ func (s MetaStore) ReleaseReplica(collection, replica int64) error {
 	return s.cli.Remove(key)
 }
 
+func (s MetaStore) WatchHandoffEvent(revision int64) WatchStoreChan {
+	return s.cli.WatchWithRevision(util.HandoffSegmentPrefix, revision)
+}
+
+func (s MetaStore) RemoveHandoffEvent(info *datapb.SegmentInfo) error {
+	key := encodeHandoffEventKey(info.CollectionID, info.PartitionID, info.ID)
+	return s.cli.Remove(key)
+}
+
 func encodeCollectionLoadInfoKey(collection int64) string {
 	return fmt.Sprintf("%s/%d", collectionLoadInfoPrefix, collection)
 }
@@ -159,4 +176,8 @@ func encodeReplicaKey(collection, replica int64) string {
 
 func encodeCollectionReplicaKey(collection int64) string {
 	return fmt.Sprintf("%s/%d", replicaPrefix, collection)
+}
+
+func encodeHandoffEventKey(collection, partition, segment int64) string {
+	return fmt.Sprintf("%s/%d/%d/%d", util.HandoffSegmentPrefix, collection, partition, segment)
 }

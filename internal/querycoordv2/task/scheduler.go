@@ -297,9 +297,9 @@ func calculateNodeDelta[K comparable, T ~map[K]Task](nodeID int64, tasks T) int 
 	delta := 0
 	for _, task := range tasks {
 		for _, action := range task.Actions() {
-      if action.Node() != nodeID {
-        continue
-      }
+			if action.Node() != nodeID {
+				continue
+			}
 			if action.Type() == ActionTypeGrow {
 				delta++
 			} else if action.Type() == ActionTypeReduce {
@@ -311,25 +311,25 @@ func calculateNodeDelta[K comparable, T ~map[K]Task](nodeID int64, tasks T) int 
 }
 
 func (scheduler *Scheduler) GetNodeSegmentCntDelta(nodeID int64) int {
-  scheduler.rwmutex.RLock()
-  defer scheduler.rwmutex.RUnlock()
+	scheduler.rwmutex.RLock()
+	defer scheduler.rwmutex.RUnlock()
 
-  delta := 0
-  for _, task := range scheduler.segmentTasks {
-    for _, action := range task.Actions() {
-      if action.Node() != nodeID {
-        continue
-      }
-      segmentAction := action.(*SegmentAction)
-      segment := scheduler.targetMgr.GetSegment(segmentAction.SegmentID())
-      if action.Type() == ActionTypeGrow {
-        delta += int(segment.GetNumOfRows())
-      } else {
-        delta -= int(segment.GetNumOfRows())
-      }
-    }
-  }
-  return delta
+	delta := 0
+	for _, task := range scheduler.segmentTasks {
+		for _, action := range task.Actions() {
+			if action.Node() != nodeID {
+				continue
+			}
+			segmentAction := action.(*SegmentAction)
+			segment := scheduler.targetMgr.GetSegment(segmentAction.SegmentID())
+			if action.Type() == ActionTypeGrow {
+				delta += int(segment.GetNumOfRows())
+			} else {
+				delta -= int(segment.GetNumOfRows())
+			}
+		}
+	}
+	return delta
 }
 
 // schedule selects some tasks to execute, follow these steps for each started selected tasks:

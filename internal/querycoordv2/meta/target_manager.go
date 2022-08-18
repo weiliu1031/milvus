@@ -5,22 +5,19 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 type TargetManager struct {
 	rwmutex sync.RWMutex
 
-	segments        map[int64]*datapb.SegmentInfo
-	growingSegments typeutil.UniqueSet // Growing segments to release
-	dmChannels      map[string]*DmChannel
+	segments   map[int64]*datapb.SegmentInfo
+	dmChannels map[string]*DmChannel
 }
 
 func NewTargetManager() *TargetManager {
 	return &TargetManager{
-		segments:        make(map[int64]*datapb.SegmentInfo),
-		growingSegments: make(typeutil.UniqueSet),
-		dmChannels:      make(map[string]*DmChannel),
+		segments:   make(map[int64]*datapb.SegmentInfo),
+		dmChannels: make(map[string]*DmChannel),
 	}
 }
 
@@ -59,24 +56,6 @@ func (mgr *TargetManager) RemoveSegment(segmentID int64) {
 	defer mgr.rwmutex.Unlock()
 
 	delete(mgr.segments, segmentID)
-}
-
-func (mgr *TargetManager) RegisterGrowingSegmentToRelease(segmentIDs ...typeutil.UniqueID) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	mgr.growingSegments.Insert(segmentIDs...)
-}
-
-func (mgr *TargetManager) UnregisterGrowingSegmentToRelease(segmentIDs ...typeutil.UniqueID) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	mgr.growingSegments.Remove(segmentIDs...)
-}
-
-func (mgr *TargetManager) GetGrowingSegmentToRelease() typeutil.UniqueSet {
-	return mgr.growingSegments
 }
 
 func (mgr *TargetManager) AddSegment(segments ...*datapb.SegmentInfo) {
@@ -141,15 +120,6 @@ func (mgr *TargetManager) HandoffSegment(dest *datapb.SegmentInfo, sources ...in
 	// add dest to target
 	dest.CompactionFrom = sources
 	mgr.addSegment(dest)
-
-	// remove source from target
-	for _, source := range sources {
-		if mgr.ContainSegment(source) {
-			mgr.RemoveSegment(source)
-		} else {
-			mgr.RegisterGrowingSegmentToRelease(source)
-		}
-	}
 }
 
 func (mgr *TargetManager) AddDmChannel(channels ...*DmChannel) {

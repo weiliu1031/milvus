@@ -19,14 +19,14 @@ func (view *LeaderView) Clone() *LeaderView {
 	for k, v := range view.Segments {
 		segments[k] = v
 	}
-  growings := typeutil.NewUniqueSet(view.GrowingSegments.Collect()...)
+	growings := typeutil.NewUniqueSet(view.GrowingSegments.Collect()...)
 
 	return &LeaderView{
-		ID:           view.ID,
-		CollectionID: view.CollectionID,
-		Channel:      view.Channel,
-		Segments:     segments,
-    GrowingSegments: growings,
+		ID:              view.ID,
+		CollectionID:    view.CollectionID,
+		Channel:         view.Channel,
+		Segments:        segments,
+		GrowingSegments: growings,
 	}
 }
 
