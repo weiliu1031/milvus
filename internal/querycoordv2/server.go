@@ -54,7 +54,7 @@ type Server struct {
 	status              atomic.Value
 	etcdCli             *clientv3.Client
 	session             *sessionutil.Session
-	kv                  kv.TxnKV
+	kv                  kv.MetaKv
 	idAllocator         func() (int64, error)
 	factory             dependency.Factory
 	metricsCacheManager *metricsinfo.MetricsCacheManager
