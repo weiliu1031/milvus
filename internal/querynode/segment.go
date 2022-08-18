@@ -77,7 +77,7 @@ type Segment struct {
 	segmentID    UniqueID
 	partitionID  UniqueID
 	collectionID UniqueID
-  version UniqueID
+	version      UniqueID
 
 	vChannelID   Channel
 	lastMemSize  int64
@@ -136,7 +136,6 @@ func (s *Segment) getType() segmentType {
 	return s.segmentType
 }
 
-
 func (s *Segment) setIndexedFieldInfo(fieldID UniqueID, info *IndexedFieldInfo) {
 	s.indexedFieldMutex.Lock()
 	defer s.indexedFieldMutex.Unlock()
@@ -166,7 +165,14 @@ func (s *Segment) hasLoadIndexForIndexedField(fieldID int64) bool {
 	return false
 }
 
-func newSegment(collection *Collection, segmentID UniqueID, partitionID UniqueID, collectionID UniqueID, vChannelID Channel, segType segmentType, pool *concurrency.Pool) (*Segment, error) {
+func newSegment(collection *Collection,
+	segmentID UniqueID,
+	partitionID UniqueID,
+	collectionID UniqueID,
+	vChannelID Channel,
+	segType segmentType,
+	version UniqueID,
+	pool *concurrency.Pool) (*Segment, error) {
 	/*
 		CSegmentInterface
 		NewSegment(CCollection collection, uint64_t segment_id, SegmentType seg_type);
@@ -206,6 +212,7 @@ func newSegment(collection *Collection, segmentID UniqueID, partitionID UniqueID
 		segmentID:         segmentID,
 		partitionID:       partitionID,
 		collectionID:      collectionID,
+		version:           version,
 		vChannelID:        vChannelID,
 		indexedFieldInfos: make(map[UniqueID]*IndexedFieldInfo),
 
