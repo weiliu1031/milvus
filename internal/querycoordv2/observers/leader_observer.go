@@ -6,8 +6,12 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"go.uber.org/zap"
 )
 
 const interval = 1 * time.Second
@@ -19,6 +23,7 @@ type LeaderObserver struct {
 	dist    *meta.DistributionManager
 	meta    *meta.Meta
 	target  *meta.TargetManager
+	cluster *session.Cluster
 }
 
 func (o *LeaderObserver) Start(ctx context.Context) {
@@ -35,7 +40,7 @@ func (o *LeaderObserver) Start(ctx context.Context) {
 				log.Info("stop leader observer due to ctx done")
 				return
 			case <-ticker.C:
-				o.observe()
+				o.observe(ctx)
 			}
 		}
 	}()
@@ -46,35 +51,35 @@ func (o *LeaderObserver) Stop() {
 	o.wg.Wait()
 }
 
-func (o *LeaderObserver) observe() {
-	o.observeSegmentsDist()
+func (o *LeaderObserver) observe(ctx context.Context) {
+	o.observeSegmentsDist(ctx)
 }
 
-func (o *LeaderObserver) observeSegmentsDist() {
+func (o *LeaderObserver) observeSegmentsDist(ctx context.Context) {
 	collections := o.meta.CollectionManager.GetAllCollections()
 	partitions := o.meta.CollectionManager.GetAllPartitions()
 	ids := utils.Collect(collections, partitions)
 	for _, cid := range ids {
-		o.observeCollection(cid)
+		o.observeCollection(ctx, cid)
 	}
 }
 
-func (o *LeaderObserver) observeCollection(collection int64) {
+func (o *LeaderObserver) observeCollection(ctx context.Context, collection int64) {
 	replicas := o.meta.ReplicaManager.GetByCollection(collection)
 	for _, replica := range replicas {
 		leaders := o.dist.ChannelDistManager.GetShardLeadersByReplica(replica)
 		for ch, leaderID := range leaders {
-			leaderViews := o.dist.LeaderViewManager.GetLeaderShardView(leaderID, ch)
+			leaderView := o.dist.LeaderViewManager.GetLeaderShardView(leaderID, ch)
 			dists := o.dist.SegmentDistManager.GetByShard(ch)
-			needLoaded, needRemoved := o.findNeedLoadedSegments(leaderViews, dists),
-				o.findNeedRemovedSegments(leaderViews, dists)
-			o.sync(append(needLoaded, needRemoved...))
+			needLoaded, needRemoved := o.findNeedLoadedSegments(leaderView, dists),
+				o.findNeedRemovedSegments(leaderView, dists)
+			o.sync(ctx, leaderView, append(needLoaded, needRemoved...))
 		}
 	}
 }
 
-func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dists []*meta.Segment) []*viewSync {
-	ret := make([]*viewSync, 0)
+func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dists []*meta.Segment) []*querypb.SyncAction {
+	ret := make([]*querypb.SyncAction, 0)
 	dists = utils.FindMaxVersionSegments(dists)
 	for _, s := range dists {
 		node, ok := leaderView.Segments[s.GetID()]
@@ -82,17 +87,18 @@ func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dis
 		if consistentOnLeader || !o.target.ContainSegment(s.GetID()) {
 			continue
 		}
-		ret = append(ret, &viewSync{
-			dType:     set,
-			segmentID: s.GetID(),
-			node:      node,
+		ret = append(ret, &querypb.SyncAction{
+			Type:        querypb.SyncType_Set,
+			PartitionID: s.GetPartitionID(),
+			SegmentID:   s.GetID(),
+			NodeID:      node,
 		})
 	}
 	return ret
 }
 
-func (o *LeaderObserver) findNeedRemovedSegments(leaderView *meta.LeaderView, dists []*meta.Segment) []*viewSync {
-	ret := make([]*viewSync, 0)
+func (o *LeaderObserver) findNeedRemovedSegments(leaderView *meta.LeaderView, dists []*meta.Segment) []*querypb.SyncAction {
+	ret := make([]*querypb.SyncAction, 0)
 	distMap := make(map[int64]struct{})
 	for _, s := range dists {
 		distMap[s.GetID()] = struct{}{}
@@ -102,16 +108,37 @@ func (o *LeaderObserver) findNeedRemovedSegments(leaderView *meta.LeaderView, di
 		if ok || o.target.ContainSegment(sid) {
 			continue
 		}
-		ret = append(ret, &viewSync{
-			dType:     remove,
-			segmentID: sid,
+		ret = append(ret, &querypb.SyncAction{
+			Type:      querypb.SyncType_Remove,
+			SegmentID: sid,
 		})
 	}
 	return ret
 }
 
-func (o *LeaderObserver) sync(diffs []*viewSync) {
-	// TODO(sunby)
+func (o *LeaderObserver) sync(ctx context.Context, leaderView *meta.LeaderView, diffs []*querypb.SyncAction) {
+	log := log.With(
+		zap.Int64("leaderID", leaderView.ID),
+		zap.Int64("collectionID", leaderView.CollectionID),
+		zap.String("channel", leaderView.Channel),
+	)
+	req := &querypb.SyncDistributionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_SyncDistribution,
+		},
+		CollectionID: leaderView.CollectionID,
+		Channel:      leaderView.Channel,
+		Actions:      diffs,
+	}
+	resp, err := o.cluster.SyncDistribution(ctx, leaderView.ID, req)
+	if err != nil {
+		log.Error("failed to sync distribution", zap.Error(err))
+		return
+	}
+
+	if resp.ErrorCode != commonpb.ErrorCode_Success {
+		log.Error("failed to sync distribution", zap.String("reason", resp.GetReason()))
+	}
 }
 
 func NewLeaderObserver(
@@ -125,15 +152,4 @@ func NewLeaderObserver(
 		meta:    meta,
 		target:  targetMgr,
 	}
-}
-
-const (
-	remove = 1 // to remove segments on leader
-	set    = 2 // to set version for segments on leader
-)
-
-type viewSync struct {
-	dType     int
-	segmentID int64
-	node      int64
 }

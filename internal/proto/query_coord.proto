@@ -477,11 +477,15 @@ enum SyncType {
 
 message SyncAction {
   SyncType type = 1;
-  int64 segmentID = 2;
-  int64 nodeID = 3;
+  int64 partitionID = 2;
+  int64 segmentID = 3;
+  int64 nodeID = 4;
 }
 
 message SyncDistributionRequest {
   common.MsgBase base = 1;
-  repeated SyncAction actions = 2;
+  int64 collectionID = 2;
+  string channel = 3;
+  repeated SyncAction actions = 4;
 }
+

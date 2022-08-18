@@ -346,3 +346,18 @@ func (c *Client) GetDataDistribution(ctx context.Context, req *querypb.GetDataDi
 	}
 	return ret.(*querypb.GetDataDistributionResponse), err
 }
+
+func (c *Client) SyncDistribution(ctx context.Context, req *querypb.SyncDistributionRequest) (*commonpb.Status, error) {
+	ret, err := c.grpcClient.Call(ctx, func(client interface{}) (interface{}, error) {
+		if !funcutil.CheckCtxValid(ctx) {
+			return nil, ctx.Err()
+		}
+		return client.(querypb.QueryNodeClient).SyncDistribution(ctx, req)
+	})
+	if err != nil || ret == nil {
+		return nil, err
+	}
+	return ret.(*commonpb.Status), err
+}
+
+

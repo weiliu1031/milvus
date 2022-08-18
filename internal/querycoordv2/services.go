@@ -640,3 +640,4 @@ func (s *Server) GetShardLeaders(ctx context.Context, req *querypb.GetShardLeade
 	}
 	return resp, nil
 }
+

@@ -1161,3 +1161,36 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		LeaderViews:       leaderViews,
 	}, nil
 }
+
+func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDistributionRequest) (*commonpb.Status, error) {
+	shardCluster, ok := node.ShardClusterService.getShardCluster(req.GetChannel())
+	if !ok {
+		return &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			Reason:    "shard not exist",
+		}, nil
+	}
+	for _, action := range req.GetActions() {
+		switch action.GetType() {
+		case querypb.SyncType_Remove:
+			shardCluster.forceRemoveSegment(action.GetSegmentID())
+		case querypb.SyncType_Set:
+			shardCluster.updateSegment(shardSegmentInfo{
+				segmentID:   action.GetSegmentID(),
+				partitionID: action.GetPartitionID(),
+				nodeID:      action.GetNodeID(),
+				state:       segmentStateLoaded,
+			})
+		default:
+			return &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    "unexpected action type",
+			}, nil
+		}
+	}
+
+	return &commonpb.Status{
+		ErrorCode: commonpb.ErrorCode_Success,
+		Reason:    "",
+	}, nil
+}

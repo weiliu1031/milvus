@@ -391,6 +391,15 @@ func (sc *ShardCluster) removeSegment(evt shardSegmentInfo) {
 	delete(sc.segments, evt.segmentID)
 }
 
+func (sc *ShardCluster) forceRemoveSegment(segmentID int64) {
+  log := log.With(zap.String("shard", sc.vchannelName), zap.Int64("segmentID", segmentID))
+  log.Info("remove segment")
+  sc.mut.Lock()
+  defer sc.mut.Unlock()
+
+  delete(sc.segments, segmentID)
+}
+
 // init list all nodes and semgent states ant start watching
 func (sc *ShardCluster) init() {
 	// list nodes

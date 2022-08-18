@@ -174,6 +174,20 @@ func (c *Cluster) GetMetrics(ctx context.Context, nodeID int64, req *milvuspb.Ge
 	return resp, err
 }
 
+func (c *Cluster) SyncDistribution(ctx context.Context, nodeID int64, req *querypb.SyncDistributionRequest) (*commonpb.Status, error) {
+	var (
+		resp *commonpb.Status
+		err  error
+	)
+	err1 := c.send(ctx, nodeID, func(cli *grpcquerynodeclient.Client) {
+		resp, err = cli.SyncDistribution(ctx, req)
+	})
+	if err1 != nil {
+		return nil, err1
+	}
+	return resp, err
+}
+
 func (c *Cluster) send(ctx context.Context, nodeID int64, fn func(cli *grpcquerynodeclient.Client)) error {
 	node := c.nodeManager.Get(nodeID)
 	if node == nil {

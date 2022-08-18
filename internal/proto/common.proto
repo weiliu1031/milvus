@@ -187,6 +187,8 @@ enum MsgType {
     GetShardLeaders = 514;
     GetReplicas = 515;
     UnsubDmChannel = 516;
+    GetDistribution = 517;
+    SyncDistribution = 518;
 
     /* DATA SERVICE */
     SegmentInfo = 600;
