@@ -286,7 +286,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, in *querypb.WatchDmC
 		}
 		return status, nil
 	}
-	dct := &watchDmChannelsTask{
+	task := &watchDmChannelsTask{
 		baseTask: baseTask{
 			ctx:  ctx,
 			done: make(chan error),
@@ -295,7 +295,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, in *querypb.WatchDmC
 		node: node,
 	}
 
-	err := node.scheduler.queue.Enqueue(dct)
+	err := node.scheduler.queue.Enqueue(task)
 	if err != nil {
 		status := &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -306,7 +306,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, in *querypb.WatchDmC
 	}
 	log.Info("watchDmChannelsTask Enqueue done", zap.Int64("collectionID", in.CollectionID), zap.Int64("nodeID", Params.QueryNodeCfg.GetNodeID()), zap.Int64("replicaID", in.GetReplicaID()))
 	waitFunc := func() (*commonpb.Status, error) {
-		err = dct.WaitToFinish()
+		err = task.WaitToFinish()
 		if err != nil {
 			status := &commonpb.Status{
 				ErrorCode: commonpb.ErrorCode_UnexpectedError,

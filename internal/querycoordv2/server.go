@@ -238,7 +238,11 @@ func (s *Server) Init() error {
 		s.meta,
 		s.targetMgr,
 	)
-	s.leaderObserver = observers.NewLeaderObserver()
+	s.leaderObserver = observers.NewLeaderObserver(
+		s.dist,
+		s.meta,
+		s.targetMgr,
+	)
 
 	// Init balancer
 	log.Debug("init balancer")

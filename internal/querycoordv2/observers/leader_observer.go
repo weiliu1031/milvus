@@ -75,10 +75,10 @@ func (o *LeaderObserver) observeCollection(collection int64) {
 
 func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dists []*meta.Segment) []*viewSync {
 	ret := make([]*viewSync, 0)
-  dists = utils.FindMaxVersionSegments(dists)
+	dists = utils.FindMaxVersionSegments(dists)
 	for _, s := range dists {
 		node, ok := leaderView.Segments[s.GetID()]
-    consistentOnLeader := ok && node == s.Node
+		consistentOnLeader := ok && node == s.Node
 		if consistentOnLeader || !o.target.ContainSegment(s.GetID()) {
 			continue
 		}
@@ -114,9 +114,16 @@ func (o *LeaderObserver) sync(diffs []*viewSync) {
 	// TODO(sunby)
 }
 
-func NewLeaderObserver() *LeaderObserver {
+func NewLeaderObserver(
+	dist *meta.DistributionManager,
+	meta *meta.Meta,
+	targetMgr *meta.TargetManager,
+) *LeaderObserver {
 	return &LeaderObserver{
 		closeCh: make(chan struct{}),
+		dist:    dist,
+		meta:    meta,
+		target:  targetMgr,
 	}
 }
 
