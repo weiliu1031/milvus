@@ -41,10 +41,10 @@ func (s SegmentsStatus) GetAllocations(partitionIDs []int64) map[int64][]int64 {
 }
 
 // Clone returns a copy of segments status data.
-func (s SegmentsStatus) Clone(filter func(int64) bool) SegmentsStatus {
+func (s SegmentsStatus) Clone(filter func(int64, int64) bool) SegmentsStatus {
 	c := make(map[int64]shardSegmentInfo)
 	for k, v := range s {
-		if filter(v.segmentID) {
+		if filter(v.segmentID, v.nodeID) {
 			continue
 		}
 		c[k] = v
@@ -53,26 +53,29 @@ func (s SegmentsStatus) Clone(filter func(int64) bool) SegmentsStatus {
 }
 
 // helper filter function that filters nothing
-var filterNothing = func(int64) bool { return false }
+var filterNothing = func(int64, int64) bool { return false }
 
 // ShardClusterVersion maintains a snapshot of sealed segments allocation.
 type ShardClusterVersion struct {
-	versionID int64          // identifier for version
-	segments  SegmentsStatus // nodeID => []segmentID
-	current   *atomic.Bool   // is this version current
-	inUse     *atomic.Int64
+	versionID   int64          // identifier for version
+	segments    SegmentsStatus // nodeID => []segmentID
+	current     *atomic.Bool   // is this version current
+	inUse       *atomic.Int64
+	lastVersion *ShardClusterVersion
+
 	ch        chan struct{} // signal channel to notify safe remove
 	closeOnce sync.Once
 }
 
 // NewShardClusterVersion creates a version with id and allocation.
-func NewShardClusterVersion(vID int64, status SegmentsStatus) *ShardClusterVersion {
+func NewShardClusterVersion(vID int64, status SegmentsStatus, lastVersion *ShardClusterVersion) *ShardClusterVersion {
 	return &ShardClusterVersion{
-		versionID: vID,
-		segments:  status,
-		current:   atomic.NewBool(true), // by default new version will be current
-		inUse:     atomic.NewInt64(0),
-		ch:        make(chan struct{}),
+		versionID:   vID,
+		segments:    status,
+		current:     atomic.NewBool(true), // by default new version will be current
+		inUse:       atomic.NewInt64(0),
+		ch:          make(chan struct{}),
+		lastVersion: lastVersion,
 	}
 }
 
@@ -105,7 +108,12 @@ func (v *ShardClusterVersion) Expire() chan struct{} {
 func (v *ShardClusterVersion) checkSafeGC() {
 	if !v.IsCurrent() && v.inUse.Load() == int64(0) {
 		v.closeOnce.Do(func() {
-			close(v.ch)
+			go func() {
+				if v.lastVersion != nil {
+					<-v.lastVersion.Expire()
+				}
+				close(v.ch)
+			}()
 		})
 	}
 }

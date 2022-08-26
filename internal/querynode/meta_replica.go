@@ -86,7 +86,7 @@ type ReplicaInterface interface {
 
 	// segment
 	// addSegment add a new segment to collectionReplica
-	addSegment(segmentID UniqueID, partitionID UniqueID, collectionID UniqueID, vChannelID Channel, segType segmentType) error
+	addSegment(segmentID UniqueID, partitionID UniqueID, collectionID UniqueID, vChannelID Channel, version UniqueID, segType segmentType) error
 	// setSegment adds a segment to collectionReplica
 	setSegment(segment *Segment) error
 	// removeSegment removes a segment from collectionReplica
@@ -114,6 +114,9 @@ type ReplicaInterface interface {
 	freeAll()
 	// printReplica prints the collections, partitions and segments in the collectionReplica
 	printReplica()
+
+	getGrowingSegments() []*Segment
+	getSealedSegments() []*Segment
 }
 
 // collectionReplica is the data replication of memory data in query node.
@@ -525,7 +528,7 @@ func (replica *metaReplica) getSegmentIDsPrivate(partitionID UniqueID, segType s
 
 //----------------------------------------------------------------------------------------------------- segment
 // addSegment add a new segment to collectionReplica
-func (replica *metaReplica) addSegment(segmentID UniqueID, partitionID UniqueID, collectionID UniqueID, vChannelID Channel, segType segmentType) error {
+func (replica *metaReplica) addSegment(segmentID UniqueID, partitionID UniqueID, collectionID UniqueID, vChannelID Channel, version UniqueID, segType segmentType) error {
 	replica.mu.Lock()
 	defer replica.mu.Unlock()
 
@@ -533,7 +536,7 @@ func (replica *metaReplica) addSegment(segmentID UniqueID, partitionID UniqueID,
 	if err != nil {
 		return err
 	}
-	seg, err := newSegment(collection, segmentID, partitionID, collectionID, vChannelID, segType, replica.cgoPool)
+	seg, err := newSegment(collection, segmentID, partitionID, collectionID, vChannelID, segType, version, replica.cgoPool)
 	if err != nil {
 		return err
 	}
@@ -747,6 +750,28 @@ func (replica *metaReplica) freeAll() {
 	replica.partitions = make(map[UniqueID]*Partition)
 	replica.growingSegments = make(map[UniqueID]*Segment)
 	replica.sealedSegments = make(map[UniqueID]*Segment)
+}
+
+func (replica *metaReplica) getGrowingSegments() []*Segment {
+	replica.mu.RLock()
+	defer replica.mu.RUnlock()
+
+	ret := make([]*Segment, 0, len(replica.growingSegments))
+	for _, s := range replica.growingSegments {
+		ret = append(ret, s)
+	}
+	return ret
+}
+
+func (replica *metaReplica) getSealedSegments() []*Segment {
+	replica.mu.RLock()
+	defer replica.mu.RUnlock()
+
+	ret := make([]*Segment, 0, len(replica.sealedSegments))
+	for _, s := range replica.sealedSegments {
+		ret = append(ret, s)
+	}
+	return ret
 }
 
 // newCollectionReplica returns a new ReplicaInterface
