@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -50,6 +51,21 @@ func (task *LoadSegmentsTask) Execute() error {
 
 func (task *LoadSegmentsTask) Merge(other typeutil.MergeableTask[segmentIndex, *commonpb.Status]) {
 	task.req.Infos = append(task.req.Infos, other.(*LoadSegmentsTask).req.GetInfos()...)
+	deltaPositions := make(map[string]*internalpb.MsgPosition)
+	for _, position := range task.req.DeltaPositions {
+		deltaPositions[position.GetChannelName()] = position
+	}
+	for _, position := range other.(*LoadSegmentsTask).req.GetDeltaPositions() {
+		merged, ok := deltaPositions[position.GetChannelName()]
+		if !ok || merged.GetTimestamp() > position.GetTimestamp() {
+			merged = position
+		}
+		deltaPositions[position.GetChannelName()] = merged
+	}
+	task.req.DeltaPositions = make([]*internalpb.MsgPosition, 0, len(deltaPositions))
+	for _, position := range deltaPositions {
+		task.req.DeltaPositions = append(task.req.DeltaPositions, position)
+	}
 }
 
 func (task *LoadSegmentsTask) SetResult(result *commonpb.Status) {
