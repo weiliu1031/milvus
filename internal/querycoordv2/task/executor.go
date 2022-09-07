@@ -123,12 +123,18 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 		task.CollectionID(),
 		partitions...,
 	)
-	segments, err := ex.broker.GetSegmentInfo(ctx, task.SegmentID())
-	if err != nil || len(segments) == 0 {
-		log.Warn("failed to get segment info from DataCoord", zap.Error(err))
+	// segments, err := ex.broker.GetSegmentInfo(ctx, task.SegmentID())
+	// if err != nil || len(segments) == 0 {
+	// 	log.Warn("failed to get segment info from DataCoord", zap.Error(err))
+	// 	return
+	// }
+	segment := ex.targetMgr.GetSegment(task.SegmentID())
+	if segment == nil {
+		msg := "segment not found in target, collection may be released"
+		log.Warn(msg)
+		task.SetErr(utils.WrapError(msg, ErrTaskStale))
 		return
 	}
-	segment := segments[0]
 	indexes, err := ex.broker.GetIndexInfo(ctx, task.CollectionID(), segment.GetID())
 	if err != nil {
 		log.Warn("failed to get index of segment, will load without index")
