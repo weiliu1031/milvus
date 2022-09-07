@@ -3,6 +3,7 @@ package observers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,6 +311,51 @@ func (suite *HandoffObserverTestSuit) TestRecursiveHandoff() {
 	}, 3*time.Second, 1*time.Second)
 }
 
+func (suite *HandoffObserverTestSuit) TestReloadHandoffEventOrder() {
+	// init leader view
+	suite.dist.LeaderViewManager.Update(1, &meta.LeaderView{
+		ID:              1,
+		CollectionID:    suite.collection,
+		Channel:         suite.channel.ChannelName,
+		Segments:        map[int64]int64{1: 1, 2: 2},
+		GrowingSegments: typeutil.NewUniqueSet(3),
+	})
+
+	// fake handoff event from start
+	flushingSegment := &querypb.SegmentInfo{
+		SegmentID:    3,
+		CollectionID: suite.collection,
+		PartitionID:  suite.partition,
+		SegmentState: commonpb.SegmentState_Sealed,
+	}
+	compactSegment1 := &querypb.SegmentInfo{
+		SegmentID:           9,
+		CollectionID:        suite.collection,
+		PartitionID:         suite.partition,
+		SegmentState:        commonpb.SegmentState_Sealed,
+		CompactionFrom:      []int64{3},
+		CreatedByCompaction: true,
+	}
+	compactSegment2 := &querypb.SegmentInfo{
+		SegmentID:           10,
+		CollectionID:        suite.collection,
+		PartitionID:         suite.partition,
+		SegmentState:        commonpb.SegmentState_Sealed,
+		CompactionFrom:      []int64{4},
+		CreatedByCompaction: true,
+	}
+
+	suite.produceHandOffEvent(flushingSegment)
+	suite.produceHandOffEvent(compactSegment1)
+	suite.produceHandOffEvent(compactSegment2)
+
+	keys, _, _, err := suite.kv.LoadWithRevision(util.HandoffSegmentPrefix)
+	suite.NoError(err)
+	suite.Equal(true, strings.HasSuffix(keys[0], "3"))
+	suite.Equal(true, strings.HasSuffix(keys[1], "9"))
+	suite.Equal(true, strings.HasSuffix(keys[2], "10"))
+}
+
 func (suite *HandoffObserverTestSuit) TestLoadHandoffEventFromStore() {
 	// init leader view
 	suite.dist.LeaderViewManager.Update(1, &meta.LeaderView{
@@ -328,7 +374,7 @@ func (suite *HandoffObserverTestSuit) TestLoadHandoffEventFromStore() {
 		SegmentState: commonpb.SegmentState_Sealed,
 	}
 	compactSegment1 := &querypb.SegmentInfo{
-		SegmentID:           4,
+		SegmentID:           9,
 		CollectionID:        suite.collection,
 		PartitionID:         suite.partition,
 		SegmentState:        commonpb.SegmentState_Sealed,
@@ -336,7 +382,7 @@ func (suite *HandoffObserverTestSuit) TestLoadHandoffEventFromStore() {
 		CreatedByCompaction: true,
 	}
 	compactSegment2 := &querypb.SegmentInfo{
-		SegmentID:           5,
+		SegmentID:           10,
 		CollectionID:        suite.collection,
 		PartitionID:         suite.partition,
 		SegmentState:        commonpb.SegmentState_Sealed,
