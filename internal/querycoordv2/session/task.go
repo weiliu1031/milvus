@@ -34,6 +34,7 @@ func (task *LoadSegmentsTask) ID() segmentIndex {
 	return segmentIndex{
 		NodeID:       task.nodeID,
 		CollectionID: task.req.GetCollectionID(),
+		Shard:        task.req.GetInfos()[0].GetInsertChannel(),
 	}
 }
 

@@ -45,6 +45,7 @@ type Cluster interface {
 type segmentIndex struct {
 	NodeID       int64
 	CollectionID int64
+	Shard        string
 }
 
 // QueryCluster is used to send requests to QueryNodes and manage connections
