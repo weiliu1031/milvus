@@ -145,7 +145,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, action *SegmentAction) {
 	}
 	log = log.With(zap.Int64("shardLeader", leader))
 
-	deltaPositions, err := getSegmentDeltaPositions(ctx, ex.broker, segment.GetCollectionID(), segment.GetPartitionID(), segment.GetInsertChannel())
+	deltaPositions, err := getSegmentDeltaPositions(ctx, ex.targetMgr, ex.broker, segment.GetCollectionID(), segment.GetPartitionID(), segment.GetInsertChannel())
 	if err != nil {
 		log.Warn("failed to get delta positions of segment")
 		return

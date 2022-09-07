@@ -170,20 +170,20 @@ func getShardLeader(replicaMgr *meta.ReplicaManager, distMgr *meta.DistributionM
 	return distMgr.GetShardLeader(replica, channel)
 }
 
-func getSegmentDeltaPositions(ctx context.Context, broker meta.Broker, collectionID, partitionID int64, channel string) ([]*internalpb.MsgPosition, error) {
+func getSegmentDeltaPositions(ctx context.Context, targetMgr *meta.TargetManager, broker meta.Broker, collectionID, partitionID int64, channel string) ([]*internalpb.MsgPosition, error) {
 	deltaChannelName, err := funcutil.ConvertChannelName(channel, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
 	if err != nil {
 		return nil, err
 	}
 
-	vchannels, _, err := broker.GetRecoveryInfo(ctx, collectionID, partitionID)
-	if err != nil {
-		return nil, err
-	}
+	// vchannels, _, err := broker.GetRecoveryInfo(ctx, collectionID, partitionID)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	deltaChannels := make([]*datapb.VchannelInfo, 0)
-	for _, info := range vchannels {
-		deltaChannelInfo, err := generatDeltaChannelInfo(info)
+	for _, info := range targetMgr.GetDmChannelsByCollection(collectionID) {
+		deltaChannelInfo, err := generatDeltaChannelInfo(info.VchannelInfo)
 		if err != nil {
 			return nil, err
 		}
