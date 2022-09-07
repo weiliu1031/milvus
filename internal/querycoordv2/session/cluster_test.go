@@ -162,21 +162,27 @@ func (suite *ClusterTestSuite) createFailedMockServer() querypb.QueryNodeServer 
 
 func (suite *ClusterTestSuite) TestLoadSegments() {
 	ctx := context.TODO()
-	status, err := suite.cluster.LoadSegments(ctx, 0, &querypb.LoadSegmentsRequest{})
+	status, err := suite.cluster.LoadSegments(ctx, 0, &querypb.LoadSegmentsRequest{
+		Infos: []*querypb.SegmentLoadInfo{{}},
+	})
 	suite.NoError(err)
 	suite.Equal(&commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_Success,
 		Reason:    "",
 	}, status)
 
-	status, err = suite.cluster.LoadSegments(ctx, 1, &querypb.LoadSegmentsRequest{})
+	status, err = suite.cluster.LoadSegments(ctx, 1, &querypb.LoadSegmentsRequest{
+		Infos: []*querypb.SegmentLoadInfo{{}},
+	})
 	suite.NoError(err)
 	suite.Equal(&commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_UnexpectedError,
 		Reason:    "unexpected error",
 	}, status)
 
-	_, err = suite.cluster.LoadSegments(ctx, 3, &querypb.LoadSegmentsRequest{})
+	_, err = suite.cluster.LoadSegments(ctx, 3, &querypb.LoadSegmentsRequest{
+		Infos: []*querypb.SegmentLoadInfo{{}},
+	})
 	suite.Error(err)
 	suite.IsType(WrapErrNodeNotFound(3), err)
 }

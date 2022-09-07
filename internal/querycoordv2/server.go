@@ -464,6 +464,8 @@ func (s *Server) recoverCollectionTargets(ctx context.Context, collection int64)
 			return partition.GetPartitionID()
 		})
 	}
+
+	s.handoffObserver.Register(collection)
 	err = utils.RegisterTargets(
 		ctx,
 		s.targetMgr,
@@ -471,7 +473,11 @@ func (s *Server) recoverCollectionTargets(ctx context.Context, collection int64)
 		collection,
 		partitions,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	s.handoffObserver.StartHandoff(collection)
+	return nil
 }
 
 func (s *Server) watchNodes(revision int64) {
