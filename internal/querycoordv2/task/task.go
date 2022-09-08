@@ -52,6 +52,7 @@ type Task interface {
 	Actions() []Action
 	Step() int
 	IsFinished(dist *meta.DistributionManager) bool
+	String() string
 }
 
 type baseTask struct {

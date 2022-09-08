@@ -101,9 +101,10 @@ func (c *QueryCluster) updateLoop() {
 }
 
 func (c *QueryCluster) LoadSegments(ctx context.Context, nodeID int64, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
-	task := NewLoadSegmentsTask(c, nodeID, req)
-	c.scheduler.Add(task)
-	return task.Wait()
+	// task := NewLoadSegmentsTask(c, nodeID, req)
+	// c.scheduler.Add(task)
+	// return task.Wait()
+	return c.loadSegments(ctx, nodeID, req)
 }
 
 func (c *QueryCluster) loadSegments(ctx context.Context, nodeID int64, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {

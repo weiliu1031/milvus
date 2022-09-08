@@ -182,15 +182,17 @@ func (scheduler *taskScheduler) Add(task Task) error {
 	case *SegmentTask:
 		index := replicaSegmentIndex{task.ReplicaID(), task.segmentID}
 		scheduler.segmentTasks[index] = task
-		log.Info("task added", zap.String("task", task.String()))
 
 	case *ChannelTask:
 		index := replicaChannelIndex{task.ReplicaID(), task.channel}
 		scheduler.channelTasks[index] = task
 		log.Info("task added", zap.String("task", task.String()))
 	}
-	scheduler.waitQueue.Add(task)
-
+	if !scheduler.waitQueue.Add(task) {
+		log.Warn("failed to add task", zap.String("task", task.String()))
+		return nil
+	}
+	log.Info("task added", zap.String("task", task.String()))
 	return nil
 }
 

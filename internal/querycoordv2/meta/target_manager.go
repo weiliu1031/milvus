@@ -80,7 +80,9 @@ func (mgr *TargetManager) AddSegment(segments ...*datapb.SegmentInfo) {
 func (mgr *TargetManager) addSegment(segments ...*datapb.SegmentInfo) {
 	for _, segment := range segments {
 		log.Info("add segment into targets",
-			zap.Int64("segmentID", segment.GetID()))
+			zap.Int64("segmentID", segment.GetID()),
+			zap.Int64("collectionID", segment.GetCollectionID()),
+		)
 		mgr.segments[segment.GetID()] = segment
 	}
 }
