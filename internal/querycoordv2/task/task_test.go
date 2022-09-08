@@ -142,7 +142,7 @@ func (suite *TaskSuite) TestSubscribeChannelTask() {
 	ctx := context.Background()
 	timeout := 10 * time.Second
 	targetNode := int64(3)
-	// partitions := []int64{100, 101}
+	partitions := []int64{100, 101}
 
 	// Expect
 	suite.broker.EXPECT().GetCollectionSchema(mock.Anything, suite.collection).
@@ -159,17 +159,17 @@ func (suite *TaskSuite) TestSubscribeChannelTask() {
 			UnflushedSegmentIds: []int64{suite.growingSegments[channel]},
 		})
 	}
-	// for channel, segment := range suite.growingSegments {
-	// suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).
-	// 	Return([]*datapb.SegmentInfo{
-	// 		{
-	// 			ID:            segment,
-	// 			CollectionID:  suite.collection,
-	// 			PartitionID:   partitions[0],
-	// 			InsertChannel: channel,
-	// 		},
-	// 	}, nil)
-	// }
+	for channel, segment := range suite.growingSegments {
+		suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).
+			Return([]*datapb.SegmentInfo{
+				{
+					ID:            segment,
+					CollectionID:  suite.collection,
+					PartitionID:   partitions[0],
+					InsertChannel: channel,
+				},
+			}, nil)
+	}
 	// for _, partition := range partitions {
 	// 	suite.broker.EXPECT().GetRecoveryInfo(mock.Anything, suite.collection, partition).
 	// 		Return(channels, nil, nil)
@@ -297,14 +297,14 @@ func (suite *TaskSuite) TestLoadSegmentTask() {
 	}, nil)
 	suite.broker.EXPECT().GetPartitions(mock.Anything, suite.collection).Return([]int64{100, 101}, nil)
 	for _, segment := range suite.loadSegments {
-		// suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).Return([]*datapb.SegmentInfo{
-		// 	{
-		// 		ID:            segment,
-		// 		CollectionID:  suite.collection,
-		// 		PartitionID:   partition,
-		// 		InsertChannel: channel.ChannelName,
-		// 	},
-		// }, nil)
+		suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).Return([]*datapb.SegmentInfo{
+			{
+				ID:            segment,
+				CollectionID:  suite.collection,
+				PartitionID:   partition,
+				InsertChannel: channel.ChannelName,
+			},
+		}, nil)
 		suite.broker.EXPECT().GetIndexInfo(mock.Anything, suite.collection, segment).Return(nil, nil)
 	}
 	// suite.broker.EXPECT().GetRecoveryInfo(mock.Anything, suite.collection, partition).
@@ -454,14 +454,14 @@ func (suite *TaskSuite) TestMoveSegmentTask() {
 	}, nil)
 	suite.broker.EXPECT().GetPartitions(mock.Anything, suite.collection).Return([]int64{100, 101}, nil)
 	for _, segment := range suite.moveSegments {
-		// suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).Return([]*datapb.SegmentInfo{
-		// 	{
-		// 		ID:            segment,
-		// 		CollectionID:  suite.collection,
-		// 		PartitionID:   partition,
-		// 		InsertChannel: channel.ChannelName,
-		// 	},
-		// }, nil)
+		suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).Return([]*datapb.SegmentInfo{
+			{
+				ID:            segment,
+				CollectionID:  suite.collection,
+				PartitionID:   partition,
+				InsertChannel: channel.ChannelName,
+			},
+		}, nil)
 		suite.broker.EXPECT().GetIndexInfo(mock.Anything, suite.collection, segment).Return(nil, nil)
 	}
 	// suite.broker.EXPECT().GetRecoveryInfo(mock.Anything, suite.collection, partition).
@@ -612,14 +612,14 @@ func (suite *TaskSuite) TestSegmentTaskStale() {
 	}, nil)
 	suite.broker.EXPECT().GetPartitions(mock.Anything, suite.collection).Return([]int64{100, 101}, nil)
 	for _, segment := range suite.loadSegments {
-		// suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).Return([]*datapb.SegmentInfo{
-		// 	{
-		// 		ID:            segment,
-		// 		CollectionID:  suite.collection,
-		// 		PartitionID:   partition,
-		// 		InsertChannel: channel.ChannelName,
-		// 	},
-		// }, nil)
+		suite.broker.EXPECT().GetSegmentInfo(mock.Anything, segment).Return([]*datapb.SegmentInfo{
+			{
+				ID:            segment,
+				CollectionID:  suite.collection,
+				PartitionID:   partition,
+				InsertChannel: channel.ChannelName,
+			},
+		}, nil)
 		suite.broker.EXPECT().GetIndexInfo(mock.Anything, suite.collection, segment).Return(nil, nil)
 	}
 	// suite.broker.EXPECT().GetRecoveryInfo(mock.Anything, suite.collection, partition).
