@@ -374,7 +374,7 @@ func (suite *HandoffObserverTestSuit) TestLoadHandoffEventFromStore() {
 		SegmentState: commonpb.SegmentState_Sealed,
 	}
 	compactSegment1 := &querypb.SegmentInfo{
-		SegmentID:           9,
+		SegmentID:           4,
 		CollectionID:        suite.collection,
 		PartitionID:         suite.partition,
 		SegmentState:        commonpb.SegmentState_Sealed,
@@ -382,7 +382,7 @@ func (suite *HandoffObserverTestSuit) TestLoadHandoffEventFromStore() {
 		CreatedByCompaction: true,
 	}
 	compactSegment2 := &querypb.SegmentInfo{
-		SegmentID:           10,
+		SegmentID:           5,
 		CollectionID:        suite.collection,
 		PartitionID:         suite.partition,
 		SegmentState:        commonpb.SegmentState_Sealed,
