@@ -204,8 +204,7 @@ func (ob *HandoffObserver) tryHandoff(ctx context.Context, segment *querypb.Segm
 		zap.Int64("segmentID", segment.SegmentID))
 
 	partitionStatus, collectionRegistered := ob.collectionStatus[segment.CollectionID]
-	if Params.QueryCoordCfg.AutoHandoff && collectionRegistered &&
-		(ob.meta.GetCollection(segment.CollectionID) != nil || ob.meta.GetPartition(segment.PartitionID) != nil) {
+	if Params.QueryCoordCfg.AutoHandoff && collectionRegistered {
 		if partitionStatus == CollectionHandoffStatusRegistered {
 			ob.handoffEvents[segment.SegmentID] = &HandoffEvent{
 				Segment: segment,
