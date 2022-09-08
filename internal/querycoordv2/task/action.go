@@ -85,7 +85,7 @@ func (action *SegmentAction) Scope() querypb.DataScope {
 
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
 	if action.Type() == ActionTypeGrow {
-		nodes := distMgr.LeaderViewManager.GetSegmentDist(action.SegmentID())
+		nodes := distMgr.LeaderViewManager.GetSealedSegmentDist(action.SegmentID())
 		return lo.Contains(nodes, action.Node())
 	}
 	// FIXME: Now shard leader's segment view is a map of segment ID to node ID,

@@ -158,7 +158,7 @@ func (ob *CollectionObserver) observeCollectionLoadStatus(collection *meta.Colle
 	for _, segment := range segmentTargets {
 		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
 			collection.GetCollectionID(),
-			ob.dist.LeaderViewManager.GetSegmentDist(segment.GetID()))
+			ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
 		if len(group) >= int(collection.GetReplicaNumber()) {
 			loadedCount++
 		}
@@ -219,7 +219,7 @@ func (ob *CollectionObserver) observePartitionLoadStatus(partition *meta.Partiti
 	for _, segment := range segmentTargets {
 		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
 			partition.GetCollectionID(),
-			ob.dist.LeaderViewManager.GetSegmentDist(segment.GetID()))
+			ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
 		if len(group) >= int(partition.GetReplicaNumber()) {
 			loadedCount++
 		}

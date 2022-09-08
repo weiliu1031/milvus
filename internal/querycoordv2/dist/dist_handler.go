@@ -15,6 +15,7 @@ import (
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 )
 
@@ -158,10 +159,11 @@ func (dh *distHandler) updateLeaderView(resp *querypb.GetDataDistributionRespons
 	updates := make([]*meta.LeaderView, 0, len(resp.GetLeaderViews()))
 	for _, lview := range resp.GetLeaderViews() {
 		view := &meta.LeaderView{
-			ID:           resp.GetNodeID(),
-			CollectionID: lview.GetCollection(),
-			Channel:      lview.GetChannel(),
-			Segments:     lview.GetSegmentNodePairs(),
+			ID:              resp.GetNodeID(),
+			CollectionID:    lview.GetCollection(),
+			Channel:         lview.GetChannel(),
+			Segments:        lview.GetSegmentNodePairs(),
+			GrowingSegments: typeutil.NewUniqueSet(resp.GetGrowingSegmentIDs()...),
 		}
 		updates = append(updates, view)
 	}
