@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/samber/lo"
+
 	"github.com/milvus-io/milvus/api/commonpb"
 	"github.com/milvus-io/milvus/api/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -14,7 +16,6 @@ import (
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
-	"github.com/samber/lo"
 )
 
 func Wait(ctx context.Context, timeout time.Duration, tasks ...Task) error {
@@ -182,7 +183,7 @@ func getSegmentDeltaPositions(ctx context.Context, targetMgr *meta.TargetManager
 	// }
 
 	deltaChannels := make([]*datapb.VchannelInfo, 0)
-	for _, info := range targetMgr.GetDmChannelsByCollection(collectionID) {
+	for _, info := range targetMgr.Next.GetDmChannelsByCollection(collectionID) {
 		deltaChannelInfo, err := generatDeltaChannelInfo(info.VchannelInfo)
 		if err != nil {
 			return nil, err

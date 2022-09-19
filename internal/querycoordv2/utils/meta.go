@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
-	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/samber/lo"
+
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
-	"github.com/samber/lo"
-	"go.uber.org/zap"
 )
 
 func GetReplicaNodesInfo(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeManager, replicaID int64) []*session.NodeInfo {
@@ -29,7 +28,9 @@ func GetReplicaNodesInfo(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeM
 func GetPartitions(collectionMgr *meta.CollectionManager, broker meta.Broker, collectionID int64) ([]int64, error) {
 	collection := collectionMgr.GetCollection(collectionID)
 	if collection != nil {
-		partitions, err := broker.GetPartitions(context.Background(), collectionID)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		partitions, err := broker.GetPartitions(ctx, collectionID)
 		return partitions, err
 	}
 
@@ -108,42 +109,4 @@ func SpawnReplicas(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeManager
 	}
 	AssignNodesToReplicas(nodeMgr, replicas...)
 	return replicas, replicaMgr.Put(replicas...)
-}
-
-// RegisterTargets fetch channels and segments of given collection(partitions) from DataCoord,
-// and then registers them on Target Manager
-func RegisterTargets(ctx context.Context,
-	targetMgr *meta.TargetManager,
-	broker meta.Broker,
-	collection int64, partitions []int64) error {
-	dmChannels := make(map[string][]*datapb.VchannelInfo)
-
-	for _, partitionID := range partitions {
-		log.Debug("get recovery info...",
-			zap.Int64("collectionID", collection),
-			zap.Int64("partitionID", partitionID))
-		vChannelInfos, binlogs, err := broker.GetRecoveryInfo(ctx, collection, partitionID)
-		if err != nil {
-			return err
-		}
-
-		// Register segments
-		for _, segmentBinlogs := range binlogs {
-			targetMgr.AddSegment(SegmentBinlogs2SegmentInfo(
-				collection,
-				partitionID,
-				segmentBinlogs))
-		}
-
-		for _, info := range vChannelInfos {
-			channelName := info.GetChannelName()
-			dmChannels[channelName] = append(dmChannels[channelName], info)
-		}
-	}
-	// Merge and register channels
-	for _, channels := range dmChannels {
-		dmChannel := MergeDmChannelInfo(channels)
-		targetMgr.AddDmChannel(dmChannel)
-	}
-	return nil
 }

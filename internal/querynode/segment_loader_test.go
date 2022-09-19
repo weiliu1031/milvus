@@ -186,6 +186,7 @@ func TestSegmentLoader_loadSegmentFieldsData(t *testing.T) {
 			defaultDMLChannel,
 			segmentTypeSealed,
 			defaultSegmentVersion,
+			defaultSegmentStartPosition,
 			pool)
 		assert.Nil(t, err)
 
@@ -344,6 +345,7 @@ func TestSegmentLoader_invalid(t *testing.T) {
 			defaultDMLChannel,
 			segmentTypeSealed,
 			defaultSegmentVersion,
+			defaultSegmentStartPosition,
 			pool)
 		assert.Nil(t, err)
 
@@ -387,6 +389,7 @@ func TestSegmentLoader_invalid(t *testing.T) {
 			defaultDMLChannel,
 			segmentTypeSealed,
 			defaultSegmentVersion,
+			defaultSegmentStartPosition,
 			pool)
 		assert.Nil(t, err)
 
@@ -427,7 +430,7 @@ func TestSegmentLoader_testLoadGrowing(t *testing.T) {
 		collection, err := node.metaReplica.getCollectionByID(defaultCollectionID)
 		assert.NoError(t, err)
 
-		segment, err := newSegment(collection, defaultSegmentID+1, defaultPartitionID, defaultCollectionID, defaultDMLChannel, segmentTypeGrowing, defaultSegmentVersion, loader.cgoPool)
+		segment, err := newSegment(collection, defaultSegmentID+1, defaultPartitionID, defaultCollectionID, defaultDMLChannel, segmentTypeGrowing, defaultSegmentVersion, defaultSegmentStartPosition, loader.cgoPool)
 		assert.Nil(t, err)
 
 		insertData, err := genInsertData(defaultMsgLength, collection.schema)
@@ -456,7 +459,7 @@ func TestSegmentLoader_testLoadGrowing(t *testing.T) {
 		collection, err := node.metaReplica.getCollectionByID(defaultCollectionID)
 		assert.NoError(t, err)
 
-		segment, err := newSegment(collection, defaultSegmentID+1, defaultPartitionID, defaultCollectionID, defaultDMLChannel, segmentTypeGrowing, defaultSegmentVersion, node.loader.cgoPool)
+		segment, err := newSegment(collection, defaultSegmentID+1, defaultPartitionID, defaultCollectionID, defaultDMLChannel, segmentTypeGrowing, defaultSegmentVersion, defaultSegmentStartPosition, node.loader.cgoPool)
 		assert.Nil(t, err)
 
 		insertData, err := genInsertData(defaultMsgLength, collection.schema)

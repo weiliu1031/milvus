@@ -55,65 +55,16 @@ func (c *ChannelChecker) Check(ctx context.Context) []task.Task {
 
 func (c *ChannelChecker) checkReplica(ctx context.Context, replica *meta.Replica) []task.Task {
 	ret := make([]task.Task, 0)
-	targets := c.targetMgr.GetDmChannelsByCollection(replica.GetCollectionID())
-	dists := c.getChannelDist(replica)
 
-	lacks, redundancies := diffChannels(targets, dists)
+	lacks, redundancies := utils.GetDmChannelDiff(c.targetMgr, c.dist, c.meta, replica.GetCollectionID(), replica.GetID())
 	tasks := c.createChannelLoadTask(ctx, lacks, replica)
 	ret = append(ret, tasks...)
 	tasks = c.createChannelReduceTasks(ctx, redundancies, replica.GetID())
 	ret = append(ret, tasks...)
 
-	repeated := findRepeatedChannels(dists)
+	repeated := utils.FindRepeatedChannels(c.dist, c.meta, replica.GetID())
 	tasks = c.createChannelReduceTasks(ctx, repeated, replica.GetID())
 	ret = append(ret, tasks...)
-	return ret
-}
-
-func (c *ChannelChecker) getChannelDist(replica *meta.Replica) []*meta.DmChannel {
-	dists := make([]*meta.DmChannel, 0)
-	for _, nodeID := range replica.Nodes.Collect() {
-		dists = append(dists, c.dist.ChannelDistManager.GetByCollectionAndNode(replica.GetCollectionID(), nodeID)...)
-	}
-	return dists
-}
-
-func diffChannels(targets, dists []*meta.DmChannel) (lacks, redundancies []*meta.DmChannel) {
-	distMap := make(map[string]struct{})
-	targetMap := make(map[string]struct{})
-	for _, ch := range targets {
-		targetMap[ch.GetChannelName()] = struct{}{}
-	}
-	for _, ch := range dists {
-		distMap[ch.GetChannelName()] = struct{}{}
-		if _, ok := targetMap[ch.GetChannelName()]; !ok {
-			redundancies = append(redundancies, ch)
-		}
-	}
-	for _, ch := range targets {
-		if _, ok := distMap[ch.GetChannelName()]; !ok {
-			lacks = append(lacks, ch)
-		}
-	}
-	return
-}
-
-func findRepeatedChannels(dists []*meta.DmChannel) []*meta.DmChannel {
-	ret := make([]*meta.DmChannel, 0)
-	versionsMap := make(map[string]*meta.DmChannel)
-	for _, ch := range dists {
-		maxVer, ok := versionsMap[ch.GetChannelName()]
-		if !ok {
-			versionsMap[ch.GetChannelName()] = ch
-			continue
-		}
-		if maxVer.Version <= ch.Version {
-			ret = append(ret, maxVer)
-			versionsMap[ch.GetChannelName()] = ch
-		} else {
-			ret = append(ret, ch)
-		}
-	}
 	return ret
 }
 

@@ -180,7 +180,7 @@ func (suite *TaskSuite) TestSubscribeChannelTask() {
 	// Test subscribe channel task
 	tasks := []Task{}
 	for _, channel := range suite.subChannels {
-		suite.target.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
+		suite.target.Next.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 			CollectionID:        suite.collection,
 			ChannelName:         channel,
 			UnflushedSegmentIds: []int64{suite.growingSegments[channel]},
@@ -239,7 +239,7 @@ func (suite *TaskSuite) TestUnsubscribeChannelTask() {
 	// Test unsubscribe channel task
 	tasks := []Task{}
 	for _, channel := range suite.unsubChannels {
-		suite.target.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
+		suite.target.Next.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 			CollectionID: suite.collection,
 			ChannelName:  channel,
 		}))
@@ -319,7 +319,7 @@ func (suite *TaskSuite) TestLoadSegmentTask() {
 	}))
 	tasks := []Task{}
 	for _, segment := range suite.loadSegments {
-		suite.target.AddSegment(&datapb.SegmentInfo{
+		suite.target.Next.AddSegment(&datapb.SegmentInfo{
 			ID:            segment,
 			CollectionID:  suite.collection,
 			PartitionID:   partition,
@@ -486,7 +486,7 @@ func (suite *TaskSuite) TestMoveSegmentTask() {
 	for _, segment := range suite.moveSegments {
 		segments = append(segments,
 			utils.CreateTestSegment(suite.collection, partition, segment, sourceNode, 1, channel.ChannelName))
-		suite.target.AddSegment(&datapb.SegmentInfo{
+		suite.target.Next.AddSegment(&datapb.SegmentInfo{
 			ID:            segment,
 			CollectionID:  suite.collection,
 			PartitionID:   partition,
@@ -549,7 +549,7 @@ func (suite *TaskSuite) TestTaskCanceled() {
 	// Test unsubscribe channel task
 	tasks := []Task{}
 	for _, channel := range suite.unsubChannels {
-		suite.target.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
+		suite.target.Next.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 			CollectionID: suite.collection,
 			ChannelName:  channel,
 		}))
@@ -636,7 +636,7 @@ func (suite *TaskSuite) TestSegmentTaskStale() {
 	}))
 	tasks := []Task{}
 	for _, segment := range suite.loadSegments {
-		suite.target.AddSegment(&datapb.SegmentInfo{
+		suite.target.Next.AddSegment(&datapb.SegmentInfo{
 			ID:            segment,
 			CollectionID:  suite.collection,
 			PartitionID:   partition,
@@ -676,7 +676,7 @@ func (suite *TaskSuite) TestSegmentTaskStale() {
 		view.Segments[segment] = targetNode
 	}
 	suite.dist.LeaderViewManager.Update(targetNode, view)
-	suite.target.RemoveSegment(suite.loadSegments[0])
+	suite.target.Next.RemoveSegment(suite.loadSegments[0])
 	suite.dispatchAndWait(targetNode)
 	suite.AssertTaskNum(0, 0, 0, 0)
 

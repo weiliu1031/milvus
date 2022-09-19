@@ -3,9 +3,10 @@ package meta
 import (
 	"testing"
 
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 type LeaderViewManagerSuite struct {
@@ -53,7 +54,7 @@ func (suite *LeaderViewManagerSuite) SetupSuite() {
 				ID:              int64(j),
 				CollectionID:    collection,
 				Channel:         channel,
-				GrowingSegments: typeutil.NewUniqueSet(suite.growingSegments[collection][channel]),
+				GrowingSegments: map[int64]*Segment{suite.growingSegments[collection][channel]: nil},
 				Segments:        make(map[int64]int64),
 			}
 			for k, segment := range suite.segments[collection] {
@@ -143,8 +144,8 @@ func (suite *LeaderViewManagerSuite) AssertSegmentDist(segment int64, nodes []in
 		for _, view := range views {
 			node, ok := view.Segments[segment]
 			if ok {
-				if !suite.True(nodeSet.Contain(node) ||
-					node == leader && view.GrowingSegments.Contain(node)) {
+				_, ok = view.GrowingSegments[node]
+				if !suite.True(nodeSet.Contain(node) || node == leader && ok) {
 					return false
 				}
 			}

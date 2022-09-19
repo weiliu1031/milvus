@@ -10,7 +10,6 @@ import (
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 type SegmentChecker struct {
@@ -58,11 +57,9 @@ func (c *SegmentChecker) Check(ctx context.Context) []task.Task {
 
 func (c *SegmentChecker) checkReplica(ctx context.Context, replica *meta.Replica) []task.Task {
 	ret := make([]task.Task, 0)
-	targets := c.targetMgr.GetSegmentsByCollection(replica.CollectionID)
-	dists := c.getSegmentsDist(replica)
 
 	// compare with targets to find the lack and redundancy of segments
-	lacks, redundancies := diffSegments(targets, dists)
+	lacks, redundancies := utils.GetHistoricalSegmentDiff(c.targetMgr, c.dist, c.meta, replica.GetCollectionID(), replica.GetID())
 	tasks := c.createSegmentLoadTasks(ctx, lacks, replica)
 	ret = append(ret, tasks...)
 
@@ -70,68 +67,17 @@ func (c *SegmentChecker) checkReplica(ctx context.Context, replica *meta.Replica
 	ret = append(ret, tasks...)
 
 	// compare inner dists to find repeated loaded segments
-	redundancies = findRepeatedSegments(dists)
+	redundancies = utils.FindRepeatedHistoricalSegments(c.dist, c.meta, replica.GetID())
 	redundancies = c.filterExistedOnLeader(replica, redundancies)
 	tasks = c.createSegmentReduceTasks(ctx, redundancies, replica.GetID(), querypb.DataScope_All)
 	ret = append(ret, tasks...)
 
-	// release redundant growing segments
-	leaderReduancies := c.findNeedReleasedGrowingSegments(replica)
-	redundancies = make([]*meta.Segment, 0)
-	for leaderID, segmentIDs := range leaderReduancies {
-		segments := packSegments(segmentIDs, leaderID, replica.GetCollectionID())
-		redundancies = append(redundancies, segments...)
-	}
+	// compare with target to find the lack and redundancy of segments
+	// todo: should we deal with the lack of growing segment here ?
+	_, redundancies = utils.GetStreamingSegmentDiff(c.targetMgr, c.dist, c.meta, replica.GetCollectionID(), replica.GetID())
 	tasks = c.createSegmentReduceTasks(ctx, redundancies, replica.GetID(), querypb.DataScope_Streaming)
 	ret = append(ret, tasks...)
 
-	return ret
-}
-
-func (c *SegmentChecker) getSegmentsDist(replica *meta.Replica) []*meta.Segment {
-	ret := make([]*meta.Segment, 0)
-	for _, node := range replica.Nodes.Collect() {
-		ret = append(ret, c.dist.SegmentDistManager.GetByCollectionAndNode(replica.CollectionID, node)...)
-	}
-	return ret
-}
-
-func diffSegments(targets []*datapb.SegmentInfo, dists []*meta.Segment) (lacks []*datapb.SegmentInfo, redundancies []*meta.Segment) {
-	distMap := typeutil.NewUniqueSet()
-	targetMap := typeutil.NewUniqueSet()
-	for _, s := range targets {
-		targetMap.Insert(s.GetID())
-	}
-	for _, s := range dists {
-		distMap.Insert(s.GetID())
-		if !targetMap.Contain(s.GetID()) {
-			redundancies = append(redundancies, s)
-		}
-	}
-	for _, s := range targets {
-		if !distMap.Contain(s.GetID()) {
-			lacks = append(lacks, s)
-		}
-	}
-	return
-}
-
-func findRepeatedSegments(dists []*meta.Segment) []*meta.Segment {
-	ret := make([]*meta.Segment, 0)
-	versions := make(map[int64]*meta.Segment)
-	for _, s := range dists {
-		maxVer, ok := versions[s.GetID()]
-		if !ok {
-			versions[s.GetID()] = s
-			continue
-		}
-		if maxVer.Version <= s.Version {
-			ret = append(ret, maxVer)
-			versions[s.GetID()] = s
-		} else {
-			ret = append(ret, s)
-		}
-	}
 	return ret
 }
 
@@ -158,48 +104,6 @@ func (c *SegmentChecker) filterExistedOnLeader(replica *meta.Replica, segments [
 		filtered = append(filtered, s)
 	}
 	return filtered
-}
-
-func (c *SegmentChecker) findNeedReleasedGrowingSegments(replica *meta.Replica) map[int64][]int64 {
-	ret := make(map[int64][]int64, 0) // leaderID -> segment ids
-	leaders := c.dist.ChannelDistManager.GetShardLeadersByReplica(replica)
-	for shard, leaderID := range leaders {
-		leaderView := c.dist.LeaderViewManager.GetLeaderShardView(leaderID, shard)
-		if leaderView == nil {
-			continue
-		}
-		// find growing segments from leaderview's sealed segments
-		// because growing segments should be released only after loading the compaction created segment successfully.
-		for sid := range leaderView.Segments {
-			segment := c.targetMgr.GetSegment(sid)
-			if segment == nil {
-				continue
-			}
-
-			sources := append(segment.GetCompactionFrom(), segment.GetID())
-			for _, source := range sources {
-				if leaderView.GrowingSegments.Contain(source) {
-					ret[leaderView.ID] = append(ret[leaderView.ID], source)
-				}
-			}
-		}
-	}
-	return ret
-}
-
-func packSegments(segmentIDs []int64, nodeID int64, collectionID int64) []*meta.Segment {
-	ret := make([]*meta.Segment, 0, len(segmentIDs))
-	for _, id := range segmentIDs {
-		segment := &meta.Segment{
-			SegmentInfo: &datapb.SegmentInfo{
-				ID:           id,
-				CollectionID: collectionID,
-			},
-			Node: nodeID,
-		}
-		ret = append(ret, segment)
-	}
-	return ret
 }
 
 func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []*datapb.SegmentInfo, replica *meta.Replica) []task.Task {

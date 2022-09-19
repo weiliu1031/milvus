@@ -133,48 +133,51 @@ func (ob *CollectionObserver) observeLoadStatus() {
 func (ob *CollectionObserver) observeCollectionLoadStatus(collection *meta.Collection) {
 	log := log.With(zap.Int64("collectionID", collection.GetCollectionID()))
 
-	segmentTargets := ob.targetMgr.GetSegmentsByCollection(collection.GetCollectionID())
-	channelTargets := ob.targetMgr.GetDmChannelsByCollection(collection.GetCollectionID())
+	segmentTargets := ob.targetMgr.Next.GetSegmentsByCollection(collection.GetCollectionID())
+	channelTargets := ob.targetMgr.Next.GetDmChannelsByCollection(collection.GetCollectionID())
 	targetNum := len(segmentTargets) + len(channelTargets)
 	log.Info("collection targets",
 		zap.Int("segment-target-num", len(segmentTargets)),
 		zap.Int("channel-target-num", len(channelTargets)),
 		zap.Int("total-target-num", targetNum))
-	if targetNum == 0 {
-		log.Info("collection released, skip it")
-		return
-	}
-
-	loadedCount := 0
-	for _, channel := range channelTargets {
-		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
-			collection.GetCollectionID(),
-			ob.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
-		if len(group) >= int(collection.GetReplicaNumber()) {
-			loadedCount++
-		}
-	}
-	subChannelCount := loadedCount
-	for _, segment := range segmentTargets {
-		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
-			collection.GetCollectionID(),
-			ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
-		if len(group) >= int(collection.GetReplicaNumber()) {
-			loadedCount++
-		}
-	}
-	if loadedCount > 0 {
-		log.Info("collection load progress",
-			zap.Int("sub-channel-count", subChannelCount),
-			zap.Int("load-segment-count", loadedCount-subChannelCount),
-		)
-	}
 
 	updated := collection.Clone()
-	updated.LoadPercentage = int32(loadedCount * 100 / targetNum)
-	if loadedCount >= len(segmentTargets)+len(channelTargets) {
+	loadedCount := 0
+	if targetNum == 0 {
+		log.Info("All Segment/Channel in target has been loaded!")
+		updated.LoadPercentage = 100
+	} else {
+		for _, channel := range channelTargets {
+			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+				collection.GetCollectionID(),
+				ob.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
+			if len(group) >= int(collection.GetReplicaNumber()) {
+				loadedCount++
+			}
+		}
+		subChannelCount := loadedCount
+		for _, segment := range segmentTargets {
+			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+				collection.GetCollectionID(),
+				ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
+			if len(group) >= int(collection.GetReplicaNumber()) {
+				loadedCount++
+			}
+		}
+		if loadedCount > 0 {
+			log.Info("collection load progress",
+				zap.Int("sub-channel-count", subChannelCount),
+				zap.Int("load-segment-count", loadedCount-subChannelCount),
+			)
+		}
+
+		updated.LoadPercentage = int32(loadedCount * 100 / targetNum)
+	}
+
+	if loadedCount >= targetNum {
 		updated.Status = querypb.LoadStatus_Loaded
 		ob.meta.CollectionManager.UpdateCollection(updated)
+		ob.targetMgr.UpdateCollectionCurrentTarget(updated.CollectionID)
 
 		elapsed := time.Since(updated.CreatedAt)
 		metrics.QueryCoordLoadLatency.WithLabelValues().Observe(float64(elapsed.Milliseconds()))
@@ -194,47 +197,50 @@ func (ob *CollectionObserver) observePartitionLoadStatus(partition *meta.Partiti
 		zap.Int64("partitionID", partition.GetPartitionID()),
 	)
 
-	segmentTargets := ob.targetMgr.GetSegmentsByCollection(partition.GetCollectionID(), partition.GetPartitionID())
-	channelTargets := ob.targetMgr.GetDmChannelsByCollection(partition.GetCollectionID())
+	segmentTargets := ob.targetMgr.Next.GetSegmentsByCollection(partition.GetCollectionID(), partition.GetPartitionID())
+	channelTargets := ob.targetMgr.Next.GetDmChannelsByCollection(partition.GetCollectionID())
 	targetNum := len(segmentTargets) + len(channelTargets)
 	log.Info("partition targets",
 		zap.Int("segment-target-num", len(segmentTargets)),
 		zap.Int("channel-target-num", len(channelTargets)),
 		zap.Int("total-target-num", targetNum))
-	if targetNum == 0 {
-		log.Info("partition released, skip it")
-		return
-	}
 
 	loadedCount := 0
-	for _, channel := range channelTargets {
-		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
-			partition.GetCollectionID(),
-			ob.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
-		if len(group) >= int(partition.GetReplicaNumber()) {
-			loadedCount++
+	partition = partition.Clone()
+	if targetNum == 0 {
+		log.Info("All Segment/Channel in target has been loaded!")
+		partition.LoadPercentage = 100
+	} else {
+		for _, channel := range channelTargets {
+			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+				partition.GetCollectionID(),
+				ob.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
+			if len(group) >= int(partition.GetReplicaNumber()) {
+				loadedCount++
+			}
 		}
-	}
-	subChannelCount := loadedCount
-	for _, segment := range segmentTargets {
-		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
-			partition.GetCollectionID(),
-			ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
-		if len(group) >= int(partition.GetReplicaNumber()) {
-			loadedCount++
+		subChannelCount := loadedCount
+		for _, segment := range segmentTargets {
+			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+				partition.GetCollectionID(),
+				ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
+			if len(group) >= int(partition.GetReplicaNumber()) {
+				loadedCount++
+			}
 		}
-	}
-	if loadedCount > 0 {
-		log.Info("partition load progress",
-			zap.Int("sub-channel-count", subChannelCount),
-			zap.Int("load-segment-count", loadedCount-subChannelCount))
+		if loadedCount > 0 {
+			log.Info("partition load progress",
+				zap.Int("sub-channel-count", subChannelCount),
+				zap.Int("load-segment-count", loadedCount-subChannelCount))
+		}
+		partition.LoadPercentage = int32(loadedCount * 100 / targetNum)
+
 	}
 
-	partition = partition.Clone()
-	partition.LoadPercentage = int32(loadedCount * 100 / targetNum)
 	if loadedCount >= len(segmentTargets)+len(channelTargets) {
 		partition.Status = querypb.LoadStatus_Loaded
 		ob.meta.CollectionManager.PutPartition(partition)
+		ob.targetMgr.UpdatePartitionCurrentTarget(partition.GetCollectionID(), partition.GetPartitionID())
 
 		elapsed := time.Since(partition.CreatedAt)
 		metrics.QueryCoordLoadLatency.WithLabelValues().Observe(float64(elapsed.Milliseconds()))

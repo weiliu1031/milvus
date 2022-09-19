@@ -57,10 +57,12 @@ func (suite *LeaderObserverTestSuite) TestSyncLoadedSegments() {
 	observer := suite.observer
 	observer.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	observer.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
-	observer.target.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
-	observer.dist.SegmentDistManager.Update(1, utils.CreateTestSegment(1, 1, 1, 1, 1, "test-insert-channel"))
+	observer.target.Next.AddDmChannel(utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
+	observer.target.Next.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
+	observer.target.UpdateCollectionCurrentTarget(1)
+	observer.dist.SegmentDistManager.Update(1, utils.CreateTestSegment(1, 1, 1, 2, 1, "test-insert-channel"))
 	observer.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
-	observer.dist.LeaderViewManager.Update(2, utils.CreateTestLeaderView(2, 1, "test-insert-channel", map[int64]int64{}, []int64{}))
+	observer.dist.LeaderViewManager.Update(2, utils.CreateTestLeaderView(2, 1, "test-insert-channel", map[int64]int64{}, map[int64]*meta.Segment{}))
 	expectReq := &querypb.SyncDistributionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_SyncDistribution,
@@ -98,7 +100,7 @@ func (suite *LeaderObserverTestSuite) TestSyncRemovedSegments() {
 	observer.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
 
 	observer.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
-	observer.dist.LeaderViewManager.Update(2, utils.CreateTestLeaderView(2, 1, "test-insert-channel", map[int64]int64{3: 2}, []int64{}))
+	observer.dist.LeaderViewManager.Update(2, utils.CreateTestLeaderView(2, 1, "test-insert-channel", map[int64]int64{3: 2}, map[int64]*meta.Segment{}))
 
 	expectReq := &querypb.SyncDistributionRequest{
 		Base: &commonpb.MsgBase{

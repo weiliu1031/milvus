@@ -7,16 +7,17 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/api/commonpb"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
-	"go.uber.org/zap"
 )
 
 const (
@@ -106,7 +107,7 @@ func (dh *distHandler) handleDistResp(resp *querypb.GetDataDistributionResponse)
 func (dh *distHandler) updateSegmentsDistribution(resp *querypb.GetDataDistributionResponse) {
 	updates := make([]*meta.Segment, 0, len(resp.GetSegments()))
 	for _, s := range resp.GetSegments() {
-		segmentInfo := dh.target.GetSegment(s.GetID())
+		segmentInfo := dh.target.Current.GetHistoricalSegment(s.GetID())
 		var segment *meta.Segment
 		if segmentInfo == nil {
 			segment = &meta.Segment{
@@ -135,7 +136,7 @@ func (dh *distHandler) updateSegmentsDistribution(resp *querypb.GetDataDistribut
 func (dh *distHandler) updateChannelsDistribution(resp *querypb.GetDataDistributionResponse) {
 	updates := make([]*meta.DmChannel, 0, len(resp.GetChannels()))
 	for _, ch := range resp.GetChannels() {
-		channelInfo := dh.target.GetDmChannel(ch.GetChannel())
+		channelInfo := dh.target.Current.GetDmChannel(ch.GetChannel())
 		var channel *meta.DmChannel
 		if channelInfo == nil {
 			channel = &meta.DmChannel{
@@ -156,14 +157,32 @@ func (dh *distHandler) updateChannelsDistribution(resp *querypb.GetDataDistribut
 }
 
 func (dh *distHandler) updateLeaderView(resp *querypb.GetDataDistributionResponse) {
+	packSegment := func(nodeID, collectionID, segmentID int64, position *internalpb.MsgPosition, channelName string) *meta.Segment {
+		return &meta.Segment{
+			SegmentInfo: &datapb.SegmentInfo{
+				ID:            segmentID,
+				CollectionID:  collectionID,
+				StartPosition: position,
+				InsertChannel: channelName,
+			},
+			Node: nodeID,
+		}
+	}
+
 	updates := make([]*meta.LeaderView, 0, len(resp.GetLeaderViews()))
 	for _, lview := range resp.GetLeaderViews() {
+		segments := make(map[int64]*meta.Segment, 0)
+
+		for ID, position := range lview.GrowingSegments {
+			segments[ID] = packSegment(resp.NodeID, lview.GetCollection(), ID, position, lview.Channel)
+		}
+
 		view := &meta.LeaderView{
 			ID:              resp.GetNodeID(),
 			CollectionID:    lview.GetCollection(),
 			Channel:         lview.GetChannel(),
 			Segments:        lview.GetSegmentNodePairs(),
-			GrowingSegments: typeutil.NewUniqueSet(lview.GetGrowingSegmentIDs()...),
+			GrowingSegments: segments,
 		}
 		updates = append(updates, view)
 	}

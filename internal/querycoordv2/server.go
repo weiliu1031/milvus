@@ -91,7 +91,7 @@ type Server struct {
 	// Observers
 	collectionObserver *observers.CollectionObserver
 	leaderObserver     *observers.LeaderObserver
-	handoffObserver    *observers.HandoffObserver
+	targetObserver     *observers.TargetObserver
 
 	balancer balance.Balance
 }
@@ -270,11 +270,11 @@ func (s *Server) initObserver() {
 		s.targetMgr,
 		s.cluster,
 	)
-	s.handoffObserver = observers.NewHandoffObserver(
-		s.store,
+	s.targetObserver = observers.NewTargetObserver(
 		s.meta,
-		s.dist,
 		s.targetMgr,
+		s.dist,
+		s.broker,
 	)
 }
 
@@ -315,10 +315,7 @@ func (s *Server) Start() error {
 	log.Info("start observers...")
 	s.collectionObserver.Start(s.ctx)
 	s.leaderObserver.Start(s.ctx)
-	if err := s.handoffObserver.Start(s.ctx); err != nil {
-		log.Error("start handoff observer failed, exit...", zap.Error(err))
-		panic(err.Error())
-	}
+	s.targetObserver.Start(s.ctx)
 
 	s.status.Store(internalpb.StateCode_Healthy)
 	log.Info("QueryCoord started")
@@ -348,7 +345,7 @@ func (s *Server) Stop() error {
 	log.Info("stop observers...")
 	s.collectionObserver.Stop()
 	s.leaderObserver.Stop()
-	s.handoffObserver.Stop()
+	s.targetObserver.Stop()
 
 	s.wg.Wait()
 	return nil
@@ -471,18 +468,10 @@ func (s *Server) recoverCollectionTargets(ctx context.Context, collection int64)
 		})
 	}
 
-	s.handoffObserver.Register(collection)
-	err = utils.RegisterTargets(
-		ctx,
-		s.targetMgr,
-		s.broker,
-		collection,
-		partitions,
-	)
+	err = s.targetMgr.UpdateNextTarget(ctx, collection, partitions, s.broker)
 	if err != nil {
 		return err
 	}
-	s.handoffObserver.StartHandoff(collection)
 	return nil
 }
 
@@ -576,11 +565,7 @@ func (s *Server) handleNodeDown(node int64) {
 				zap.Int64("collectionID", channel.GetCollectionID()),
 				zap.Error(err))
 		}
-		err = utils.RegisterTargets(s.ctx,
-			s.targetMgr,
-			s.broker,
-			channel.GetCollectionID(),
-			partitions)
+		err = s.targetMgr.UpdateNextTarget(s.ctx, channel.GetCollectionID(), partitions, s.broker)
 		if err != nil {
 			log.Warn("failed to refresh targets of collection",
 				zap.Int64("collectionID", channel.GetCollectionID()),

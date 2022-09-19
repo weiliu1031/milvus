@@ -5,13 +5,14 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/api/commonpb"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
-	"go.uber.org/zap"
 )
 
 const (
@@ -364,7 +365,11 @@ func (ex *Executor) subDmChannel(task *ChannelTask, step int) {
 	// }
 
 	// dmChannel := utils.MergeDmChannelInfo(channels)
-	dmChannel := ex.targetMgr.GetDmChannel(action.ChannelName())
+	dmChannel := ex.targetMgr.Next.GetDmChannel(action.ChannelName())
+	if dmChannel == nil {
+		log.Warn("channel does not exist in next target, skip it", zap.String("channelName", action.ChannelName()))
+		return
+	}
 	req := packSubDmChannelRequest(task, action, schema, loadMeta, dmChannel)
 	err = fillSubDmChannelRequest(ctx, req, ex.broker)
 	if err != nil {

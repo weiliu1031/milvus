@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -11,8 +14,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
 )
 
 type ChannelCheckerTestSuite struct {
@@ -71,7 +72,7 @@ func (suite *ChannelCheckerTestSuite) TestLoadChannel() {
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1}))
 
-	checker.targetMgr.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
+	checker.targetMgr.Next.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
 
 	tasks := checker.Check(context.TODO())
 	suite.Len(tasks, 1)
@@ -103,9 +104,12 @@ func (suite *ChannelCheckerTestSuite) TestReduceChannel() {
 
 func (suite *ChannelCheckerTestSuite) TestRepeatedChannels() {
 	checker := suite.checker
-	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
-	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
-	checker.targetMgr.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
+	err := checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
+	suite.NoError(err)
+	err = checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
+	suite.NoError(err)
+
+	checker.targetMgr.Next.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
 	checker.dist.ChannelDistManager.Update(1, utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
 	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 2, "test-insert-channel"))
 

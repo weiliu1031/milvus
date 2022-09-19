@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/suite"
+	clientv3 "go.etcd.io/etcd/client/v3"
+
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
@@ -13,8 +16,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/stretchr/testify/suite"
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type CollectionObserverSuite struct {
@@ -176,8 +177,11 @@ func (suite *CollectionObserverSuite) TestObserve() {
 		Segments:     map[int64]int64{2: 2},
 	})
 	suite.Eventually(func() bool {
-		return suite.isCollectionLoaded(suite.collections[0]) &&
-			suite.isCollectionTimeout(suite.collections[1])
+		return suite.isCollectionLoaded(suite.collections[0])
+	}, timeout*2, timeout/10)
+
+	suite.Eventually(func() bool {
+		return suite.isCollectionTimeout(suite.collections[1])
 	}, timeout*2, timeout/10)
 }
 
@@ -186,8 +190,8 @@ func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool 
 	percentage := suite.meta.GetLoadPercentage(collection)
 	status := suite.meta.GetStatus(collection)
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
-	channels := suite.targetMgr.GetDmChannelsByCollection(collection)
-	segments := suite.targetMgr.GetSegmentsByCollection(collection)
+	channels := suite.targetMgr.Current.GetDmChannelsByCollection(collection)
+	segments := suite.targetMgr.Current.GetSegmentsByCollection(collection)
 
 	return exist &&
 		percentage == 100 &&
@@ -200,8 +204,8 @@ func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool 
 func (suite *CollectionObserverSuite) isCollectionTimeout(collection int64) bool {
 	exist := suite.meta.Exist(collection)
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
-	channels := suite.targetMgr.GetDmChannelsByCollection(collection)
-	segments := suite.targetMgr.GetSegmentsByCollection(collection)
+	channels := suite.targetMgr.Current.GetDmChannelsByCollection(collection)
+	segments := suite.targetMgr.Current.GetSegmentsByCollection(collection)
 
 	return !(exist ||
 		len(replicas) > 0 ||
@@ -213,6 +217,7 @@ func (suite *CollectionObserverSuite) loadAll() {
 	for _, collection := range suite.collections {
 		suite.load(collection)
 	}
+	suite.targetMgr.UpdateCollectionCurrentTarget(suite.collections[0])
 }
 
 func (suite *CollectionObserverSuite) load(collection int64) {
@@ -250,8 +255,8 @@ func (suite *CollectionObserverSuite) load(collection int64) {
 		}
 	}
 
-	suite.targetMgr.AddDmChannel(suite.channels[collection]...)
-	suite.targetMgr.AddSegment(suite.segments[collection]...)
+	suite.targetMgr.Next.AddDmChannel(suite.channels[collection]...)
+	suite.targetMgr.Next.AddSegment(suite.segments[collection]...)
 }
 
 func TestCollectionObserver(t *testing.T) {

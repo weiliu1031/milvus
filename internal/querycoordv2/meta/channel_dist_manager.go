@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
+
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )

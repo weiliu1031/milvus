@@ -186,6 +186,7 @@ func (w *watchDmChannelsTask) Execute(ctx context.Context) (err error) {
 	// load growing segments
 	unFlushedSegments := make([]*queryPb.SegmentLoadInfo, 0)
 	unFlushedSegmentIDs := make([]UniqueID, 0)
+	unFlushedSegmentPositions := make(map[int64]*internalpb.MsgPosition, 0)
 	for _, info := range w.req.Infos {
 		for _, ufInfoID := range info.GetUnflushedSegmentIds() {
 			// unFlushed segment may not have binLogs, skip loading
@@ -206,6 +207,7 @@ func (w *watchDmChannelsTask) Execute(ctx context.Context) (err error) {
 					InsertChannel: ufInfo.InsertChannel,
 				})
 				unFlushedSegmentIDs = append(unFlushedSegmentIDs, ufInfo.GetID())
+				unFlushedSegmentPositions[ufInfo.ID] = ufInfo.StartPosition
 			}
 		}
 	}

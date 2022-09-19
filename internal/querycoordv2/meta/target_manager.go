@@ -1,186 +1,203 @@
 package meta
 
 import (
-	"sync"
+	"context"
+
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-	"go.uber.org/zap"
 )
 
 type TargetManager struct {
-	rwmutex sync.RWMutex
-
-	segments   map[int64]*datapb.SegmentInfo
-	dmChannels map[string]*DmChannel
+	// all read segment/channel operation happens on Current -> only current target are visible to outer
+	// all add segment/channel operation happens on Next -> changes can only happen on Next target
+	// all remove segment/channel operation happens on Both Current and Next -> delete status should be consistent
+	Current *Target
+	Next    *Target
 }
 
 func NewTargetManager() *TargetManager {
 	return &TargetManager{
-		segments:   make(map[int64]*datapb.SegmentInfo),
-		dmChannels: make(map[string]*DmChannel),
+		Current: NewTarget(),
+		Next:    NewTarget(),
 	}
+}
+
+func (mgr *TargetManager) UpdateCollectionCurrentTarget(collectionID int64) {
+	mgr.Current.RWMutex.Lock()
+	defer mgr.Current.RWMutex.Unlock()
+	mgr.Next.RWMutex.Lock()
+	defer mgr.Next.RWMutex.Unlock()
+
+	log.Info("updateCurrentTarget for collection start", zap.Int64("collectionID", collectionID),
+		zap.Int64("PartitionID", collectionID))
+
+	// add Next to current
+	newHistoricalSegments := mgr.Next.getHistoricalSegmentIDsByCollection(collectionID)
+	newChannels := mgr.Next.getDmChannels(collectionID)
+
+	// can not use an empty Next target to update current target
+	if len(newChannels) == 0 {
+		return
+	}
+
+	// delete current
+	mgr.Current.removeCollection(collectionID)
+
+	for ID, segment := range newHistoricalSegments {
+		mgr.Current.updateSegment(segment)
+		mgr.Next.removeSegment(ID)
+	}
+
+	for name, channel := range newChannels {
+		mgr.Current.updateDmChannel(channel)
+		mgr.Next.removeDmChannel(name)
+	}
+
+	log.Info("updateCurrentTarget finish for collection", zap.Int64("collectionID", collectionID),
+		zap.Int64("PartitionID", collectionID))
+}
+
+// UpdatePartitionCurrentTarget for load partition to trigger Next target to current target
+func (mgr *TargetManager) UpdatePartitionCurrentTarget(collectionID int64, partitionIDs ...int64) {
+	mgr.Current.RWMutex.Lock()
+	defer mgr.Current.RWMutex.Unlock()
+	mgr.Next.RWMutex.Lock()
+	defer mgr.Next.RWMutex.Unlock()
+
+	log.Info("updateCurrentTarget, for partition", zap.Int64("collectionID", collectionID),
+		zap.Int64s("PartitionID", partitionIDs))
+
+	newHistoricalSegments := mgr.Next.getHistoricalSegmentIDsByPartition(partitionIDs...)
+	newChannels := mgr.Next.getDmChannels(collectionID)
+
+	if len(newChannels) == 0 {
+		return
+	}
+
+	// delete from current
+	for _, partitionID := range partitionIDs {
+		mgr.Current.removePartition(partitionID)
+	}
+
+	for ID, segment := range newHistoricalSegments {
+		mgr.Current.updateSegment(segment)
+		mgr.Next.removeSegment(ID)
+	}
+
+	for name, channel := range newChannels {
+		mgr.Current.updateDmChannel(channel)
+		mgr.Next.removeDmChannel(name)
+	}
+
+	log.Info("updateCurrentTarget finish for partition", zap.Int64("collectionID", collectionID),
+		zap.Int64s("PartitionID", partitionIDs))
+}
+
+func (mgr *TargetManager) UpdateNextTarget(ctx context.Context, collectionID int64, partitionIDs []int64, broker Broker) error {
+	mgr.Current.RWMutex.Lock()
+	defer mgr.Current.RWMutex.Unlock()
+	mgr.Next.RWMutex.Lock()
+	defer mgr.Next.RWMutex.Unlock()
+
+	log.Info("UpdateNextTarget start", zap.Int64("collectionID", collectionID),
+		zap.Int64s("partitionIDs", partitionIDs))
+
+	// clear old Next target first if exists.
+	mgr.Next.removeCollection(collectionID)
+
+	dmChannels := make(map[string][]*datapb.VchannelInfo)
+	allBinlogs := make(map[int64][]*datapb.SegmentBinlogs, 0)
+	for _, partitionID := range partitionIDs {
+		log.Debug("get recovery info...",
+			zap.Int64("collectionID", collectionID),
+			zap.Int64("partitionID", partitionID))
+		vChannelInfos, binlogs, err := broker.GetRecoveryInfo(ctx, collectionID, partitionID)
+		if err != nil {
+			return err
+		}
+
+		allBinlogs[partitionID] = binlogs
+
+		for _, info := range vChannelInfos {
+			channelName := info.GetChannelName()
+			dmChannels[channelName] = append(dmChannels[channelName], info)
+		}
+	}
+
+	// Merge and register channels
+	for _, channels := range dmChannels {
+		dmChannel := mgr.mergeDmChannelInfo(channels)
+		mgr.Next.addDmChannel(dmChannel)
+	}
+
+	// Register segments
+	for partitionID, binlogs := range allBinlogs {
+		for _, segmentBinlog := range binlogs {
+			mgr.Next.addSegment(&datapb.SegmentInfo{
+				ID:            segmentBinlog.GetSegmentID(),
+				CollectionID:  collectionID,
+				PartitionID:   partitionID,
+				InsertChannel: segmentBinlog.GetInsertChannel(),
+				NumOfRows:     segmentBinlog.GetNumOfRows(),
+				Binlogs:       segmentBinlog.GetFieldBinlogs(),
+				Statslogs:     segmentBinlog.GetStatslogs(),
+				Deltalogs:     segmentBinlog.GetDeltalogs(),
+			})
+		}
+	}
+
+	log.Info("UpdateNextTarget finish", zap.Int64("collectionID", collectionID),
+		zap.Int64s("partitionIDs", partitionIDs))
+	return nil
+}
+
+func (mgr *TargetManager) mergeDmChannelInfo(infos []*datapb.VchannelInfo) *DmChannel {
+	var dmChannel *DmChannel
+
+	for _, info := range infos {
+		if dmChannel == nil {
+			dmChannel = DmChannelFromVChannel(info)
+			continue
+		}
+
+		if info.SeekPosition.GetTimestamp() < dmChannel.SeekPosition.GetTimestamp() {
+			dmChannel.SeekPosition = info.SeekPosition
+		}
+		dmChannel.DroppedSegmentIds = append(dmChannel.DroppedSegmentIds, info.DroppedSegmentIds...)
+		dmChannel.UnflushedSegmentIds = append(dmChannel.UnflushedSegmentIds, info.UnflushedSegmentIds...)
+		dmChannel.FlushedSegmentIds = append(dmChannel.FlushedSegmentIds, info.FlushedSegmentIds...)
+	}
+
+	return dmChannel
 }
 
 // RemoveCollection removes all channels and segments in the given collection
 func (mgr *TargetManager) RemoveCollection(collectionID int64) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
+	mgr.Current.RWMutex.Lock()
+	defer mgr.Current.RWMutex.Unlock()
+	mgr.Next.RWMutex.Lock()
+	defer mgr.Next.RWMutex.Unlock()
 
-	log.Info("remove collection from targets")
-	for _, segment := range mgr.segments {
-		if segment.CollectionID == collectionID {
-			mgr.removeSegment(segment.GetID())
-		}
-	}
-	for _, dmChannel := range mgr.dmChannels {
-		if dmChannel.CollectionID == collectionID {
-			mgr.removeDmChannel(dmChannel.GetChannelName())
-		}
-	}
+	log.Info("remove collection from current target", zap.Int64("collectionID", collectionID))
+	mgr.Current.removeCollection(collectionID)
+
+	log.Info("remove collection from Next target", zap.Int64("collectionID", collectionID))
+	mgr.Next.removeCollection(collectionID)
 }
 
 // RemovePartition removes all segment in the given partition,
 // NOTE: this doesn't remove any channel even the given one is the only partition
 func (mgr *TargetManager) RemovePartition(partitionID int64) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
+	mgr.Current.RWMutex.Lock()
+	defer mgr.Current.RWMutex.Unlock()
+	mgr.Next.RWMutex.Lock()
+	defer mgr.Next.RWMutex.Unlock()
 
-	log.Info("remove partition from targets",
-		zap.Int64("partitionID", partitionID))
-	for _, segment := range mgr.segments {
-		if segment.GetPartitionID() == partitionID {
-			mgr.removeSegment(segment.GetID())
-		}
-	}
-}
+	log.Info("remove partition from current targets", zap.Int64("partitionID", partitionID))
+	mgr.Current.removePartition(partitionID)
 
-func (mgr *TargetManager) RemoveSegment(segmentID int64) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	delete(mgr.segments, segmentID)
-}
-
-func (mgr *TargetManager) removeSegment(segmentID int64) {
-	delete(mgr.segments, segmentID)
-	log.Info("segment removed from targets")
-}
-
-// AddSegment adds segment into target set,
-// requires CollectionID, PartitionID, InsertChannel, SegmentID are set
-func (mgr *TargetManager) AddSegment(segments ...*datapb.SegmentInfo) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	mgr.addSegment(segments...)
-}
-
-func (mgr *TargetManager) addSegment(segments ...*datapb.SegmentInfo) {
-	for _, segment := range segments {
-		log.Info("add segment into targets",
-			zap.Int64("segmentID", segment.GetID()),
-			zap.Int64("collectionID", segment.GetCollectionID()),
-		)
-		mgr.segments[segment.GetID()] = segment
-	}
-}
-
-func (mgr *TargetManager) ContainSegment(id int64) bool {
-	mgr.rwmutex.RLock()
-	defer mgr.rwmutex.RUnlock()
-
-	return mgr.containSegment(id)
-}
-
-func (mgr *TargetManager) containSegment(id int64) bool {
-	_, ok := mgr.segments[id]
-	return ok
-}
-
-func (mgr *TargetManager) GetSegmentsByCollection(collection int64, partitions ...int64) []*datapb.SegmentInfo {
-	mgr.rwmutex.RLock()
-	defer mgr.rwmutex.RUnlock()
-
-	segments := make([]*datapb.SegmentInfo, 0)
-	for _, segment := range mgr.segments {
-		if segment.CollectionID == collection &&
-			(len(partitions) == 0 || funcutil.SliceContain(partitions, segment.PartitionID)) {
-			segments = append(segments, segment)
-		}
-	}
-
-	return segments
-}
-
-func (mgr *TargetManager) HandoffSegment(dest *datapb.SegmentInfo, sources ...int64) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	// add dest to target
-	dest.CompactionFrom = sources
-	mgr.addSegment(dest)
-}
-
-// AddDmChannel adds a channel into target set,
-// requires CollectionID, ChannelName are set
-func (mgr *TargetManager) AddDmChannel(channels ...*DmChannel) {
-	mgr.rwmutex.Lock()
-	defer mgr.rwmutex.Unlock()
-
-	for _, channel := range channels {
-		log.Info("add channel into targets",
-			zap.String("channel", channel.GetChannelName()))
-		mgr.dmChannels[channel.ChannelName] = channel
-	}
-}
-
-func (mgr *TargetManager) GetDmChannel(channel string) *DmChannel {
-	mgr.rwmutex.RLock()
-	defer mgr.rwmutex.RUnlock()
-	for _, ch := range mgr.dmChannels {
-		if ch.ChannelName == channel {
-			return ch
-		}
-	}
-	return nil
-}
-
-func (mgr *TargetManager) ContainDmChannel(channel string) bool {
-	mgr.rwmutex.RLock()
-	defer mgr.rwmutex.RUnlock()
-
-	_, ok := mgr.dmChannels[channel]
-	return ok
-}
-
-func (mgr *TargetManager) removeDmChannel(channel string) {
-	delete(mgr.dmChannels, channel)
-	log.Info("remove channel from targets", zap.String("channel", channel))
-}
-
-func (mgr *TargetManager) GetDmChannelsByCollection(collectionID int64) []*DmChannel {
-	mgr.rwmutex.RLock()
-	defer mgr.rwmutex.RUnlock()
-
-	channels := make([]*DmChannel, 0)
-	for _, channel := range mgr.dmChannels {
-		if channel.GetCollectionID() == collectionID {
-			channels = append(channels, channel)
-		}
-	}
-	return channels
-}
-
-func (mgr *TargetManager) GetSegment(id int64) *datapb.SegmentInfo {
-	mgr.rwmutex.RLock()
-	defer mgr.rwmutex.RUnlock()
-
-	for _, s := range mgr.segments {
-		if s.GetID() == id {
-			return s
-		}
-	}
-	return nil
+	log.Info("remove partition from Next targets", zap.Int64("partitionID", partitionID))
+	mgr.Next.removePartition(partitionID)
 }
