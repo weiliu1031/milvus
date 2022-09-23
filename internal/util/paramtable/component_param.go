@@ -632,6 +632,9 @@ type queryCoordConfig struct {
 	DistPullInterval                    time.Duration
 	LoadTimeoutSeconds                  time.Duration
 	CheckHandoffInterval                time.Duration
+
+	NextTargetSurviveTime    time.Duration
+	UpdateNextTargetInterval time.Duration
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
@@ -656,6 +659,8 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 	p.initDistPullInterval()
 	p.initLoadTimeoutSeconds()
 	p.initCheckHandoffInterval()
+	p.initNextTargetSurviveTime()
+	p.initUpdateNextTargetIntervale()
 }
 
 func (p *queryCoordConfig) initTaskRetryNum() {
@@ -765,6 +770,24 @@ func (p *queryCoordConfig) initCheckHandoffInterval() {
 		panic(err)
 	}
 	p.CheckHandoffInterval = time.Duration(checkHandoffInterval) * time.Millisecond
+}
+
+func (p *queryCoordConfig) initNextTargetSurviveTime() {
+	interval := p.Base.LoadWithDefault("queryCoord.NextTargetSurviveTime", "3")
+	nextTargetSurviveTime, err := strconv.ParseInt(interval, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.NextTargetSurviveTime = time.Duration(nextTargetSurviveTime) * time.Minute
+}
+
+func (p *queryCoordConfig) initUpdateNextTargetIntervale() {
+	interval := p.Base.LoadWithDefault("queryCoord.UpdateNextTargetInterval", "3000")
+	updateNextTargetInterval, err := strconv.ParseInt(interval, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.UpdateNextTargetInterval = time.Duration(updateNextTargetInterval) * time.Millisecond
 }
 
 func (p *queryCoordConfig) SetNodeID(id UniqueID) {

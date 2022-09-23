@@ -133,8 +133,8 @@ func (ob *CollectionObserver) observeLoadStatus() {
 func (ob *CollectionObserver) observeCollectionLoadStatus(collection *meta.Collection) {
 	log := log.With(zap.Int64("collectionID", collection.GetCollectionID()))
 
-	segmentTargets := ob.targetMgr.Next.GetSegmentsByCollection(collection.GetCollectionID())
-	channelTargets := ob.targetMgr.Next.GetDmChannelsByCollection(collection.GetCollectionID())
+	segmentTargets := ob.targetMgr.GetHistoricalSegmentsByCollection(collection.GetCollectionID(), meta.NextTarget)
+	channelTargets := ob.targetMgr.GetDmChannelsByCollection(collection.GetCollectionID(), meta.NextTarget)
 	targetNum := len(segmentTargets) + len(channelTargets)
 	log.Info("collection targets",
 		zap.Int("segment-target-num", len(segmentTargets)),
@@ -197,8 +197,8 @@ func (ob *CollectionObserver) observePartitionLoadStatus(partition *meta.Partiti
 		zap.Int64("partitionID", partition.GetPartitionID()),
 	)
 
-	segmentTargets := ob.targetMgr.Next.GetSegmentsByCollection(partition.GetCollectionID(), partition.GetPartitionID())
-	channelTargets := ob.targetMgr.Next.GetDmChannelsByCollection(partition.GetCollectionID())
+	segmentTargets := ob.targetMgr.GetHistoricalSegmentsByPartition(partition.GetCollectionID(), partition.GetPartitionID(), meta.NextTarget)
+	channelTargets := ob.targetMgr.GetDmChannelsByCollection(partition.GetCollectionID(), meta.NextTarget)
 	targetNum := len(segmentTargets) + len(channelTargets)
 	log.Info("partition targets",
 		zap.Int("segment-target-num", len(segmentTargets)),

@@ -36,6 +36,7 @@ type CollectionObserverSuite struct {
 	etcd        *clientv3.Client
 	kv          kv.MetaKv
 	store       meta.Store
+	broker      *meta.MockBroker
 
 	// Dependencies
 	dist      *meta.DistributionManager
@@ -137,7 +138,8 @@ func (suite *CollectionObserverSuite) SetupTest() {
 	// Dependencies
 	suite.dist = meta.NewDistributionManager()
 	suite.meta = meta.NewMeta(suite.idAllocator, suite.store)
-	suite.targetMgr = meta.NewTargetManager()
+	suite.broker = meta.NewMockBroker(suite.T())
+	suite.targetMgr = meta.NewTargetManager(suite.meta, suite.broker)
 
 	// Test object
 	suite.ob = NewCollectionObserver(
@@ -190,8 +192,8 @@ func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool 
 	percentage := suite.meta.GetLoadPercentage(collection)
 	status := suite.meta.GetStatus(collection)
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
-	channels := suite.targetMgr.Current.GetDmChannelsByCollection(collection)
-	segments := suite.targetMgr.Current.GetSegmentsByCollection(collection)
+	channels := suite.targetMgr.GetDmChannelsByCollection(collection, meta.CurrentTarget)
+	segments := suite.targetMgr.GetHistoricalSegmentsByCollection(collection, meta.CurrentTarget)
 
 	return exist &&
 		percentage == 100 &&
@@ -204,8 +206,8 @@ func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool 
 func (suite *CollectionObserverSuite) isCollectionTimeout(collection int64) bool {
 	exist := suite.meta.Exist(collection)
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
-	channels := suite.targetMgr.Current.GetDmChannelsByCollection(collection)
-	segments := suite.targetMgr.Current.GetSegmentsByCollection(collection)
+	channels := suite.targetMgr.GetDmChannelsByCollection(collection, meta.CurrentTarget)
+	segments := suite.targetMgr.GetHistoricalSegmentsByCollection(collection, meta.CurrentTarget)
 
 	return !(exist ||
 		len(replicas) > 0 ||
@@ -255,8 +257,13 @@ func (suite *CollectionObserverSuite) load(collection int64) {
 		}
 	}
 
-	suite.targetMgr.Next.AddDmChannel(suite.channels[collection]...)
-	suite.targetMgr.Next.AddSegment(suite.segments[collection]...)
+	for _, channel := range suite.channels[collection] {
+		suite.targetMgr.AddDmChannel(channel)
+	}
+
+	for _, segment := range suite.segments[collection] {
+		suite.targetMgr.AddSegment(segment)
+	}
 }
 
 func TestCollectionObserver(t *testing.T) {

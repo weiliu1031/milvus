@@ -20,6 +20,8 @@ type ChannelCheckerTestSuite struct {
 	suite.Suite
 	kv      *etcdkv.EtcdKV
 	checker *ChannelChecker
+	meta    *meta.Meta
+	broker  *meta.MockBroker
 }
 
 func (suite *ChannelCheckerTestSuite) SetupSuite() {
@@ -36,13 +38,14 @@ func (suite *ChannelCheckerTestSuite) SetupTest() {
 	// meta
 	store := meta.NewMetaStore(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	testMeta := meta.NewMeta(idAllocator, store)
+	suite.meta = meta.NewMeta(idAllocator, store)
+	suite.broker = meta.NewMockBroker(suite.T())
+	targetManager := meta.NewTargetManager(suite.meta, suite.broker)
 
 	distManager := meta.NewDistributionManager()
-	targetManager := meta.NewTargetManager()
 
 	balancer := suite.createMockBalancer()
-	suite.checker = NewChannelChecker(testMeta, distManager, targetManager, balancer)
+	suite.checker = NewChannelChecker(suite.meta, distManager, targetManager, balancer)
 }
 
 func (suite *ChannelCheckerTestSuite) TearDownTest() {
@@ -72,7 +75,7 @@ func (suite *ChannelCheckerTestSuite) TestLoadChannel() {
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1}))
 
-	checker.targetMgr.Next.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
+	checker.targetMgr.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
 
 	tasks := checker.Check(context.TODO())
 	suite.Len(tasks, 1)
@@ -109,7 +112,7 @@ func (suite *ChannelCheckerTestSuite) TestRepeatedChannels() {
 	err = checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
 	suite.NoError(err)
 
-	checker.targetMgr.Next.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
+	checker.targetMgr.AddDmChannel(utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
 	checker.dist.ChannelDistManager.Update(1, utils.CreateTestChannel(1, 1, 1, "test-insert-channel"))
 	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 2, "test-insert-channel"))
 

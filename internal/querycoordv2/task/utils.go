@@ -183,7 +183,7 @@ func getSegmentDeltaPositions(ctx context.Context, targetMgr *meta.TargetManager
 	// }
 
 	deltaChannels := make([]*datapb.VchannelInfo, 0)
-	for _, info := range targetMgr.Next.GetDmChannelsByCollection(collectionID) {
+	for _, info := range targetMgr.GetDmChannelsByCollection(collectionID, meta.NextTarget) {
 		deltaChannelInfo, err := generatDeltaChannelInfo(info.VchannelInfo)
 		if err != nil {
 			return nil, err

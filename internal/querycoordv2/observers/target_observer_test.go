@@ -50,9 +50,9 @@ func (suite *TargetObserverSuite) SetupTest() {
 	idAllocator := RandomIncrementIDAllocator()
 	suite.meta = meta.NewMeta(idAllocator, store)
 
-	suite.targetMgr = meta.NewTargetManager()
-	suite.distMgr = meta.NewDistributionManager()
 	suite.broker = meta.NewMockBroker(suite.T())
+	suite.targetMgr = meta.NewTargetManager(suite.meta, suite.broker)
+	suite.distMgr = meta.NewDistributionManager()
 	suite.observer = NewTargetObserver(suite.meta, suite.targetMgr, suite.distMgr, suite.broker)
 
 	suite.observer.Start(context.TODO())
@@ -65,13 +65,14 @@ func (suite *TargetObserverSuite) SetupTest() {
 	err = suite.meta.CollectionManager.PutPartition(utils.CreateTestPartition(suite.collectionID, suite.partitionID))
 	suite.NoError(err)
 
-	suite.targetMgr.Current.AddDmChannel(utils.CreateTestChannel(suite.collectionID, 2, 0, "channel-0"))
-	suite.targetMgr.Current.AddSegment(&datapb.SegmentInfo{
+	suite.targetMgr.AddDmChannel(utils.CreateTestChannel(suite.collectionID, 2, 0, "channel-0"))
+	suite.targetMgr.AddSegment(&datapb.SegmentInfo{
 		ID:            10,
 		CollectionID:  suite.collectionID,
 		PartitionID:   suite.partitionID,
 		InsertChannel: "channel-0",
 	})
+	suite.targetMgr.UpdateCollectionCurrentTarget(suite.collectionID)
 
 	suite.nextTargetChannels = []*datapb.VchannelInfo{
 		{
@@ -101,8 +102,11 @@ func (suite *TargetObserverSuite) SetupTest() {
 
 func (suite *TargetObserverSuite) TestTriggerUpdateTarget() {
 	suite.Eventually(func() bool {
-		return len(suite.targetMgr.Next.GetSegmentsByCollection(suite.collectionID)) == 2 &&
-			len(suite.targetMgr.Next.GetDmChannelsByCollection(suite.collectionID)) == 2
+		return len(suite.targetMgr.GetHistoricalSegmentsByCollection(suite.collectionID, meta.NextTarget)) == 2
+	}, 5*time.Second, 1*time.Second)
+
+	suite.Eventually(func() bool {
+		return len(suite.targetMgr.GetDmChannelsByCollection(suite.collectionID, meta.NextTarget)) == 2
 	}, 5*time.Second, 1*time.Second)
 
 	suite.distMgr.SegmentDistManager.Update(2, utils.CreateTestSegment(suite.collectionID, suite.partitionID, 11, 2, 0, "channel-1"))
@@ -111,8 +115,11 @@ func (suite *TargetObserverSuite) TestTriggerUpdateTarget() {
 	suite.distMgr.ChannelDistManager.Update(2, utils.CreateTestChannel(suite.collectionID, 2, 1, "channel-2"))
 
 	suite.Eventually(func() bool {
-		return len(suite.targetMgr.Current.GetSegmentsByCollection(suite.collectionID)) == 2 &&
-			len(suite.targetMgr.Current.GetDmChannelsByCollection(suite.collectionID)) == 2
+		return len(suite.targetMgr.GetHistoricalSegmentsByCollection(suite.collectionID, meta.CurrentTarget)) == 2
+	}, 5*time.Second, 1*time.Second)
+
+	suite.Eventually(func() bool {
+		return len(suite.targetMgr.GetDmChannelsByCollection(suite.collectionID, meta.CurrentTarget)) == 2
 	}, 5*time.Second, 1*time.Second)
 }
 

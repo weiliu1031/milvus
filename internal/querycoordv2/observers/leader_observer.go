@@ -5,13 +5,14 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/api/commonpb"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
-	"go.uber.org/zap"
 )
 
 const interval = 1 * time.Second
@@ -85,7 +86,7 @@ func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dis
 	for _, s := range dists {
 		node, ok := leaderView.Segments[s.GetID()]
 		consistentOnLeader := ok && node == s.Node
-		if consistentOnLeader || !o.target.Current.ContainSegment(s.GetID()) {
+		if consistentOnLeader || o.target.GetHistoricalSegment(s.CollectionID, s.GetID(), meta.CurrentTarget) == nil {
 			continue
 		}
 		ret = append(ret, &querypb.SyncAction{
@@ -106,7 +107,7 @@ func (o *LeaderObserver) findNeedRemovedSegments(leaderView *meta.LeaderView, di
 	}
 	for sid := range leaderView.Segments {
 		_, ok := distMap[sid]
-		if ok || o.target.Current.ContainSegment(sid) {
+		if ok || o.target.GetHistoricalSegment(leaderView.CollectionID, sid, meta.CurrentTarget) != nil {
 			continue
 		}
 		ret = append(ret, &querypb.SyncAction{

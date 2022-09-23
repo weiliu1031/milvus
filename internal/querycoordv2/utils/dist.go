@@ -3,9 +3,9 @@ package utils
 import "github.com/milvus-io/milvus/internal/querycoordv2/meta"
 
 func FindRepeatedChannels(distMgr *meta.DistributionManager,
-	_meta *meta.Meta,
+	metaInfo *meta.Meta,
 	replicaID int64) []*meta.DmChannel {
-	dist := GetChannelDist(distMgr, _meta, replicaID)
+	dist := GetChannelDist(distMgr, metaInfo, replicaID)
 
 	ret := make([]*meta.DmChannel, 0)
 	versionsMap := make(map[string]*meta.DmChannel)
@@ -26,10 +26,10 @@ func FindRepeatedChannels(distMgr *meta.DistributionManager,
 }
 
 func FindRepeatedHistoricalSegments(distMgr *meta.DistributionManager,
-	_meta *meta.Meta,
+	metaInfo *meta.Meta,
 	replicaID int64) []*meta.Segment {
 
-	dist := GetHistoricalSegmentsDist(distMgr, _meta, replicaID)
+	dist := GetHistoricalSegmentsDist(distMgr, metaInfo, replicaID)
 	segments := make([]*meta.Segment, 0)
 	versions := make(map[int64]*meta.Segment)
 	for _, s := range dist {

@@ -365,7 +365,7 @@ func (ex *Executor) subDmChannel(task *ChannelTask, step int) {
 	// }
 
 	// dmChannel := utils.MergeDmChannelInfo(channels)
-	dmChannel := ex.targetMgr.Next.GetDmChannel(action.ChannelName())
+	dmChannel := ex.targetMgr.GetDmChannel(task.CollectionID(), action.ChannelName(), meta.NextTarget)
 	if dmChannel == nil {
 		log.Warn("channel does not exist in next target, skip it", zap.String("channelName", action.ChannelName()))
 		return

@@ -9,6 +9,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -36,7 +37,7 @@ func NewTargetObserver(meta *meta.Meta, targetMgr *meta.TargetManager, distMgr *
 		targetMgr:            targetMgr,
 		distMgr:              distMgr,
 		broker:               broker,
-		nextTargetLastUpdate: map[int64]time.Time{},
+		nextTargetLastUpdate: make(map[int64]time.Time),
 	}
 }
 
@@ -54,14 +55,14 @@ func (ob *TargetObserver) schedule(ctx context.Context) {
 	defer ob.wg.Done()
 	log.Info("Start update next target loop")
 
-	ticker := time.NewTicker(updateNextTargetInterval)
+	ticker := time.NewTicker(params.Params.QueryCoordCfg.UpdateNextTargetInterval)
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("Close handoff handler dut to context canceled")
+			log.Info("Close target observer due to context canceled")
 			return
 		case <-ob.c:
-			log.Info("Close handoff handler")
+			log.Info("Close target observer")
 			return
 
 		case <-ticker.C:
@@ -71,54 +72,43 @@ func (ob *TargetObserver) schedule(ctx context.Context) {
 }
 
 func (ob *TargetObserver) tryUpdateTarget() {
-	collectionSet := typeutil.UniqueSet{}
+	collections := ob.meta.GetAll()
 
-	collectionSet.Insert(ob.targetMgr.Current.GetAllCollections()...)
-	collectionSet.Insert(ob.targetMgr.Next.GetAllCollections()...)
-
-	for collectionID := range collectionSet {
+	for _, collectionID := range collections {
 		if ob.shouldUpdateCurrentTarget(collectionID) {
 			ob.updateCurrentTarget(collectionID)
 		}
 
-		partitionIDs, err := utils.GetPartitions(ob.meta.CollectionManager, ob.broker, collectionID)
-		if err != nil {
-			log.Warn("tryUpdateTarget: get partition failed", zap.Int64("collectionID", collectionID))
-			continue
-		}
 		if ob.shouldUpdateNextTarget(collectionID) {
 			// update next target in collection level
-			ob.UpdateNextTarget(collectionID, partitionIDs)
+			ob.UpdateNextTarget(collectionID)
 		}
 	}
 
+	collectionSet := typeutil.NewUniqueSet(collections...)
 	// for collection which has been removed from target, try to clear nextTargetLastUpdate
 	for ID := range ob.nextTargetLastUpdate {
 		if !collectionSet.Contain(ID) {
 			delete(ob.nextTargetLastUpdate, ID)
 		}
 	}
-
 }
 
-func (ob *TargetObserver) shouldUpdateNextTarget(collectionID int64, partitionIDs ...int64) bool {
+func (ob *TargetObserver) shouldUpdateNextTarget(collectionID int64) bool {
 	return ob.IsNextTargetExpired(collectionID) ||
 		!utils.IsNextTargetExist(ob.targetMgr, collectionID) ||
-		!utils.IsNextTargetValid(collectionID, partitionIDs...)
+		!utils.IsNextTargetValid(collectionID)
 }
 
 func (ob *TargetObserver) IsNextTargetExpired(collectionID int64) bool {
-	return time.Since(ob.nextTargetLastUpdate[collectionID]) > nextTargetSurviveTime
+	return time.Since(ob.nextTargetLastUpdate[collectionID]) > params.Params.QueryCoordCfg.NextTargetSurviveTime
 }
 
-func (ob *TargetObserver) UpdateNextTarget(collectionID int64, partitionIDs []int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), updateNextTargetInterval/2)
-	defer cancel()
-
-	err := ob.targetMgr.UpdateNextTarget(ctx, collectionID, partitionIDs, ob.broker)
+func (ob *TargetObserver) UpdateNextTarget(collectionID int64) {
+	err := ob.targetMgr.UpdateCollectionNextTarget(collectionID)
 	if err != nil {
-		log.Warn("UpdateNextTarget Failed", zap.Int64("collectionID", collectionID),
-			zap.Int64s("partitionIDs", partitionIDs),
+		log.Warn("update next target failed",
+			zap.Int64("collectionID", collectionID),
 			zap.Error(err))
 	}
 	ob.updateNextTargetTimestamp(collectionID)
@@ -133,5 +123,10 @@ func (ob *TargetObserver) shouldUpdateCurrentTarget(collectionID int64) bool {
 }
 
 func (ob *TargetObserver) updateCurrentTarget(collectionID int64) {
-	ob.targetMgr.UpdateCollectionCurrentTarget(collectionID)
+	err := ob.targetMgr.UpdateCollectionCurrentTarget(collectionID)
+	if err != nil {
+		log.Warn("update next target failed",
+			zap.Int64("collectionID", collectionID),
+			zap.Error(err))
+	}
 }

@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samber/lo"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -24,7 +23,6 @@ import (
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
-	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
 	"github.com/milvus-io/milvus/internal/querycoordv2/dist"
@@ -34,7 +32,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
-	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -247,7 +244,7 @@ func (s *Server) initMeta() error {
 		ChannelDistManager: meta.NewChannelDistManager(),
 		LeaderViewManager:  meta.NewLeaderViewManager(),
 	}
-	s.targetMgr = meta.NewTargetManager()
+	s.targetMgr = meta.NewTargetManager(s.meta, s.broker)
 	s.broker = meta.NewCoordinatorBroker(
 		s.dataCoord,
 		s.rootCoord,
@@ -451,24 +448,7 @@ func (s *Server) recover() error {
 }
 
 func (s *Server) recoverCollectionTargets(ctx context.Context, collection int64) error {
-	var (
-		partitions []int64
-		err        error
-	)
-	if s.meta.GetLoadType(collection) == querypb.LoadType_LoadCollection {
-		partitions, err = s.broker.GetPartitions(ctx, collection)
-		if err != nil {
-			msg := "failed to get partitions from RootCoord"
-			log.Error(msg, zap.Error(err))
-			return utils.WrapError(msg, err)
-		}
-	} else {
-		partitions = lo.Map(s.meta.GetPartitionsByCollection(collection), func(partition *meta.Partition, _ int) int64 {
-			return partition.GetPartitionID()
-		})
-	}
-
-	err = s.targetMgr.UpdateNextTarget(ctx, collection, partitions, s.broker)
+	err := s.targetMgr.UpdateCollectionNextTarget(collection)
 	if err != nil {
 		return err
 	}
@@ -557,15 +537,7 @@ func (s *Server) handleNodeDown(node int64) {
 	// are missed, it will recover for a while.
 	channels := s.dist.ChannelDistManager.GetByNode(node)
 	for _, channel := range channels {
-		partitions, err := utils.GetPartitions(s.meta.CollectionManager,
-			s.broker,
-			channel.GetCollectionID())
-		if err != nil {
-			log.Warn("failed to refresh targets of collection",
-				zap.Int64("collectionID", channel.GetCollectionID()),
-				zap.Error(err))
-		}
-		err = s.targetMgr.UpdateNextTarget(s.ctx, channel.GetCollectionID(), partitions, s.broker)
+		err := s.targetMgr.UpdateCollectionNextTarget(channel.GetCollectionID())
 		if err != nil {
 			log.Warn("failed to refresh targets of collection",
 				zap.Int64("collectionID", channel.GetCollectionID()),

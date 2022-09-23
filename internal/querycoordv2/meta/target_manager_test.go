@@ -1,14 +1,17 @@
 package meta
 
 import (
-	"context"
 	"testing"
 
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
+	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
+	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
@@ -24,11 +27,15 @@ type TargetManagerSuite struct {
 	allChannels []string
 	allSegments []int64
 
+	kv     *etcdkv.EtcdKV
+	broker *MockBroker
+	meta   *Meta
 	// Test object
 	mgr *TargetManager
 }
 
 func (suite *TargetManagerSuite) SetupSuite() {
+	Params.Init()
 	suite.collections = []int64{1000, 1001}
 	suite.partitions = map[int64][]int64{
 		1000: {100, 101},
@@ -62,10 +69,22 @@ func (suite *TargetManagerSuite) SetupSuite() {
 }
 
 func (suite *TargetManagerSuite) SetupTest() {
-	suite.mgr = NewTargetManager()
+	var err error
+	config := GenerateEtcdConfig()
+	cli, err := etcd.GetEtcdClient(&config)
+	suite.Require().NoError(err)
+	suite.kv = etcdkv.NewEtcdKV(cli, config.MetaRootPath)
+
+	// meta
+	store := NewMetaStore(suite.kv)
+	idAllocator := RandomIncrementIDAllocator()
+	suite.meta = NewMeta(idAllocator, store)
+
+	suite.broker = NewMockBroker(suite.T())
+	suite.mgr = NewTargetManager(suite.meta, suite.broker)
 	for collection, channels := range suite.channels {
 		for _, channel := range channels {
-			suite.mgr.Next.AddDmChannel(DmChannelFromVChannel(&datapb.VchannelInfo{
+			suite.mgr.AddDmChannel(DmChannelFromVChannel(&datapb.VchannelInfo{
 				CollectionID: collection,
 				ChannelName:  channel,
 			}))
@@ -74,7 +93,7 @@ func (suite *TargetManagerSuite) SetupTest() {
 	for collection, partitions := range suite.segments {
 		for partition, segments := range partitions {
 			for _, segment := range segments {
-				suite.mgr.Next.AddSegment(&datapb.SegmentInfo{
+				suite.mgr.AddSegment(&datapb.SegmentInfo{
 					ID:           segment,
 					CollectionID: collection,
 					PartitionID:  partition,
@@ -84,26 +103,44 @@ func (suite *TargetManagerSuite) SetupTest() {
 	}
 }
 
+func (suite *TargetManagerSuite) TearDownSuite() {
+	suite.kv.Close()
+}
+
 func (suite *TargetManagerSuite) TestUpdateCurrentTarget() {
 	collectionID := int64(1000)
-	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]),
+		suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels(suite.channels[collectionID], suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 
 	suite.mgr.UpdateCollectionCurrentTarget(collectionID)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]),
+		suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels(suite.channels[collectionID], suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 }
 
 func (suite *TargetManagerSuite) TestUpdateNextTarget() {
 	collectionID := int64(1003)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
+
+	suite.meta.PutCollection(&Collection{
+		CollectionLoadInfo: &querypb.CollectionLoadInfo{
+			CollectionID:  collectionID,
+			ReplicaNumber: 1},
+	})
+	suite.meta.PutPartition(&Partition{
+		PartitionLoadInfo: &querypb.PartitionLoadInfo{
+			CollectionID: collectionID,
+			PartitionID:  1,
+		},
+	})
 
 	nextTargetChannels := []*datapb.VchannelInfo{
 		{
@@ -126,100 +163,60 @@ func (suite *TargetManagerSuite) TestUpdateNextTarget() {
 			InsertChannel: "channel-2",
 		},
 	}
-	broker := NewMockBroker(suite.T())
-	broker.EXPECT().GetRecoveryInfo(mock.Anything, mock.Anything, mock.Anything).Return(nextTargetChannels, nextTargetSegments, nil)
 
-	err := suite.mgr.UpdateNextTarget(context.TODO(), collectionID, []int64{105}, broker)
+	suite.broker.EXPECT().
+		GetPartitions(mock.Anything, collectionID).Return([]int64{1}, nil)
+	suite.broker.EXPECT().
+		GetRecoveryInfo(mock.Anything, mock.Anything, mock.Anything).
+		Return(nextTargetChannels, nextTargetSegments, nil)
+
+	err := suite.mgr.UpdateCollectionNextTarget(collectionID)
 	suite.NoError(err)
-	suite.assertSegments([]int64{11, 12}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{"channel-1", "channel-2"}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
-
-	nextTargetChannels2 := []*datapb.VchannelInfo{
-		{
-			CollectionID: collectionID,
-			ChannelName:  "channel-1",
-		},
-		{
-			CollectionID: collectionID,
-			ChannelName:  "channel-2",
-		},
-	}
-
-	nextTargetSegments2 := []*datapb.SegmentBinlogs{
-		{
-			SegmentID:     13,
-			InsertChannel: "channel-1",
-		},
-		{
-			SegmentID:     14,
-			InsertChannel: "channel-2",
-		},
-	}
-	broker1 := NewMockBroker(suite.T())
-	broker1.EXPECT().GetRecoveryInfo(mock.Anything, mock.Anything, mock.Anything).Return(nextTargetChannels2, nextTargetSegments2, nil)
-	err = suite.mgr.UpdateNextTarget(context.TODO(), collectionID, []int64{105}, broker1)
-	suite.NoError(err)
-	suite.assertSegments([]int64{13, 14}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{"channel-1", "channel-2"}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
-
+	suite.assertSegments([]int64{11, 12}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{"channel-1", "channel-2"}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 }
 
 func (suite *TargetManagerSuite) TestRemovePartition() {
 	collectionID := int64(1000)
-	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels(suite.channels[collectionID], suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 
-	suite.mgr.RemovePartition(100)
-	suite.assertSegments(suite.getAllSegment(collectionID, []int64{101}), suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
-
-	collectionID = int64(1001)
-	suite.mgr.UpdateCollectionCurrentTarget(collectionID)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Current.GetDmChannelsByCollection(collectionID))
-
-	suite.mgr.RemovePartition(102)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments(suite.getAllSegment(collectionID, []int64{103}), suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.mgr.RemovePartition(collectionID, 100)
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 }
 
 func (suite *TargetManagerSuite) TestRemoveCollection() {
 	collectionID := int64(1000)
-	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels(suite.channels[collectionID], suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 
 	suite.mgr.RemoveCollection(collectionID)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 
 	collectionID = int64(1001)
 	suite.mgr.UpdateCollectionCurrentTarget(collectionID)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels(suite.channels[collectionID], suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments(suite.getAllSegment(collectionID, suite.partitions[collectionID]), suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels(suite.channels[collectionID], suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 
 	suite.mgr.RemoveCollection(collectionID)
-	suite.assertSegments([]int64{}, suite.mgr.Next.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Next.GetDmChannelsByCollection(collectionID))
-	suite.assertSegments([]int64{}, suite.mgr.Current.GetSegmentsByCollection(collectionID))
-	suite.assertChannels([]string{}, suite.mgr.Current.GetDmChannelsByCollection(collectionID))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetHistoricalSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 }
 
 func (suite *TargetManagerSuite) getAllSegment(collectionID int64, partitionIDs []int64) []int64 {
@@ -237,7 +234,7 @@ func (suite *TargetManagerSuite) getAllSegment(collectionID int64, partitionIDs 
 	return allSegments
 }
 
-func (suite *TargetManagerSuite) assertChannels(expected []string, actual []*DmChannel) bool {
+func (suite *TargetManagerSuite) assertChannels(expected []string, actual map[string]*DmChannel) bool {
 	if !suite.Equal(len(expected), len(actual)) {
 		return false
 	}
@@ -250,7 +247,7 @@ func (suite *TargetManagerSuite) assertChannels(expected []string, actual []*DmC
 	return suite.Len(set, 0)
 }
 
-func (suite *TargetManagerSuite) assertSegments(expected []int64, actual []*datapb.SegmentInfo) bool {
+func (suite *TargetManagerSuite) assertSegments(expected []int64, actual map[int64]*datapb.SegmentInfo) bool {
 	if !suite.Equal(len(expected), len(actual)) {
 		return false
 	}

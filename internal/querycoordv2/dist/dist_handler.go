@@ -107,7 +107,7 @@ func (dh *distHandler) handleDistResp(resp *querypb.GetDataDistributionResponse)
 func (dh *distHandler) updateSegmentsDistribution(resp *querypb.GetDataDistributionResponse) {
 	updates := make([]*meta.Segment, 0, len(resp.GetSegments()))
 	for _, s := range resp.GetSegments() {
-		segmentInfo := dh.target.Current.GetHistoricalSegment(s.GetID())
+		segmentInfo := dh.target.GetHistoricalSegment(s.GetCollection(), s.GetID(), meta.CurrentTarget)
 		var segment *meta.Segment
 		if segmentInfo == nil {
 			segment = &meta.Segment{
@@ -136,7 +136,7 @@ func (dh *distHandler) updateSegmentsDistribution(resp *querypb.GetDataDistribut
 func (dh *distHandler) updateChannelsDistribution(resp *querypb.GetDataDistributionResponse) {
 	updates := make([]*meta.DmChannel, 0, len(resp.GetChannels()))
 	for _, ch := range resp.GetChannels() {
-		channelInfo := dh.target.Current.GetDmChannel(ch.GetChannel())
+		channelInfo := dh.target.GetDmChannel(ch.GetCollection(), ch.GetChannel(), meta.CurrentTarget)
 		var channel *meta.DmChannel
 		if channelInfo == nil {
 			channel = &meta.DmChannel{

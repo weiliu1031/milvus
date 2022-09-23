@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/samber/lo"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
@@ -103,7 +102,7 @@ func (suite *JobSuite) SetupTest() {
 	suite.store = meta.NewMetaStore(suite.kv)
 	suite.dist = meta.NewDistributionManager()
 	suite.meta = meta.NewMeta(RandomIncrementIDAllocator(), suite.store)
-	suite.targetMgr = meta.NewTargetManager()
+	suite.targetMgr = meta.NewTargetManager(suite.meta, suite.broker)
 	suite.nodeMgr = session.NewNodeManager()
 	suite.nodeMgr.Add(&session.NodeInfo{})
 	suite.scheduler = NewScheduler()
@@ -158,7 +157,6 @@ func (suite *JobSuite) TestLoadCollection() {
 		suite.NoError(err)
 		suite.EqualValues(1, suite.meta.GetReplicaNumber(collection))
 		suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-		suite.True(lo.Contains(suite.targetMgr.Current.GetAllCollections(), collection))
 		suite.assertLoaded(collection)
 	}
 
@@ -271,9 +269,9 @@ func (suite *JobSuite) TestLoadPartition() {
 		}
 		// Load with 1 replica
 		req := &querypb.LoadPartitionsRequest{
-			CollectionID: collection,
-			PartitionIDs: suite.partitions[collection],
-			// ReplicaNumber: 1,
+			CollectionID:  collection,
+			PartitionIDs:  suite.partitions[collection],
+			ReplicaNumber: 1,
 		}
 		job := NewLoadPartitionJob(
 			ctx,
@@ -289,7 +287,6 @@ func (suite *JobSuite) TestLoadPartition() {
 		suite.NoError(err)
 		suite.EqualValues(1, suite.meta.GetReplicaNumber(collection))
 		suite.targetMgr.UpdatePartitionCurrentTarget(collection, suite.partitions[collection]...)
-		suite.True(lo.Contains(suite.targetMgr.Current.GetAllCollections(), collection))
 		suite.assertLoaded(collection)
 	}
 
@@ -661,7 +658,6 @@ func (suite *JobSuite) loadAll() {
 			suite.True(suite.meta.Exist(collection))
 			suite.NotNil(suite.meta.GetCollection(collection))
 			suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-			suite.True(lo.Contains(suite.targetMgr.Current.GetAllCollections(), collection))
 		} else {
 			req := &querypb.LoadPartitionsRequest{
 				CollectionID: collection,
@@ -683,7 +679,6 @@ func (suite *JobSuite) loadAll() {
 			suite.True(suite.meta.Exist(collection))
 			suite.NotNil(suite.meta.GetPartitionsByCollection(collection))
 			suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-			suite.True(lo.Contains(suite.targetMgr.Current.GetAllCollections(), collection))
 		}
 	}
 }
@@ -711,11 +706,11 @@ func (suite *JobSuite) releaseAll() {
 func (suite *JobSuite) assertLoaded(collection int64) {
 	suite.True(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.NotNil(suite.targetMgr.Current.GetDmChannel(channel))
+		suite.NotNil(suite.targetMgr.GetDmChannel(collection, channel, meta.CurrentTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.NotNil(suite.targetMgr.Current.GetHistoricalSegment(segment))
+			suite.NotNil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.CurrentTarget))
 		}
 	}
 }
@@ -723,11 +718,11 @@ func (suite *JobSuite) assertLoaded(collection int64) {
 func (suite *JobSuite) assertReleased(collection int64) {
 	suite.False(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.Nil(suite.targetMgr.Current.GetDmChannel(channel))
+		suite.Nil(suite.targetMgr.GetDmChannel(collection, channel, meta.CurrentTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.Nil(suite.targetMgr.Current.GetHistoricalSegment(segment))
+			suite.Nil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.CurrentTarget))
 		}
 	}
 }

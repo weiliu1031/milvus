@@ -9,17 +9,17 @@ import (
 // GetStreamingSegmentDiff get streaming segment diff between leader view and target
 func GetStreamingSegmentDiff(targetMgr *meta.TargetManager,
 	distMgr *meta.DistributionManager,
-	_meta *meta.Meta,
+	metaInfo *meta.Meta,
 	collectionID int64,
 	replicaID int64) (toLoad []*datapb.SegmentInfo, toRelease []*meta.Segment) {
-	dist := GetStreamingSegmentsDist(distMgr, _meta, replicaID)
+	dist := GetStreamingSegmentsDist(distMgr, metaInfo, replicaID)
 	distMap := typeutil.NewUniqueSet()
 	for _, s := range dist {
 		distMap.Insert(s.GetID())
 	}
 
-	nextTargetMap := targetMgr.Next.GetStreamingSegmentIDs(collectionID)
-	currentTargetMap := targetMgr.Current.GetStreamingSegmentIDs(collectionID)
+	nextTargetMap := targetMgr.GetStreamingSegmentsByCollection(collectionID, meta.NextTarget)
+	currentTargetMap := targetMgr.GetStreamingSegmentsByCollection(collectionID, meta.CurrentTarget)
 
 	//get segment which exist on next target, but not on dist
 	for segmentID, segment := range nextTargetMap {
@@ -28,7 +28,7 @@ func GetStreamingSegmentDiff(targetMgr *meta.TargetManager,
 		}
 	}
 
-	nextTargetChannelMap := targetMgr.Next.GetDmChannels(collectionID)
+	nextTargetChannelMap := targetMgr.GetDmChannelsByCollection(collectionID, meta.NextTarget)
 
 	// get segment which exist on dist, but not on current target and next target
 	for _, segment := range dist {
@@ -50,9 +50,9 @@ func GetStreamingSegmentDiff(targetMgr *meta.TargetManager,
 	return
 }
 
-func GetStreamingSegmentsDist(distMgr *meta.DistributionManager, _meta *meta.Meta, replicaID int64) map[int64]*meta.Segment {
+func GetStreamingSegmentsDist(distMgr *meta.DistributionManager, metaInfo *meta.Meta, replicaID int64) map[int64]*meta.Segment {
 	segments := make(map[int64]*meta.Segment, 0)
-	replica := _meta.Get(replicaID)
+	replica := metaInfo.Get(replicaID)
 	for _, node := range replica.Nodes.Collect() {
 		segmentsOnNodes := distMgr.LeaderViewManager.GetGrowingSegmentDistByCollectionAndNode(replica.CollectionID, node)
 		for k, v := range segmentsOnNodes {
@@ -66,18 +66,18 @@ func GetStreamingSegmentsDist(distMgr *meta.DistributionManager, _meta *meta.Met
 // GetHistoricalSegmentDiff get historical segment diff between target and dist
 func GetHistoricalSegmentDiff(targetMgr *meta.TargetManager,
 	distMgr *meta.DistributionManager,
-	_meta *meta.Meta,
+	metaInfo *meta.Meta,
 	collectionID int64,
 	replicaID int64,
 	partitionIDs ...int64) (toLoad []*datapb.SegmentInfo, toRelease []*meta.Segment) {
-	dist := GetHistoricalSegmentsDist(distMgr, _meta, replicaID)
+	dist := GetHistoricalSegmentsDist(distMgr, metaInfo, replicaID)
 	distMap := typeutil.NewUniqueSet()
 	for _, s := range dist {
 		distMap.Insert(s.GetID())
 	}
 
-	nextTargetMap := targetMgr.Next.GetHistoricalSegmentIDsByCollection(collectionID)
-	currentTargetMap := targetMgr.Current.GetHistoricalSegmentIDsByCollection(collectionID)
+	nextTargetMap := targetMgr.GetHistoricalSegmentsByCollection(collectionID, meta.NextTarget)
+	currentTargetMap := targetMgr.GetHistoricalSegmentsByCollection(collectionID, meta.CurrentTarget)
 
 	//get segment which exist on next target, but not on dist
 	for segmentID, segment := range nextTargetMap {
@@ -99,8 +99,8 @@ func GetHistoricalSegmentDiff(targetMgr *meta.TargetManager,
 	return
 }
 
-func GetHistoricalSegmentsDist(distMgr *meta.DistributionManager, _meta *meta.Meta, replicaID int64) []*meta.Segment {
-	replica := _meta.Get(replicaID)
+func GetHistoricalSegmentsDist(distMgr *meta.DistributionManager, metaInfo *meta.Meta, replicaID int64) []*meta.Segment {
+	replica := metaInfo.Get(replicaID)
 	ret := make([]*meta.Segment, 0)
 	for _, node := range replica.Nodes.Collect() {
 		ret = append(ret, distMgr.SegmentDistManager.GetByCollectionAndNode(replica.CollectionID, node)...)
@@ -111,17 +111,17 @@ func GetHistoricalSegmentsDist(distMgr *meta.DistributionManager, _meta *meta.Me
 // GetDmChannelDiff get channel diff between target and dist
 func GetDmChannelDiff(targetMgr *meta.TargetManager,
 	distMgr *meta.DistributionManager,
-	_meta *meta.Meta,
+	metaInfo *meta.Meta,
 	collectionID int64,
 	replicaID int64) (toLoad, toRelease []*meta.DmChannel) {
-	dist := GetChannelDist(distMgr, _meta, replicaID)
+	dist := GetChannelDist(distMgr, metaInfo, replicaID)
 	distMap := make(map[string]struct{})
 	for _, ch := range dist {
 		distMap[ch.GetChannelName()] = struct{}{}
 	}
 
-	nextTargetMap := targetMgr.Next.GetDmChannels(collectionID)
-	currentTargetMap := targetMgr.Current.GetDmChannels(collectionID)
+	nextTargetMap := targetMgr.GetDmChannelsByCollection(collectionID, meta.NextTarget)
+	currentTargetMap := targetMgr.GetDmChannelsByCollection(collectionID, meta.CurrentTarget)
 
 	// get channels which exists on dist, but not exist on current and next
 	for _, ch := range dist {
@@ -143,8 +143,8 @@ func GetDmChannelDiff(targetMgr *meta.TargetManager,
 	return
 }
 
-func GetChannelDist(distMgr *meta.DistributionManager, _meta *meta.Meta, replicaID int64) []*meta.DmChannel {
-	replica := _meta.Get(replicaID)
+func GetChannelDist(distMgr *meta.DistributionManager, metaInfo *meta.Meta, replicaID int64) []*meta.DmChannel {
+	replica := metaInfo.Get(replicaID)
 	dist := make([]*meta.DmChannel, 0)
 	for _, nodeID := range replica.Nodes.Collect() {
 		dist = append(dist, distMgr.ChannelDistManager.GetByCollectionAndNode(replica.GetCollectionID(), nodeID)...)
@@ -154,15 +154,15 @@ func GetChannelDist(distMgr *meta.DistributionManager, _meta *meta.Meta, replica
 
 // IsNextTargetValid check whether collection's next target resource is available
 // todo: access minio ton judge whether this could be load successfully
-func IsNextTargetValid(collectionID int64, partitionIDs ...int64) bool {
+func IsNextTargetValid(collectionID int64) bool {
 	return true
 }
 
-func IsNextTargetReadyForCollection(targetMgr *meta.TargetManager, distMgr *meta.DistributionManager, _meta *meta.Meta, collectionID int64) bool {
-	replicaNum := len(_meta.ReplicaManager.GetByCollection(collectionID))
+func IsNextTargetReadyForCollection(targetMgr *meta.TargetManager, distMgr *meta.DistributionManager, metaInfo *meta.Meta, collectionID int64) bool {
+	replicaNum := len(metaInfo.ReplicaManager.GetByCollection(collectionID))
 
 	// check channel first
-	channelNames := targetMgr.Next.GetDmChannels(collectionID)
+	channelNames := targetMgr.GetDmChannelsByCollection(collectionID, meta.NextTarget)
 	if len(channelNames) == 0 {
 		// next target is empty, no need to update
 		return false
@@ -173,7 +173,7 @@ func IsNextTargetReadyForCollection(targetMgr *meta.TargetManager, distMgr *meta
 		}
 	}
 	// then check streaming segment
-	streamingSegments := targetMgr.Next.GetStreamingSegmentIDs(collectionID)
+	streamingSegments := targetMgr.GetStreamingSegmentsByCollection(collectionID, meta.NextTarget)
 	for ID := range streamingSegments {
 		if replicaNum > len(distMgr.GetGrowingSegmentDist(ID)) {
 			return false
@@ -181,7 +181,7 @@ func IsNextTargetReadyForCollection(targetMgr *meta.TargetManager, distMgr *meta
 	}
 
 	// and last check historical segment
-	historicalSegments := targetMgr.Next.GetHistoricalSegmentIDsByCollection(collectionID)
+	historicalSegments := targetMgr.GetHistoricalSegmentsByCollection(collectionID, meta.NextTarget)
 	for ID := range historicalSegments {
 		if replicaNum > len(distMgr.GetSealedSegmentDist(ID)) {
 			return false
@@ -192,8 +192,8 @@ func IsNextTargetReadyForCollection(targetMgr *meta.TargetManager, distMgr *meta
 }
 
 func IsNextTargetExist(mgr *meta.TargetManager, collectionID int64) bool {
-	newHistoricalSegments := mgr.Next.GetHistoricalSegmentIDsByCollection(collectionID)
-	newChannels := mgr.Next.GetDmChannels(collectionID)
+	newHistoricalSegments := mgr.GetHistoricalSegmentsByCollection(collectionID, meta.NextTarget)
+	newChannels := mgr.GetDmChannelsByCollection(collectionID, meta.NextTarget)
 
 	if len(newHistoricalSegments) > 0 || len(newChannels) > 0 {
 		return false

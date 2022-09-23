@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/samber/lo"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
@@ -101,8 +100,8 @@ func (suite *ServiceSuite) SetupTest() {
 	suite.store = meta.NewMetaStore(suite.kv)
 	suite.dist = meta.NewDistributionManager()
 	suite.meta = meta.NewMeta(params.RandomIncrementIDAllocator(), suite.store)
-	suite.targetMgr = meta.NewTargetManager()
 	suite.broker = meta.NewMockBroker(suite.T())
+	suite.targetMgr = meta.NewTargetManager(suite.meta, suite.broker)
 	suite.nodeMgr = session.NewNodeManager()
 	for _, node := range suite.nodes {
 		suite.nodeMgr.Add(session.NewNodeInfo(node, "localhost"))
@@ -807,7 +806,6 @@ func (suite *ServiceSuite) loadAll() {
 			suite.True(suite.meta.Exist(collection))
 			suite.NotNil(suite.meta.GetCollection(collection))
 			suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-			suite.True(lo.Contains(suite.targetMgr.Current.GetAllCollections(), collection))
 		} else {
 			req := &querypb.LoadPartitionsRequest{
 				CollectionID:  collection,
@@ -830,7 +828,6 @@ func (suite *ServiceSuite) loadAll() {
 			suite.True(suite.meta.Exist(collection))
 			suite.NotNil(suite.meta.GetPartitionsByCollection(collection))
 			suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-			suite.True(lo.Contains(suite.targetMgr.Current.GetAllCollections(), collection))
 		}
 	}
 }
@@ -838,11 +835,11 @@ func (suite *ServiceSuite) loadAll() {
 func (suite *ServiceSuite) assertLoaded(collection int64) {
 	suite.True(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.NotNil(suite.targetMgr.Next.GetDmChannel(channel))
+		suite.NotNil(suite.targetMgr.GetDmChannel(collection, channel, meta.NextTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.NotNil(suite.targetMgr.Next.GetHistoricalSegment(segment))
+			suite.NotNil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.NextTarget))
 		}
 	}
 }
@@ -850,7 +847,7 @@ func (suite *ServiceSuite) assertLoaded(collection int64) {
 func (suite *ServiceSuite) assertPartitionLoaded(collection int64, partitions ...int64) {
 	suite.True(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.NotNil(suite.targetMgr.Current.GetDmChannel(channel))
+		suite.NotNil(suite.targetMgr.GetDmChannel(collection, channel, meta.CurrentTarget))
 	}
 	partitionSet := typeutil.NewUniqueSet(partitions...)
 	for partition, segments := range suite.segments[collection] {
@@ -858,7 +855,7 @@ func (suite *ServiceSuite) assertPartitionLoaded(collection int64, partitions ..
 			continue
 		}
 		for _, segment := range segments {
-			suite.NotNil(suite.targetMgr.Current.GetHistoricalSegment(segment))
+			suite.NotNil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.CurrentTarget))
 		}
 	}
 }
@@ -866,12 +863,12 @@ func (suite *ServiceSuite) assertPartitionLoaded(collection int64, partitions ..
 func (suite *ServiceSuite) assertReleased(collection int64) {
 	suite.False(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.False(suite.targetMgr.Current.ContainDmChannel(channel))
+		suite.Nil(suite.targetMgr.GetDmChannel(collection, channel, meta.CurrentTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.Nil(suite.targetMgr.Current.GetHistoricalSegment(segment))
-			suite.Nil(suite.targetMgr.Next.GetHistoricalSegment(segment))
+			suite.Nil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.CurrentTarget))
+			suite.Nil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.NextTarget))
 		}
 	}
 }

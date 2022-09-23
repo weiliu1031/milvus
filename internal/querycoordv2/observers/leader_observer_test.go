@@ -24,6 +24,9 @@ type LeaderObserverTestSuite struct {
 	observer    *LeaderObserver
 	kv          *etcdkv.EtcdKV
 	mockCluster *session.MockCluster
+
+	meta   *meta.Meta
+	broker meta.Broker
 }
 
 func (suite *LeaderObserverTestSuite) SetupSuite() {
@@ -40,12 +43,13 @@ func (suite *LeaderObserverTestSuite) SetupTest() {
 	// meta
 	store := meta.NewMetaStore(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	testMeta := meta.NewMeta(idAllocator, store)
+	suite.meta = meta.NewMeta(idAllocator, store)
+	suite.broker = meta.NewMockBroker(suite.T())
 
 	suite.mockCluster = session.NewMockCluster(suite.T())
 	distManager := meta.NewDistributionManager()
-	targetManager := meta.NewTargetManager()
-	suite.observer = NewLeaderObserver(distManager, testMeta, targetManager, suite.mockCluster)
+	targetManager := meta.NewTargetManager(suite.meta, suite.broker)
+	suite.observer = NewLeaderObserver(distManager, suite.meta, targetManager, suite.mockCluster)
 }
 
 func (suite *LeaderObserverTestSuite) TearDownTest() {
@@ -57,8 +61,8 @@ func (suite *LeaderObserverTestSuite) TestSyncLoadedSegments() {
 	observer := suite.observer
 	observer.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	observer.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
-	observer.target.Next.AddDmChannel(utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
-	observer.target.Next.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
+	observer.target.AddDmChannel(utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
+	observer.target.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
 	observer.target.UpdateCollectionCurrentTarget(1)
 	observer.dist.SegmentDistManager.Update(1, utils.CreateTestSegment(1, 1, 1, 2, 1, "test-insert-channel"))
 	observer.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))

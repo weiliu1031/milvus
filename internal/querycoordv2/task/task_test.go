@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+
 	"github.com/milvus-io/milvus/api/commonpb"
 	"github.com/milvus-io/milvus/api/schemapb"
 	"github.com/milvus-io/milvus/internal/kv"
@@ -18,8 +21,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
 )
 
 type distribution struct {
@@ -108,8 +109,8 @@ func (suite *TaskSuite) SetupTest() {
 	suite.store = meta.NewMetaStore(suite.kv)
 	suite.meta = meta.NewMeta(RandomIncrementIDAllocator(), suite.store)
 	suite.dist = meta.NewDistributionManager()
-	suite.target = meta.NewTargetManager()
 	suite.broker = meta.NewMockBroker(suite.T())
+	suite.target = meta.NewTargetManager(suite.meta, suite.broker)
 	suite.nodeMgr = session.NewNodeManager()
 	suite.cluster = session.NewMockCluster(suite.T())
 
@@ -180,7 +181,7 @@ func (suite *TaskSuite) TestSubscribeChannelTask() {
 	// Test subscribe channel task
 	tasks := []Task{}
 	for _, channel := range suite.subChannels {
-		suite.target.Next.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
+		suite.target.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 			CollectionID:        suite.collection,
 			ChannelName:         channel,
 			UnflushedSegmentIds: []int64{suite.growingSegments[channel]},
@@ -239,7 +240,7 @@ func (suite *TaskSuite) TestUnsubscribeChannelTask() {
 	// Test unsubscribe channel task
 	tasks := []Task{}
 	for _, channel := range suite.unsubChannels {
-		suite.target.Next.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
+		suite.target.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 			CollectionID: suite.collection,
 			ChannelName:  channel,
 		}))
@@ -319,7 +320,7 @@ func (suite *TaskSuite) TestLoadSegmentTask() {
 	}))
 	tasks := []Task{}
 	for _, segment := range suite.loadSegments {
-		suite.target.Next.AddSegment(&datapb.SegmentInfo{
+		suite.target.AddSegment(&datapb.SegmentInfo{
 			ID:            segment,
 			CollectionID:  suite.collection,
 			PartitionID:   partition,
@@ -353,7 +354,7 @@ func (suite *TaskSuite) TestLoadSegmentTask() {
 	view := &meta.LeaderView{
 		ID:           targetNode,
 		CollectionID: suite.collection,
-		Segments:     map[int64]int64{},
+		Segments:     make(map[int64]int64),
 	}
 	for _, segment := range suite.loadSegments {
 		view.Segments[segment] = targetNode
@@ -486,7 +487,7 @@ func (suite *TaskSuite) TestMoveSegmentTask() {
 	for _, segment := range suite.moveSegments {
 		segments = append(segments,
 			utils.CreateTestSegment(suite.collection, partition, segment, sourceNode, 1, channel.ChannelName))
-		suite.target.Next.AddSegment(&datapb.SegmentInfo{
+		suite.target.AddSegment(&datapb.SegmentInfo{
 			ID:            segment,
 			CollectionID:  suite.collection,
 			PartitionID:   partition,
@@ -549,7 +550,7 @@ func (suite *TaskSuite) TestTaskCanceled() {
 	// Test unsubscribe channel task
 	tasks := []Task{}
 	for _, channel := range suite.unsubChannels {
-		suite.target.Next.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
+		suite.target.AddDmChannel(meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 			CollectionID: suite.collection,
 			ChannelName:  channel,
 		}))
@@ -636,7 +637,7 @@ func (suite *TaskSuite) TestSegmentTaskStale() {
 	}))
 	tasks := []Task{}
 	for _, segment := range suite.loadSegments {
-		suite.target.Next.AddSegment(&datapb.SegmentInfo{
+		suite.target.AddSegment(&datapb.SegmentInfo{
 			ID:            segment,
 			CollectionID:  suite.collection,
 			PartitionID:   partition,
@@ -670,13 +671,21 @@ func (suite *TaskSuite) TestSegmentTaskStale() {
 	view := &meta.LeaderView{
 		ID:           targetNode,
 		CollectionID: suite.collection,
-		Segments:     map[int64]int64{},
+		Segments:     make(map[int64]int64),
 	}
 	for _, segment := range suite.loadSegments[1:] {
 		view.Segments[segment] = targetNode
 	}
 	suite.dist.LeaderViewManager.Update(targetNode, view)
-	suite.target.Next.RemoveSegment(suite.loadSegments[0])
+	suite.target.RemoveCollection(suite.collection)
+	for _, segment := range suite.loadSegments[1:] {
+		suite.target.AddSegment(&datapb.SegmentInfo{
+			ID:            segment,
+			CollectionID:  suite.collection,
+			PartitionID:   partition,
+			InsertChannel: channel.ChannelName,
+		})
+	}
 	suite.dispatchAndWait(targetNode)
 	suite.AssertTaskNum(0, 0, 0, 0)
 

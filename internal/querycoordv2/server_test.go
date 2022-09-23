@@ -206,11 +206,11 @@ func (suite *ServerSuite) loadAll() {
 func (suite *ServerSuite) assertLoaded(collection int64) {
 	suite.True(suite.server.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.NotNil(suite.server.targetMgr.Next.GetDmChannel(channel))
+		suite.NotNil(suite.server.targetMgr.GetDmChannel(collection, channel, meta.NextTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.NotNil(suite.server.targetMgr.Next.GetHistoricalSegment(segment))
+			suite.NotNil(suite.server.targetMgr.GetHistoricalSegment(collection, segment, meta.NextTarget))
 		}
 	}
 }

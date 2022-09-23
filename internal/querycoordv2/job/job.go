@@ -176,21 +176,6 @@ func (job *LoadCollectionJob) Execute() error {
 			zap.Int64s("nodes", replica.GetNodes()))
 	}
 
-	// Fetch channels and segments from DataCoord
-	partitions, err := job.broker.GetPartitions(job.ctx, req.GetCollectionID())
-	if err != nil {
-		msg := "failed to get partitions from RootCoord"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapError(msg, err)
-	}
-
-	err = job.targetMgr.UpdateNextTarget(job.ctx, req.GetCollectionID(), partitions, job.broker)
-	if err != nil {
-		msg := "failed to register channels and segments"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapError(msg, err)
-	}
-
 	err = job.meta.CollectionManager.PutCollection(&meta.Collection{
 		CollectionLoadInfo: &querypb.CollectionLoadInfo{
 			CollectionID:  req.GetCollectionID(),
@@ -201,6 +186,14 @@ func (job *LoadCollectionJob) Execute() error {
 	})
 	if err != nil {
 		msg := "failed to store collection"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapError(msg, err)
+	}
+
+	// Fetch channels and segments from DataCoord
+	err = job.targetMgr.UpdateCollectionNextTarget(req.GetCollectionID())
+	if err != nil {
+		msg := "failed to register channels and segments"
 		log.Error(msg, zap.Error(err))
 		return utils.WrapError(msg, err)
 	}
@@ -248,6 +241,8 @@ func (job *ReleaseCollectionJob) Execute() error {
 		return nil
 	}
 
+	job.targetMgr.RemoveCollection(req.GetCollectionID())
+
 	err := job.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
 	if err != nil {
 		msg := "failed to remove collection"
@@ -261,7 +256,6 @@ func (job *ReleaseCollectionJob) Execute() error {
 		log.Warn(msg, zap.Error(err))
 	}
 
-	job.targetMgr.RemoveCollection(req.GetCollectionID())
 	waitCollectionReleased(job.dist, req.GetCollectionID())
 	return nil
 }
@@ -368,13 +362,6 @@ func (job *LoadPartitionJob) Execute() error {
 			zap.Int64s("nodes", replica.GetNodes()))
 	}
 
-	err = job.targetMgr.UpdateNextTarget(job.ctx, req.GetCollectionID(), req.GetPartitionIDs(), job.broker)
-	if err != nil {
-		msg := "failed to register channels and segments"
-		log.Error(msg, zap.Error(err))
-		return utils.WrapError(msg, err)
-	}
-
 	partitions := lo.Map(req.GetPartitionIDs(), func(partition int64, _ int) *meta.Partition {
 		return &meta.Partition{
 			PartitionLoadInfo: &querypb.PartitionLoadInfo{
@@ -389,6 +376,13 @@ func (job *LoadPartitionJob) Execute() error {
 	err = job.meta.CollectionManager.PutPartition(partitions...)
 	if err != nil {
 		msg := "failed to store partitions"
+		log.Error(msg, zap.Error(err))
+		return utils.WrapError(msg, err)
+	}
+
+	err = job.targetMgr.UpdateCollectionNextTarget(req.GetCollectionID())
+	if err != nil {
+		msg := "failed to register channels and segments"
 		log.Error(msg, zap.Error(err))
 		return utils.WrapError(msg, err)
 	}
@@ -458,6 +452,7 @@ func (job *ReleasePartitionJob) Execute() error {
 	}
 
 	if len(toRelease) == len(loadedPartitions) { // All partitions are released, clear all
+		job.targetMgr.RemoveCollection(req.GetCollectionID())
 		log.Debug("release partitions covers all partitions, will remove the whole collection")
 		err := job.meta.CollectionManager.RemoveCollection(req.GetCollectionID())
 		if err != nil {
@@ -469,17 +464,15 @@ func (job *ReleasePartitionJob) Execute() error {
 		if err != nil {
 			log.Warn("failed to remove replicas", zap.Error(err))
 		}
-		job.targetMgr.RemoveCollection(req.GetCollectionID())
 		waitCollectionReleased(job.dist, req.GetCollectionID())
 	} else {
+		job.targetMgr.RemovePartition(req.GetCollectionID(), toRelease...)
+
 		err := job.meta.CollectionManager.RemovePartition(toRelease...)
 		if err != nil {
 			msg := "failed to release partitions from store"
 			log.Warn(msg, zap.Error(err))
 			return utils.WrapError(msg, err)
-		}
-		for _, partition := range toRelease {
-			job.targetMgr.RemovePartition(partition)
 		}
 		waitCollectionReleased(job.dist, req.GetCollectionID(), toRelease...)
 	}

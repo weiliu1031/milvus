@@ -22,6 +22,8 @@ type SegmentCheckerTestSuite struct {
 	suite.Suite
 	kv      *etcdkv.EtcdKV
 	checker *SegmentChecker
+	meta    *meta.Meta
+	broker  *meta.MockBroker
 }
 
 func (suite *SegmentCheckerTestSuite) SetupSuite() {
@@ -38,13 +40,13 @@ func (suite *SegmentCheckerTestSuite) SetupTest() {
 	// meta
 	store := meta.NewMetaStore(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	testMeta := meta.NewMeta(idAllocator, store)
-
+	suite.meta = meta.NewMeta(idAllocator, store)
+	suite.broker = meta.NewMockBroker(suite.T())
 	distManager := meta.NewDistributionManager()
-	targetManager := meta.NewTargetManager()
+	targetManager := meta.NewTargetManager(suite.meta, suite.broker)
 
 	balancer := suite.createMockBalancer()
-	suite.checker = NewSegmentChecker(testMeta, distManager, targetManager, balancer)
+	suite.checker = NewSegmentChecker(suite.meta, distManager, targetManager, balancer)
 }
 
 func (suite *SegmentCheckerTestSuite) TearDownTest() {
@@ -76,7 +78,7 @@ func (suite *SegmentCheckerTestSuite) TestLoadSegments() {
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
 
 	// set target
-	checker.targetMgr.Next.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
+	checker.targetMgr.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
 
 	// set dist
 	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
@@ -121,7 +123,7 @@ func (suite *SegmentCheckerTestSuite) TestReleaseRepeatedSegments() {
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
 
 	// set target
-	checker.targetMgr.Next.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
+	checker.targetMgr.AddSegment(utils.CreateTestSegmentInfo(1, 1, 1, "test-insert-channel"))
 
 	// set dist
 	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
@@ -154,12 +156,12 @@ func (suite *SegmentCheckerTestSuite) TestReleaseGrowingSegments() {
 
 	segment := utils.CreateTestSegmentInfo(1, 1, 3, "test-insert-channel")
 	segment.CompactionFrom = append(segment.CompactionFrom, 2)
-	checker.targetMgr.Next.AddSegment(segment)
+	checker.targetMgr.AddSegment(segment)
 	dmChannel := utils.CreateTestChannel(1, 2, 1, "test-insert-channel")
 	dmChannel.SeekPosition = &internalpb.MsgPosition{Timestamp: 10}
-	checker.targetMgr.Next.AddDmChannel(dmChannel)
+	checker.targetMgr.AddDmChannel(dmChannel)
 
-	growingSegments := map[int64]*meta.Segment{}
+	growingSegments := make(map[int64]*meta.Segment)
 	growingSegments[2] = utils.CreateTestSegment(1, 1, 2, 2, 0, "test-insert-channel")
 	growingSegments[2].SegmentInfo.StartPosition = &internalpb.MsgPosition{Timestamp: 2}
 	growingSegments[3] = utils.CreateTestSegment(1, 1, 3, 2, 1, "test-insert-channel")
