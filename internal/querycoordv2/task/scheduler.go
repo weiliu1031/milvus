@@ -19,7 +19,6 @@ package task
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -270,7 +269,12 @@ func (scheduler *taskScheduler) preAdd(task Task) error {
 		}
 
 	default:
-		panic(fmt.Sprintf("preAdd: forget to process task type: %+v", task))
+		log.Warn("preAdd: forget to process task type",
+			zap.Int64("collection", task.CollectionID()),
+			zap.Int64("replica", task.ReplicaID()),
+			zap.Int64("task", task.ID()),
+			zap.Int("actions", len(task.Actions())),
+		)
 	}
 
 	return nil
@@ -519,7 +523,13 @@ func (scheduler *taskScheduler) process(task Task) bool {
 		log.Warn("failed to execute task", zap.Error(task.Err()))
 
 	default:
-		panic(fmt.Sprintf("invalid task status: %v", task.Status()))
+		log.Warn("invalid task status",
+			zap.Int64("collection", task.CollectionID()),
+			zap.Int64("replica", task.ReplicaID()),
+			zap.Int64("task", task.ID()),
+			zap.Int("actions", len(task.Actions())),
+			zap.Int32("status", task.Status()),
+		)
 	}
 
 	return false
@@ -600,7 +610,13 @@ func (scheduler *taskScheduler) checkStale(task Task) bool {
 		}
 
 	default:
-		panic(fmt.Sprintf("checkStale: forget to check task type: %+v", task))
+		log.Warn("checkStale: forget to check task type",
+			zap.Int64("collection", task.CollectionID()),
+			zap.Int64("replica", task.ReplicaID()),
+			zap.Int64("task", task.ID()),
+			zap.Int("actions", len(task.Actions())),
+			zap.Int32("status", task.Status()),
+		)
 	}
 
 	for step, action := range task.Actions() {
