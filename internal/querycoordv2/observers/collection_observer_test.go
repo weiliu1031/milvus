@@ -21,6 +21,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+	clientv3 "go.etcd.io/etcd/client/v3"
+
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
@@ -29,9 +33,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type CollectionObserverSuite struct {
@@ -58,7 +59,6 @@ type CollectionObserverSuite struct {
 	meta      *meta.Meta
 	targetMgr *meta.TargetManager
 	broker    *meta.MockBroker
-	handoffOb *HandoffObserver
 
 	// Test object
 	ob *CollectionObserver
@@ -162,15 +162,8 @@ func (suite *CollectionObserverSuite) SetupTest() {
 	// Dependencies
 	suite.dist = meta.NewDistributionManager()
 	suite.meta = meta.NewMeta(suite.idAllocator, suite.store)
-	suite.targetMgr = meta.NewTargetManager()
 	suite.broker = meta.NewMockBroker(suite.T())
-	suite.handoffOb = NewHandoffObserver(
-		suite.store,
-		suite.meta,
-		suite.dist,
-		suite.targetMgr,
-		suite.broker,
-	)
+	suite.targetMgr = meta.NewTargetManager(suite.broker, suite.meta)
 
 	// Test object
 	suite.ob = NewCollectionObserver(
@@ -178,7 +171,6 @@ func (suite *CollectionObserverSuite) SetupTest() {
 		suite.meta,
 		suite.targetMgr,
 		suite.broker,
-		suite.handoffOb,
 	)
 
 	Params.QueryCoordCfg.LoadTimeoutSeconds = 600 * time.Second
@@ -243,8 +235,11 @@ func (suite *CollectionObserverSuite) TestObservePartitionsTimeout() {
 		Segments:     map[int64]*querypb.SegmentDist{2: {NodeID: 2, Version: 0}},
 	})
 	suite.Eventually(func() bool {
-		return suite.isCollectionLoaded(suite.collections[0]) &&
-			suite.isCollectionTimeout(suite.collections[1])
+		return suite.isCollectionLoaded(suite.collections[0])
+	}, timeout*2, timeout/10)
+
+	suite.Eventually(func() bool {
+		return suite.isCollectionTimeout(suite.collections[1])
 	}, timeout*2, timeout/10)
 }
 
@@ -310,8 +305,8 @@ func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool 
 	percentage := suite.meta.GetLoadPercentage(collection)
 	status := suite.meta.GetStatus(collection)
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
-	channels := suite.targetMgr.GetDmChannelsByCollection(collection)
-	segments := suite.targetMgr.GetSegmentsByCollection(collection)
+	channels := suite.targetMgr.GetDmChannelsByCollection(collection, meta.CurrentTarget)
+	segments := suite.targetMgr.GetHistoricalSegmentsByCollection(collection, meta.CurrentTarget)
 
 	return exist &&
 		percentage == 100 &&
@@ -324,8 +319,8 @@ func (suite *CollectionObserverSuite) isCollectionLoaded(collection int64) bool 
 func (suite *CollectionObserverSuite) isCollectionTimeout(collection int64) bool {
 	exist := suite.meta.Exist(collection)
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
-	channels := suite.targetMgr.GetDmChannelsByCollection(collection)
-	segments := suite.targetMgr.GetSegmentsByCollection(collection)
+	channels := suite.targetMgr.GetDmChannelsByCollection(collection, meta.CurrentTarget)
+	segments := suite.targetMgr.GetHistoricalSegmentsByCollection(collection, meta.CurrentTarget)
 
 	return !(exist ||
 		len(replicas) > 0 ||
@@ -337,6 +332,7 @@ func (suite *CollectionObserverSuite) loadAll() {
 	for _, collection := range suite.collections {
 		suite.load(collection)
 	}
+	suite.targetMgr.UpdateCollectionCurrentTarget(suite.collections[0])
 }
 
 func (suite *CollectionObserverSuite) load(collection int64) {
@@ -374,8 +370,24 @@ func (suite *CollectionObserverSuite) load(collection int64) {
 		}
 	}
 
-	suite.targetMgr.AddDmChannel(suite.channels[collection]...)
-	suite.targetMgr.AddSegment(suite.segments[collection]...)
+	allSegments := make([]*datapb.SegmentBinlogs, 0)
+	dmChannels := make([]*datapb.VchannelInfo, 0)
+	for _, channel := range suite.channels[collection] {
+		dmChannels = append(dmChannels, &datapb.VchannelInfo{
+			CollectionID: collection,
+			ChannelName:  channel.GetChannelName(),
+		})
+	}
+
+	for _, segment := range suite.segments[collection] {
+		allSegments = append(allSegments, &datapb.SegmentBinlogs{
+			SegmentID:     segment.GetID(),
+			InsertChannel: segment.GetInsertChannel(),
+		})
+
+	}
+	suite.broker.EXPECT().GetRecoveryInfo(mock.Anything, collection, int64(1)).Return(dmChannels, allSegments, nil)
+	suite.targetMgr.UpdateCollectionNextTargetWithPartitions(collection, int64(1))
 }
 
 func TestCollectionObserver(t *testing.T) {

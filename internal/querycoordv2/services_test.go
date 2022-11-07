@@ -31,7 +31,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/job"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
-	"github.com/milvus-io/milvus/internal/querycoordv2/observers"
 	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
@@ -58,18 +57,17 @@ type ServiceSuite struct {
 	nodes         []int64
 
 	// Dependencies
-	kv              kv.MetaKv
-	store           meta.Store
-	dist            *meta.DistributionManager
-	meta            *meta.Meta
-	targetMgr       *meta.TargetManager
-	broker          *meta.MockBroker
-	cluster         *session.MockCluster
-	nodeMgr         *session.NodeManager
-	jobScheduler    *job.Scheduler
-	taskScheduler   *task.MockScheduler
-	handoffObserver *observers.HandoffObserver
-	balancer        balance.Balance
+	kv            kv.MetaKv
+	store         meta.Store
+	dist          *meta.DistributionManager
+	meta          *meta.Meta
+	targetMgr     *meta.TargetManager
+	broker        *meta.MockBroker
+	cluster       *session.MockCluster
+	nodeMgr       *session.NodeManager
+	jobScheduler  *job.Scheduler
+	taskScheduler *task.MockScheduler
+	balancer      balance.Balance
 
 	// Test object
 	server *Server
@@ -125,8 +123,8 @@ func (suite *ServiceSuite) SetupTest() {
 	suite.store = meta.NewMetaStore(suite.kv)
 	suite.dist = meta.NewDistributionManager()
 	suite.meta = meta.NewMeta(params.RandomIncrementIDAllocator(), suite.store)
-	suite.targetMgr = meta.NewTargetManager()
 	suite.broker = meta.NewMockBroker(suite.T())
+	suite.targetMgr = meta.NewTargetManager(suite.broker, suite.meta)
 	suite.nodeMgr = session.NewNodeManager()
 	for _, node := range suite.nodes {
 		suite.nodeMgr.Add(session.NewNodeInfo(node, "localhost"))
@@ -135,13 +133,6 @@ func (suite *ServiceSuite) SetupTest() {
 	suite.jobScheduler = job.NewScheduler()
 	suite.taskScheduler = task.NewMockScheduler(suite.T())
 	suite.jobScheduler.Start(context.Background())
-	suite.handoffObserver = observers.NewHandoffObserver(
-		suite.store,
-		suite.meta,
-		suite.dist,
-		suite.targetMgr,
-		suite.broker,
-	)
 	suite.balancer = balance.NewRowCountBasedBalancer(
 		suite.taskScheduler,
 		suite.nodeMgr,
@@ -164,7 +155,6 @@ func (suite *ServiceSuite) SetupTest() {
 		jobScheduler:        suite.jobScheduler,
 		taskScheduler:       suite.taskScheduler,
 		balancer:            suite.balancer,
-		handoffObserver:     suite.handoffObserver,
 	}
 	suite.server.UpdateStateCode(commonpb.StateCode_Healthy)
 }
@@ -939,7 +929,6 @@ func (suite *ServiceSuite) loadAll() {
 				suite.targetMgr,
 				suite.broker,
 				suite.nodeMgr,
-				suite.handoffObserver,
 			)
 			suite.jobScheduler.Add(job)
 			err := job.Wait()
@@ -947,6 +936,7 @@ func (suite *ServiceSuite) loadAll() {
 			suite.EqualValues(suite.replicaNumber[collection], suite.meta.GetReplicaNumber(collection))
 			suite.True(suite.meta.Exist(collection))
 			suite.NotNil(suite.meta.GetCollection(collection))
+			suite.targetMgr.UpdateCollectionCurrentTarget(collection)
 		} else {
 			req := &querypb.LoadPartitionsRequest{
 				CollectionID:  collection,
@@ -961,7 +951,6 @@ func (suite *ServiceSuite) loadAll() {
 				suite.targetMgr,
 				suite.broker,
 				suite.nodeMgr,
-				suite.handoffObserver,
 			)
 			suite.jobScheduler.Add(job)
 			err := job.Wait()
@@ -969,6 +958,7 @@ func (suite *ServiceSuite) loadAll() {
 			suite.EqualValues(suite.replicaNumber[collection], suite.meta.GetReplicaNumber(collection))
 			suite.True(suite.meta.Exist(collection))
 			suite.NotNil(suite.meta.GetPartitionsByCollection(collection))
+			suite.targetMgr.UpdateCollectionCurrentTarget(collection)
 		}
 	}
 }
@@ -976,11 +966,11 @@ func (suite *ServiceSuite) loadAll() {
 func (suite *ServiceSuite) assertLoaded(collection int64) {
 	suite.True(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.NotNil(suite.targetMgr.GetDmChannel(channel))
+		suite.NotNil(suite.targetMgr.GetDmChannel(collection, channel, meta.NextTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.NotNil(suite.targetMgr.GetSegment(segment))
+			suite.NotNil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.NextTarget))
 		}
 	}
 }
@@ -988,7 +978,7 @@ func (suite *ServiceSuite) assertLoaded(collection int64) {
 func (suite *ServiceSuite) assertPartitionLoaded(collection int64, partitions ...int64) {
 	suite.True(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.NotNil(suite.targetMgr.GetDmChannel(channel))
+		suite.NotNil(suite.targetMgr.GetDmChannel(collection, channel, meta.CurrentTarget))
 	}
 	partitionSet := typeutil.NewUniqueSet(partitions...)
 	for partition, segments := range suite.segments[collection] {
@@ -996,7 +986,7 @@ func (suite *ServiceSuite) assertPartitionLoaded(collection int64, partitions ..
 			continue
 		}
 		for _, segment := range segments {
-			suite.NotNil(suite.targetMgr.GetSegment(segment))
+			suite.NotNil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.CurrentTarget))
 		}
 	}
 }
@@ -1004,11 +994,12 @@ func (suite *ServiceSuite) assertPartitionLoaded(collection int64, partitions ..
 func (suite *ServiceSuite) assertReleased(collection int64) {
 	suite.False(suite.meta.Exist(collection))
 	for _, channel := range suite.channels[collection] {
-		suite.Nil(suite.targetMgr.GetDmChannel(channel))
+		suite.Nil(suite.targetMgr.GetDmChannel(collection, channel, meta.CurrentTarget))
 	}
 	for _, partitions := range suite.segments[collection] {
 		for _, segment := range partitions {
-			suite.Nil(suite.targetMgr.GetSegment(segment))
+			suite.Nil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.CurrentTarget))
+			suite.Nil(suite.targetMgr.GetHistoricalSegment(collection, segment, meta.NextTarget))
 		}
 	}
 }

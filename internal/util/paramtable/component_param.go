@@ -722,6 +722,8 @@ type queryCoordConfig struct {
 	CheckHandoffInterval                time.Duration
 	EnableActiveStandby                 bool
 	RefreshTargetsIntervalSeconds       time.Duration
+	NextTargetSurviveTime               time.Duration
+	UpdateNextTargetInterval            time.Duration
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
@@ -750,6 +752,8 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 	p.initCheckHandoffInterval()
 	p.initEnableActiveStandby()
 	p.initRefreshTargetsIntervalSeconds()
+	p.initNextTargetSurviveTime()
+	p.initUpdateNextTargetInterval()
 }
 
 func (p *queryCoordConfig) initTaskRetryNum() {
@@ -892,6 +896,24 @@ func (p *queryCoordConfig) initRefreshTargetsIntervalSeconds() {
 		panic(err)
 	}
 	p.RefreshTargetsIntervalSeconds = time.Duration(refreshInterval) * time.Second
+}
+
+func (p *queryCoordConfig) initNextTargetSurviveTime() {
+	interval := p.Base.LoadWithDefault("queryCoord.NextTargetSurviveTime", "300")
+	nextTargetSurviveTime, err := strconv.ParseInt(interval, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.NextTargetSurviveTime = time.Duration(nextTargetSurviveTime) * time.Second
+}
+
+func (p *queryCoordConfig) initUpdateNextTargetInterval() {
+	interval := p.Base.LoadWithDefault("queryCoord.UpdateNextTargetInterval", "30")
+	updateNextTargetInterval, err := strconv.ParseInt(interval, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.UpdateNextTargetInterval = time.Duration(updateNextTargetInterval) * time.Second
 }
 
 // /////////////////////////////////////////////////////////////////////////////
