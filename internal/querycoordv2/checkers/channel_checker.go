@@ -134,7 +134,14 @@ func (c *ChannelChecker) getDmChannelDiff(targetMgr *meta.TargetManager,
 
 func (c *ChannelChecker) getChannelDist(distMgr *meta.DistributionManager, replica *meta.Replica) []*meta.DmChannel {
 	dist := make([]*meta.DmChannel, 0)
-	for _, nodeID := range replica.Nodes.Collect() {
+	nodes, err := c.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+	}
+	for _, nodeID := range nodes {
 		dist = append(dist, distMgr.ChannelDistManager.GetByCollectionAndNode(replica.GetCollectionID(), nodeID)...)
 	}
 	return dist
@@ -170,7 +177,15 @@ func (c *ChannelChecker) findRepeatedChannels(distMgr *meta.DistributionManager,
 }
 
 func (c *ChannelChecker) createChannelLoadTask(ctx context.Context, channels []*meta.DmChannel, replica *meta.Replica) []task.Task {
-	plans := c.balancer.AssignChannel(channels, replica.Replica.GetNodes())
+	nodes, err := c.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+		return nil
+	}
+	plans := c.balancer.AssignChannel(channels, nodes)
 	for i := range plans {
 		plans[i].ReplicaID = replica.GetID()
 	}

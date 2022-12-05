@@ -149,7 +149,7 @@ func (ob *TargetObserver) shouldUpdateCurrentTarget(collectionID int64) bool {
 	}
 
 	for _, channel := range channelNames {
-		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+		group := utils.GroupNodesByReplica(ob.meta,
 			collectionID,
 			ob.distMgr.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
 		if int32(len(group)) < replicaNum {
@@ -160,7 +160,7 @@ func (ob *TargetObserver) shouldUpdateCurrentTarget(collectionID int64) bool {
 	// and last check historical segment
 	historicalSegments := ob.targetMgr.GetHistoricalSegmentsByCollection(collectionID, meta.NextTarget)
 	for _, segment := range historicalSegments {
-		group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+		group := utils.GroupNodesByReplica(ob.meta,
 			collectionID,
 			ob.distMgr.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
 		if int32(len(group)) < replicaNum {

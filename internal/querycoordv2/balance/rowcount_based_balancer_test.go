@@ -62,7 +62,7 @@ func (suite *RowCountBasedBalancerTestSuite) SetupTest() {
 
 	store := meta.NewMetaStore(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	testMeta := meta.NewMeta(idAllocator, store)
+	testMeta := meta.NewMeta(idAllocator, store, &session.NodeManager{})
 	testTarget := meta.NewTargetManager(suite.broker, testMeta)
 
 	distManager := meta.NewDistributionManager()
@@ -118,11 +118,12 @@ func (suite *RowCountBasedBalancerTestSuite) TestAssignSegment() {
 			for node, s := range c.distributions {
 				balancer.dist.SegmentDistManager.Update(node, s...)
 			}
-			for i := range c.nodes {
-				nodeInfo := session.NewNodeInfo(c.nodes[i], "127.0.0.1:0")
+			for i, node := range c.nodes {
+				nodeInfo := session.NewNodeInfo(node, "127.0.0.1:0")
 				nodeInfo.UpdateStats(session.WithSegmentCnt(c.segmentCnts[i]))
 				nodeInfo.SetState(c.states[i])
 				suite.balancer.nodeManager.Add(nodeInfo)
+				suite.balancer.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, node)
 			}
 			plans := balancer.AssignSegment(c.assignments, c.nodes)
 			suite.ElementsMatch(c.expectPlans, plans)
@@ -229,6 +230,7 @@ func (suite *RowCountBasedBalancerTestSuite) TestBalance() {
 	}
 
 	suite.mockScheduler.Mock.On("GetNodeChannelDelta", mock.Anything).Return(0)
+
 	for _, c := range cases {
 		suite.Run(c.name, func() {
 			suite.SetupSuite()
@@ -259,15 +261,17 @@ func (suite *RowCountBasedBalancerTestSuite) TestBalance() {
 			collection.LoadPercentage = 100
 			collection.Status = querypb.LoadStatus_Loaded
 			balancer.meta.CollectionManager.PutCollection(collection)
-			balancer.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, c.nodes))
+			balancer.meta.ReplicaManager.Put(utils.CreateTestReplicaWithRG(1, 1, c.name))
+			balancer.meta.ResourceManager.AddResourceGroup(c.name, c.nodes...)
+
 			for node, s := range c.distributions {
 				balancer.dist.SegmentDistManager.Update(node, s...)
 			}
 			for node, v := range c.distributionChannels {
 				balancer.dist.ChannelDistManager.Update(node, v...)
 			}
-			for i := range c.nodes {
-				nodeInfo := session.NewNodeInfo(c.nodes[i], "127.0.0.1:0")
+			for i, node := range c.nodes {
+				nodeInfo := session.NewNodeInfo(node, "127.0.0.1:0")
 				nodeInfo.UpdateStats(session.WithSegmentCnt(c.segmentCnts[i]))
 				nodeInfo.SetState(c.states[i])
 				suite.balancer.nodeManager.Add(nodeInfo)

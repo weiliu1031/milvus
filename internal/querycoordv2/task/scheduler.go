@@ -285,7 +285,7 @@ func (scheduler *taskScheduler) preAdd(task Task) error {
 		}
 		if GetTaskType(task) == TaskTypeGrow {
 			nodesWithSegment := scheduler.distMgr.LeaderViewManager.GetSealedSegmentDist(task.SegmentID())
-			replicaNodeMap := utils.GroupNodesByReplica(scheduler.meta.ReplicaManager, task.CollectionID(), nodesWithSegment)
+			replicaNodeMap := utils.GroupNodesByReplica(scheduler.meta, task.CollectionID(), nodesWithSegment)
 			if _, ok := replicaNodeMap[task.ReplicaID()]; ok {
 				return ErrTaskAlreadyDone
 			}
@@ -312,7 +312,7 @@ func (scheduler *taskScheduler) preAdd(task Task) error {
 
 		if GetTaskType(task) == TaskTypeGrow {
 			nodesWithChannel := scheduler.distMgr.LeaderViewManager.GetChannelDist(task.Channel())
-			replicaNodeMap := utils.GroupNodesByReplica(scheduler.meta.ReplicaManager, task.CollectionID(), nodesWithChannel)
+			replicaNodeMap := utils.GroupNodesByReplica(scheduler.meta, task.CollectionID(), nodesWithChannel)
 			if _, ok := replicaNodeMap[task.ReplicaID()]; ok {
 				return ErrTaskAlreadyDone
 			}
@@ -538,11 +538,11 @@ func (scheduler *taskScheduler) isRelated(task Task, node int64) bool {
 			if segment == nil {
 				continue
 			}
-			replica := scheduler.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
+			replica := scheduler.meta.ReplicaManager.GetByCollectionAndNode(scheduler.meta, task.CollectionID(), action.Node())
 			if replica == nil {
 				continue
 			}
-			leader, ok := scheduler.distMgr.GetShardLeader(replica, segment.GetInsertChannel())
+			leader, ok := scheduler.distMgr.GetShardLeader(scheduler.meta, replica, segment.GetInsertChannel())
 			if !ok {
 				continue
 			}
@@ -754,12 +754,12 @@ func (scheduler *taskScheduler) checkSegmentTaskStale(task *SegmentTask) bool {
 				return true
 			}
 
-			replica := scheduler.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
+			replica := scheduler.meta.ReplicaManager.GetByCollectionAndNode(scheduler.meta, task.CollectionID(), action.Node())
 			if replica == nil {
 				log.Warn("task stale due to replica not found")
 				return true
 			}
-			_, ok := scheduler.distMgr.GetShardLeader(replica, segment.GetInsertChannel())
+			_, ok := scheduler.distMgr.GetShardLeader(scheduler.meta, replica, segment.GetInsertChannel())
 			if !ok {
 				log.Warn("task stale due to leader not found")
 				return true

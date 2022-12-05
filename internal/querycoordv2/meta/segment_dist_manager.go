@@ -144,15 +144,16 @@ func (m *SegmentDistManager) GetByShard(shard string) []*Segment {
 }
 
 // GetByShard returns all segments of the given collection.
-func (m *SegmentDistManager) GetByShardWithReplica(shard string, replica *Replica) []*Segment {
+func (m *SegmentDistManager) GetByShardWithReplica(meta *Meta, shard string, replica *Replica) []*Segment {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
 	ret := make([]*Segment, 0)
 	for nodeID, segments := range m.segments {
-		if !replica.Nodes.Contain(nodeID) {
+		if !meta.ResourceManager.ContainsNode(replica.GetResourceGroup(), nodeID) {
 			continue
 		}
+
 		for _, segment := range segments {
 			if segment.GetInsertChannel() == shard {
 				ret = append(ret, segment)

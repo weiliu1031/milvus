@@ -20,7 +20,9 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
+	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	. "github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -87,11 +89,18 @@ func (m *ChannelDistManager) GetAll() []*DmChannel {
 
 // GetShardLeader returns the node whthin the given replicaNodes and subscribing the given shard,
 // returns (0, false) if not found.
-func (m *ChannelDistManager) GetShardLeader(replica *Replica, shard string) (int64, bool) {
+func (m *ChannelDistManager) GetShardLeader(meta *Meta, replica *Replica, shard string) (int64, bool) {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
-	for node := range replica.Nodes {
+	nodes, err := meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+	}
+	for _, node := range nodes {
 		channels := m.channels[node]
 		for _, dmc := range channels {
 			if dmc.ChannelName == shard {
@@ -103,12 +112,20 @@ func (m *ChannelDistManager) GetShardLeader(replica *Replica, shard string) (int
 	return 0, false
 }
 
-func (m *ChannelDistManager) GetShardLeadersByReplica(replica *Replica) map[string]int64 {
+func (m *ChannelDistManager) GetShardLeadersByReplica(meta *Meta, replica *Replica) map[string]int64 {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
 
+	nodes, err := meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+	}
+
 	ret := make(map[string]int64)
-	for node := range replica.Nodes {
+	for _, node := range nodes {
 		channels := m.channels[node]
 		for _, dmc := range channels {
 			if dmc.GetCollectionID() == replica.GetCollectionID() {

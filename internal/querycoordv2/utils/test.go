@@ -20,7 +20,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 func CreateTestLeaderView(id, collection int64, channel string, segments map[int64]int64, growings map[int64]*meta.Segment) *meta.LeaderView {
@@ -52,13 +51,17 @@ func CreateTestChannel(collection, node, version int64, channel string) *meta.Dm
 }
 
 func CreateTestReplica(id, collectionID int64, nodes []int64) *meta.Replica {
+	return CreateTestReplicaWithRG(id, collectionID, meta.DefaultResourceGroupName)
+}
+
+// create test replica with resource group
+func CreateTestReplicaWithRG(id, collectionID int64, rg string) *meta.Replica {
 	return &meta.Replica{
 		Replica: &querypb.Replica{
-			ID:           id,
-			CollectionID: collectionID,
-			Nodes:        nodes,
+			ID:            id,
+			CollectionID:  collectionID,
+			ResourceGroup: rg,
 		},
-		Nodes: typeutil.NewUniqueSet(nodes...),
 	}
 }
 

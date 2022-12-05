@@ -165,7 +165,7 @@ func (ex *Executor) processMergeTask(mergeTask *LoadSegmentsTask) {
 
 	// Get shard leader for the given replica and segment
 	channel := mergeTask.req.GetInfos()[0].GetInsertChannel()
-	leader, ok := getShardLeader(ex.meta.ReplicaManager, ex.dist, task.CollectionID(), action.Node(), channel)
+	leader, ok := getShardLeader(ex.meta, ex.dist, task.CollectionID(), action.Node(), channel)
 	if !ok {
 		msg := "no shard leader for the segment to execute loading"
 		task.SetErr(utils.WrapError(msg, ErrTaskStale))
@@ -261,7 +261,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, step int) error {
 	loadInfo := utils.PackSegmentLoadInfo(segment, indexes)
 
 	// Get shard leader for the given replica and segment
-	leader, ok := getShardLeader(ex.meta.ReplicaManager, ex.dist, task.CollectionID(), action.Node(), segment.GetInsertChannel())
+	leader, ok := getShardLeader(ex.meta, ex.dist, task.CollectionID(), action.Node(), segment.GetInsertChannel())
 	if !ok {
 		msg := "no shard leader for the segment to execute loading"
 		err = utils.WrapError(msg, ErrTaskStale)
@@ -315,7 +315,7 @@ func (ex *Executor) releaseSegment(task *SegmentTask, step int) {
 		req.Shard = targetSegment.GetInsertChannel()
 
 		if ex.meta.CollectionManager.Exist(task.CollectionID()) {
-			leader, ok := getShardLeader(ex.meta.ReplicaManager, ex.dist, task.CollectionID(), action.Node(), req.GetShard())
+			leader, ok := getShardLeader(ex.meta, ex.dist, task.CollectionID(), action.Node(), req.GetShard())
 			if !ok {
 				log.Warn("no shard leader for the segment to execute releasing", zap.String("shard", req.GetShard()))
 				return

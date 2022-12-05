@@ -97,6 +97,12 @@ func (mgr *LeaderViewManager) Update(leaderID int64, views ...*LeaderView) {
 	}
 }
 
+func (mgr *LeaderViewManager) Remove(leaderID int64) {
+	mgr.rwmutex.Lock()
+	defer mgr.rwmutex.Unlock()
+	delete(mgr.views, leaderID)
+}
+
 // GetSegmentDist returns the list of nodes the given segment on
 func (mgr *LeaderViewManager) GetSegmentDist(segmentID int64) []int64 {
 	mgr.rwmutex.RLock()

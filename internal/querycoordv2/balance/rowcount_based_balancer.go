@@ -19,11 +19,13 @@ package balance
 import (
 	"sort"
 
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/samber/lo"
+	"go.uber.org/zap"
 )
 
 type RowCountBasedBalancer struct {
@@ -102,8 +104,12 @@ func (b *RowCountBasedBalancer) Balance() ([]SegmentAssignPlan, []ChannelAssignP
 }
 
 func (b *RowCountBasedBalancer) balanceReplica(replica *meta.Replica) ([]SegmentAssignPlan, []ChannelAssignPlan) {
-	nodes := replica.Nodes.Collect()
-	if len(nodes) == 0 {
+	nodes, err := b.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
 		return nil, nil
 	}
 	nodesRowCnt := make(map[int64]int)
@@ -268,10 +274,19 @@ func (b *RowCountBasedBalancer) getChannelPlan(replica *meta.Replica, stoppingNo
 }
 
 func (b *RowCountBasedBalancer) getChannelPlanForStoppingNodes(replica *meta.Replica, stoppingNodesSegments map[int64][]*meta.Segment) []ChannelAssignPlan {
+	nodes, err := b.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+		return nil
+	}
+
 	channelPlans := make([]ChannelAssignPlan, 0)
 	for nodeID := range stoppingNodesSegments {
 		dmChannels := b.dist.ChannelDistManager.GetByCollectionAndNode(replica.GetCollectionID(), nodeID)
-		plans := b.AssignChannel(dmChannels, replica.Replica.GetNodes())
+		plans := b.AssignChannel(dmChannels, nodes)
 		for i := range plans {
 			plans[i].From = nodeID
 			plans[i].ReplicaID = replica.ID

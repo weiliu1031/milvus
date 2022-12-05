@@ -48,7 +48,14 @@ import (
 func (s *Server) checkAnyReplicaAvailable(collectionID int64) bool {
 	for _, replica := range s.meta.ReplicaManager.GetByCollection(collectionID) {
 		isAvailable := true
-		for node := range replica.Nodes {
+		nodes, err := s.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+		if err != nil {
+			log.Warn("failed to get node in replica",
+				zap.Int64("replicaID", replica.GetID()),
+				zap.String("resourceGroup", replica.GetResourceGroup()),
+				zap.Error(err))
+		}
+		for _, node := range nodes {
 			if s.nodeMgr.Get(node) == nil {
 				isAvailable = false
 				break
@@ -93,8 +100,16 @@ func (s *Server) getCollectionSegmentInfo(collection int64) []*querypb.SegmentIn
 func (s *Server) balanceSegments(ctx context.Context, req *querypb.LoadBalanceRequest, replica *meta.Replica) error {
 	srcNode := req.GetSourceNodeIDs()[0]
 	dstNodeSet := typeutil.NewUniqueSet(req.GetDstNodeIDs()...)
+	nodes, err := s.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+		return nil
+	}
 	if dstNodeSet.Len() == 0 {
-		dstNodeSet.Insert(replica.GetNodes()...)
+		dstNodeSet.Insert(nodes...)
 	}
 	dstNodeSet.Remove(srcNode)
 
@@ -302,7 +317,18 @@ func (s *Server) tryGetNodesMetrics(ctx context.Context, req *milvuspb.GetMetric
 }
 
 func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*milvuspb.ReplicaInfo, error) {
-	info := utils.Replica2ReplicaInfo(replica.Replica)
+	nodes, err := s.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+	}
+	info := &milvuspb.ReplicaInfo{
+		ReplicaID:    replica.GetID(),
+		CollectionID: replica.GetCollectionID(),
+		NodeIds:      nodes,
+	}
 
 	channels := s.targetMgr.GetDmChannelsByCollection(replica.GetCollectionID(), meta.CurrentTarget)
 	if len(channels) == 0 {
@@ -316,7 +342,7 @@ func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*m
 	}
 
 	for _, channel := range channels {
-		leader, ok := s.dist.ChannelDistManager.GetShardLeader(replica, channel.GetChannelName())
+		leader, ok := s.dist.ChannelDistManager.GetShardLeader(s.meta, replica, channel.GetChannelName())
 		var leaderInfo *session.NodeInfo
 		if ok {
 			leaderInfo = s.nodeMgr.Get(leader)
@@ -335,7 +361,7 @@ func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*m
 		}
 		if withShardNodes {
 			shardNodes := lo.FilterMap(segments, func(segment *meta.Segment, _ int) (int64, bool) {
-				if replica.Nodes.Contain(segment.Node) {
+				if s.meta.ResourceManager.ContainsNode(replica.GetResourceGroup(), segment.Node) {
 					return segment.Node, true
 				}
 				return 0, false

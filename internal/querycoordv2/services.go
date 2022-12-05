@@ -472,14 +472,14 @@ func (s *Server) LoadBalance(ctx context.Context, req *querypb.LoadBalanceReques
 		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
 	}
 	srcNode := req.GetSourceNodeIDs()[0]
-	replica := s.meta.ReplicaManager.GetByCollectionAndNode(req.GetCollectionID(), srcNode)
+	replica := s.meta.ReplicaManager.GetByCollectionAndNode(s.meta, req.GetCollectionID(), srcNode)
 	if replica == nil {
 		msg := "source node not found in any replica"
 		log.Warn(msg)
 		return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
 	}
 	for _, dstNode := range req.GetDstNodeIDs() {
-		if !replica.Nodes.Contain(dstNode) {
+		if !s.meta.ResourceManager.ContainsNode(replica.GetResourceGroup(), dstNode) {
 			msg := "destination nodes have to be in the same replica of source node"
 			log.Warn(msg)
 			return utils.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
