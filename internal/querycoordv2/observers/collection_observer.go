@@ -175,14 +175,14 @@ func (ob *CollectionObserver) observeCollectionLoadStatus(collection *meta.Colle
 		updated.LoadPercentage = 100
 	} else {
 		for _, channel := range channelTargets {
-			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+			group := utils.GroupNodesByReplica(ob.meta,
 				collection.GetCollectionID(),
 				ob.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
 			loadedCount += len(group)
 		}
 		subChannelCount := loadedCount
 		for _, segment := range segmentTargets {
-			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+			group := utils.GroupNodesByReplica(ob.meta,
 				collection.GetCollectionID(),
 				ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
 			loadedCount += len(group)
@@ -240,14 +240,14 @@ func (ob *CollectionObserver) observePartitionLoadStatus(partition *meta.Partiti
 		updated.LoadPercentage = 100
 	} else {
 		for _, channel := range channelTargets {
-			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+			group := utils.GroupNodesByReplica(ob.meta,
 				partition.GetCollectionID(),
 				ob.dist.LeaderViewManager.GetChannelDist(channel.GetChannelName()))
 			loadedCount += len(group)
 		}
 		subChannelCount := loadedCount
 		for _, segment := range segmentTargets {
-			group := utils.GroupNodesByReplica(ob.meta.ReplicaManager,
+			group := utils.GroupNodesByReplica(ob.meta,
 				partition.GetCollectionID(),
 				ob.dist.LeaderViewManager.GetSealedSegmentDist(segment.GetID()))
 			loadedCount += len(group)

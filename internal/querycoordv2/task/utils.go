@@ -222,10 +222,10 @@ func packUnsubDmChannelRequest(task *ChannelTask, action Action) *querypb.UnsubD
 	}
 }
 
-func getShardLeader(replicaMgr *meta.ReplicaManager, distMgr *meta.DistributionManager, collectionID, nodeID int64, channel string) (int64, bool) {
-	replica := replicaMgr.GetByCollectionAndNode(collectionID, nodeID)
+func getShardLeader(meta *meta.Meta, distMgr *meta.DistributionManager, collectionID, nodeID int64, channel string) (int64, bool) {
+	replica := meta.ReplicaManager.GetByCollectionAndNode(meta, collectionID, nodeID)
 	if replica == nil {
 		return 0, false
 	}
-	return distMgr.GetShardLeader(replica, channel)
+	return distMgr.GetShardLeader(meta, replica, channel)
 }

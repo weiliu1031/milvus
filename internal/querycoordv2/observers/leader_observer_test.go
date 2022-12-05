@@ -67,13 +67,17 @@ func (suite *LeaderObserverTestSuite) SetupTest() {
 	// meta
 	store := meta.NewMetaStore(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	suite.meta = meta.NewMeta(idAllocator, store)
+	suite.meta = meta.NewMeta(idAllocator, store, session.NewNodeManager())
 	suite.broker = meta.NewMockBroker(suite.T())
 
 	suite.mockCluster = session.NewMockCluster(suite.T())
 	distManager := meta.NewDistributionManager()
 	targetManager := meta.NewTargetManager(suite.broker, suite.meta)
 	suite.observer = NewLeaderObserver(distManager, suite.meta, targetManager, suite.mockCluster)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 3)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 4)
 }
 
 func (suite *LeaderObserverTestSuite) TearDownTest() {
@@ -251,9 +255,10 @@ func (suite *LeaderObserverTestSuite) TestSyncLoadedSegmentsWithReplicas() {
 		channels, segments, nil)
 	observer.target.UpdateCollectionNextTargetWithPartitions(int64(1), int64(1))
 	observer.target.UpdateCollectionCurrentTarget(1)
-	observer.dist.SegmentDistManager.Update(1, utils.CreateTestSegment(1, 1, 1, 1, 1, "test-insert-channel"))
-	observer.dist.SegmentDistManager.Update(4, utils.CreateTestSegment(1, 1, 1, 4, 2, "test-insert-channel"))
+	observer.dist.SegmentDistManager.Update(1, utils.CreateTestSegment(1, 1, 1, 1, 0, "test-insert-channel"))
+	observer.dist.SegmentDistManager.Update(4, utils.CreateTestSegment(1, 1, 1, 4, 0, "test-insert-channel"))
 	observer.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
+	observer.dist.ChannelDistManager.Update(4, utils.CreateTestChannel(1, 4, 1, "test-insert-channel"))
 	observer.dist.LeaderViewManager.Update(2, utils.CreateTestLeaderView(2, 1, "test-insert-channel", map[int64]int64{}, map[int64]*meta.Segment{}))
 	observer.dist.LeaderViewManager.Update(4, utils.CreateTestLeaderView(4, 1, "test-insert-channel", map[int64]int64{1: 4}, map[int64]*meta.Segment{}))
 	expectReq := &querypb.SyncDistributionRequest{
@@ -268,7 +273,7 @@ func (suite *LeaderObserverTestSuite) TestSyncLoadedSegmentsWithReplicas() {
 				PartitionID: 1,
 				SegmentID:   1,
 				NodeID:      1,
-				Version:     1,
+				Version:     0,
 			},
 		},
 	}

@@ -21,7 +21,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -31,6 +31,7 @@ type ChannelDistManagerSuite struct {
 	collection int64
 	nodes      []int64
 	channels   map[string]*DmChannel
+	meta       *Meta
 }
 
 func (suite *ChannelDistManagerSuite) SetupSuite() {
@@ -59,6 +60,9 @@ func (suite *ChannelDistManagerSuite) SetupTest() {
 	suite.dist.Update(suite.nodes[0], suite.channels["dmc0"].Clone())
 	suite.dist.Update(suite.nodes[1], suite.channels["dmc0"].Clone(), suite.channels["dmc1"].Clone())
 	suite.dist.Update(suite.nodes[2], suite.channels["dmc1"].Clone())
+
+	store := NewMockStore(suite.T())
+	suite.meta = NewMeta(nil, store, session.NewNodeManager())
 }
 
 func (suite *ChannelDistManagerSuite) TestGetBy() {
@@ -102,46 +106,48 @@ func (suite *ChannelDistManagerSuite) TestGetShardLeader() {
 	replicas := []*Replica{
 		{
 			Replica: &querypb.Replica{
-				CollectionID: suite.collection,
+				CollectionID:  suite.collection,
+				ResourceGroup: "r1",
 			},
-			Nodes: typeutil.NewUniqueSet(suite.nodes[0], suite.nodes[2]),
 		},
 		{
 			Replica: &querypb.Replica{
-				CollectionID: suite.collection,
+				CollectionID:  suite.collection,
+				ResourceGroup: "r2",
 			},
-			Nodes: typeutil.NewUniqueSet(suite.nodes[1]),
 		},
 	}
+	suite.meta.ResourceManager.AddResourceGroup("r1", suite.nodes[0], suite.nodes[2])
+	suite.meta.ResourceManager.AddResourceGroup("r2", suite.nodes[1])
 
 	// Test on replica 0
-	leader0, ok := suite.dist.GetShardLeader(replicas[0], "dmc0")
+	leader0, ok := suite.dist.GetShardLeader(suite.meta, replicas[0], "dmc0")
 	suite.True(ok)
 	suite.Equal(suite.nodes[0], leader0)
-	leader1, ok := suite.dist.GetShardLeader(replicas[0], "dmc1")
+	leader1, ok := suite.dist.GetShardLeader(suite.meta, replicas[0], "dmc1")
 	suite.True(ok)
 	suite.Equal(suite.nodes[2], leader1)
 
 	// Test on replica 1
-	leader0, ok = suite.dist.GetShardLeader(replicas[1], "dmc0")
+	leader0, ok = suite.dist.GetShardLeader(suite.meta, replicas[1], "dmc0")
 	suite.True(ok)
 	suite.Equal(suite.nodes[1], leader0)
-	leader1, ok = suite.dist.GetShardLeader(replicas[1], "dmc1")
+	leader1, ok = suite.dist.GetShardLeader(suite.meta, replicas[1], "dmc1")
 	suite.True(ok)
 	suite.Equal(suite.nodes[1], leader1)
 
 	// Test no shard leader for given channel
-	_, ok = suite.dist.GetShardLeader(replicas[0], "invalid-shard")
+	_, ok = suite.dist.GetShardLeader(suite.meta, replicas[0], "invalid-shard")
 	suite.False(ok)
 
 	// Test on replica 0
-	leaders := suite.dist.GetShardLeadersByReplica(replicas[0])
+	leaders := suite.dist.GetShardLeadersByReplica(suite.meta, replicas[0])
 	suite.Len(leaders, 2)
 	suite.Equal(leaders["dmc0"], suite.nodes[0])
 	suite.Equal(leaders["dmc1"], suite.nodes[2])
 
 	// Test on replica 1
-	leaders = suite.dist.GetShardLeadersByReplica(replicas[1])
+	leaders = suite.dist.GetShardLeadersByReplica(suite.meta, replicas[1])
 	suite.Len(leaders, 2)
 	suite.Equal(leaders["dmc0"], suite.nodes[1])
 	suite.Equal(leaders["dmc1"], suite.nodes[1])

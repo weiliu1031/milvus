@@ -86,13 +86,13 @@ func (o *LeaderObserver) observeSegmentsDist(ctx context.Context) {
 func (o *LeaderObserver) observeCollection(ctx context.Context, collection int64) {
 	replicas := o.meta.ReplicaManager.GetByCollection(collection)
 	for _, replica := range replicas {
-		leaders := o.dist.ChannelDistManager.GetShardLeadersByReplica(replica)
+		leaders := o.dist.ChannelDistManager.GetShardLeadersByReplica(o.meta, replica)
 		for ch, leaderID := range leaders {
 			leaderView := o.dist.LeaderViewManager.GetLeaderShardView(leaderID, ch)
 			if leaderView == nil {
 				continue
 			}
-			dists := o.dist.SegmentDistManager.GetByShardWithReplica(ch, replica)
+			dists := o.dist.SegmentDistManager.GetByShardWithReplica(o.meta, ch, replica)
 			needLoaded, needRemoved := o.findNeedLoadedSegments(leaderView, dists),
 				o.findNeedRemovedSegments(leaderView, dists)
 			o.sync(ctx, leaderView, append(needLoaded, needRemoved...))

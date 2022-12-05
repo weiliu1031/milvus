@@ -18,27 +18,18 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math/rand"
 
 	"github.com/samber/lo"
 
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
-	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 )
 
-func GetReplicaNodesInfo(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeManager, replicaID int64) []*session.NodeInfo {
-	replica := replicaMgr.Get(replicaID)
-	if replica == nil {
-		return nil
-	}
-
-	nodes := make([]*session.NodeInfo, 0, len(replica.Nodes))
-	for node := range replica.Nodes {
-		nodes = append(nodes, nodeMgr.Get(node))
-	}
-	return nodes
-}
+var (
+	ErrReplicaNotFound = errors.New("Replica not found")
+	ErrReplicaNumber   = errors.New("Replica number can't be zero")
+)
 
 func GetPartitions(collectionMgr *meta.CollectionManager, broker meta.Broker, collectionID int64) ([]int64, error) {
 	collection := collectionMgr.GetCollection(collectionID)
@@ -60,12 +51,12 @@ func GetPartitions(collectionMgr *meta.CollectionManager, broker meta.Broker, co
 
 // GroupNodesByReplica groups nodes by replica,
 // returns ReplicaID -> NodeIDs
-func GroupNodesByReplica(replicaMgr *meta.ReplicaManager, collectionID int64, nodes []int64) map[int64][]int64 {
+func GroupNodesByReplica(meta *meta.Meta, collectionID int64, nodes []int64) map[int64][]int64 {
 	ret := make(map[int64][]int64)
-	replicas := replicaMgr.GetByCollection(collectionID)
+	replicas := meta.ReplicaManager.GetByCollection(collectionID)
 	for _, replica := range replicas {
 		for _, node := range nodes {
-			if replica.Nodes.Contain(node) {
+			if meta.ResourceManager.ContainsNode(replica.GetResourceGroup(), node) {
 				ret[replica.ID] = append(ret[replica.ID], node)
 			}
 		}
@@ -84,42 +75,26 @@ func GroupPartitionsByCollection(partitions []*meta.Partition) map[int64][]*meta
 	return ret
 }
 
-// GroupSegmentsByReplica groups segments by replica,
-// returns ReplicaID -> Segments
-func GroupSegmentsByReplica(replicaMgr *meta.ReplicaManager, collectionID int64, segments []*meta.Segment) map[int64][]*meta.Segment {
-	ret := make(map[int64][]*meta.Segment)
-	replicas := replicaMgr.GetByCollection(collectionID)
-	for _, replica := range replicas {
-		for _, segment := range segments {
-			if replica.Nodes.Contain(segment.Node) {
-				ret[replica.ID] = append(ret[replica.ID], segment)
-			}
-		}
-	}
-	return ret
-}
-
-// AssignNodesToReplicas assigns nodes to the given replicas,
-// all given replicas must be the same collection,
-// the given replicas have to be not in ReplicaManager
-func AssignNodesToReplicas(nodeMgr *session.NodeManager, replicas ...*meta.Replica) {
-	replicaNumber := len(replicas)
-	nodes := nodeMgr.GetAll()
-	rand.Shuffle(len(nodes), func(i, j int) {
-		nodes[i], nodes[j] = nodes[j], nodes[i]
-	})
-
-	for i, node := range nodes {
-		replicas[i%replicaNumber].AddNode(node.ID())
-	}
-}
-
 // SpawnReplicas spawns replicas for given collection, assign nodes to them, and save them
-func SpawnReplicas(replicaMgr *meta.ReplicaManager, nodeMgr *session.NodeManager, collection int64, replicaNumber int32) ([]*meta.Replica, error) {
-	replicas, err := replicaMgr.Spawn(collection, replicaNumber)
+func SpawnReplicasWithRG(replicaMgr *meta.ReplicaManager, collection int64, replicasInRG map[string]int32, replicaNumber int32) ([]*meta.Replica, error) {
+	if len(replicasInRG) == 0 {
+		if replicaNumber == 0 {
+			return nil, ErrReplicaNumber
+		}
+		// if no rg specified, create replica in default rg
+		replicas, err := replicaMgr.SpawnReplicas(collection, map[string]int32{meta.DefaultResourceGroupName: replicaNumber})
+		if err != nil {
+			return nil, err
+		}
+
+		return replicas, replicaMgr.Put(replicas...)
+	}
+
+	// create replica with specified RG
+	replicas, err := replicaMgr.SpawnReplicas(collection, replicasInRG)
 	if err != nil {
 		return nil, err
 	}
-	AssignNodesToReplicas(nodeMgr, replicas...)
+
 	return replicas, replicaMgr.Put(replicas...)
 }

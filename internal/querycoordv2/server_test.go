@@ -176,7 +176,7 @@ func (suite *ServerSuite) TestNodeUp() {
 			return false
 		}
 		for _, collection := range suite.collections {
-			replica := suite.server.meta.ReplicaManager.GetByCollectionAndNode(collection, newNode.ID)
+			replica := suite.server.meta.ReplicaManager.GetByCollectionAndNode(suite.server.meta, collection, newNode.ID)
 			if replica == nil {
 				return false
 			}
@@ -207,7 +207,7 @@ func (suite *ServerSuite) TestNodeDown() {
 			return false
 		}
 		for _, collection := range suite.collections {
-			replica := suite.server.meta.ReplicaManager.GetByCollectionAndNode(collection, downNode.ID)
+			replica := suite.server.meta.ReplicaManager.GetByCollectionAndNode(suite.server.meta, collection, downNode.ID)
 			if replica != nil {
 				return false
 			}

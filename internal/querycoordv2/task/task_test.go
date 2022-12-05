@@ -130,7 +130,7 @@ func (suite *TaskSuite) SetupTest() {
 
 	suite.kv = etcdkv.NewEtcdKV(cli, config.MetaRootPath.GetValue())
 	suite.store = meta.NewMetaStore(suite.kv)
-	suite.meta = meta.NewMeta(RandomIncrementIDAllocator(), suite.store)
+	suite.meta = meta.NewMeta(RandomIncrementIDAllocator(), suite.store, session.NewNodeManager())
 	suite.dist = meta.NewDistributionManager()
 	suite.broker = meta.NewMockBroker(suite.T())
 	suite.target = meta.NewTargetManager(suite.broker, suite.meta)
@@ -168,6 +168,9 @@ func (suite *TaskSuite) BeforeTest(suiteName, testName string) {
 		})
 		suite.meta.ReplicaManager.Put(
 			utils.CreateTestReplica(suite.replica, suite.collection, []int64{1, 2, 3}))
+		suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+		suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
+		suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 3)
 	}
 }
 
@@ -916,7 +919,7 @@ func (suite *TaskSuite) TestSegmentTaskStale() {
 	suite.cluster.EXPECT().LoadSegments(mock.Anything, targetNode, mock.Anything).Return(utils.WrapStatus(commonpb.ErrorCode_Success, ""), nil)
 
 	// Test load segment task
-	suite.meta.ReplicaManager.Put(createReplica(suite.collection, targetNode))
+	suite.meta.ReplicaManager.Put(suite.createReplica(suite.collection, targetNode))
 	suite.dist.ChannelDistManager.Update(targetNode, meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 		CollectionID: suite.collection,
 		ChannelName:  channel.ChannelName,
@@ -1151,6 +1154,10 @@ func (suite *TaskSuite) TestNoExecutor() {
 	suite.nodeMgr.Add(session.NewNodeInfo(targetNode, "localhost"))
 	suite.meta.ReplicaManager.Put(
 		utils.CreateTestReplica(suite.replica, suite.collection, []int64{1, 2, 3, -1}))
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, -1)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
+	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 3)
 
 	// Test load segment task
 	suite.dist.ChannelDistManager.Update(targetNode, meta.DmChannelFromVChannel(&datapb.VchannelInfo{
@@ -1258,14 +1265,17 @@ func (suite *TaskSuite) newScheduler() *taskScheduler {
 	)
 }
 
-func createReplica(collection int64, nodes ...int64) *meta.Replica {
+func (suite *TaskSuite) createReplica(collection int64, nodes ...int64) *meta.Replica {
+	for _, node := range nodes {
+		suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, node)
+	}
+
 	return &meta.Replica{
 		Replica: &querypb.Replica{
-			ID:           rand.Int63()/2 + 1,
-			CollectionID: collection,
-			Nodes:        nodes,
+			ID:            rand.Int63()/2 + 1,
+			CollectionID:  collection,
+			ResourceGroup: meta.DefaultResourceGroupName,
 		},
-		Nodes: typeutil.NewUniqueSet(nodes...),
 	}
 }
 

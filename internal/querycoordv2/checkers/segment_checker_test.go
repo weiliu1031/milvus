@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
+	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/etcd"
@@ -64,7 +65,7 @@ func (suite *SegmentCheckerTestSuite) SetupTest() {
 	// meta
 	store := meta.NewMetaStore(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	suite.meta = meta.NewMeta(idAllocator, store)
+	suite.meta = meta.NewMeta(idAllocator, store, session.NewNodeManager())
 	distManager := meta.NewDistributionManager()
 	suite.broker = meta.NewMockBroker(suite.T())
 	targetManager := meta.NewTargetManager(suite.broker, suite.meta)
@@ -100,6 +101,8 @@ func (suite *SegmentCheckerTestSuite) TestLoadSegments() {
 	// set meta
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
 
 	// set target
 	segments := []*datapb.SegmentBinlogs{
@@ -133,6 +136,8 @@ func (suite *SegmentCheckerTestSuite) TestReleaseSegments() {
 	// set meta
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
 
 	// set dist
 	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 1, "test-insert-channel"))
@@ -155,7 +160,8 @@ func (suite *SegmentCheckerTestSuite) TestReleaseRepeatedSegments() {
 	// set meta
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
-
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
 	// set target
 	segments := []*datapb.SegmentBinlogs{
 		{
@@ -196,7 +202,8 @@ func (suite *SegmentCheckerTestSuite) TestReleaseGrowingSegments() {
 	// 2 tasks to reduce segment 2 and 3.
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
-
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
 	segments := []*datapb.SegmentBinlogs{
 		{
 			SegmentID:     3,

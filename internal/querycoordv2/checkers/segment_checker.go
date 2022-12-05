@@ -144,7 +144,14 @@ func (c *SegmentChecker) getStreamingSegmentDiff(targetMgr *meta.TargetManager,
 
 func (c *SegmentChecker) getStreamingSegmentsDist(distMgr *meta.DistributionManager, replica *meta.Replica) map[int64]*meta.Segment {
 	segments := make(map[int64]*meta.Segment, 0)
-	for _, node := range replica.Nodes.Collect() {
+	nodes, err := c.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+	}
+	for _, node := range nodes {
 		segmentsOnNodes := distMgr.LeaderViewManager.GetGrowingSegmentDistByCollectionAndNode(replica.CollectionID, node)
 		for k, v := range segmentsOnNodes {
 			segments[k] = v
@@ -196,7 +203,14 @@ func (c *SegmentChecker) getHistoricalSegmentDiff(targetMgr *meta.TargetManager,
 
 func (c *SegmentChecker) getHistoricalSegmentsDist(distMgr *meta.DistributionManager, replica *meta.Replica) []*meta.Segment {
 	ret := make([]*meta.Segment, 0)
-	for _, node := range replica.Nodes.Collect() {
+	nodes, err := c.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+	}
+	for _, node := range nodes {
 		ret = append(ret, distMgr.SegmentDistManager.GetByCollectionAndNode(replica.CollectionID, node)...)
 	}
 	return ret
@@ -233,7 +247,7 @@ func (c *SegmentChecker) findRepeatedHistoricalSegments(distMgr *meta.Distributi
 func (c *SegmentChecker) filterExistedOnLeader(replica *meta.Replica, segments []*meta.Segment) []*meta.Segment {
 	filtered := make([]*meta.Segment, 0, len(segments))
 	for _, s := range segments {
-		leaderID, ok := c.dist.ChannelDistManager.GetShardLeader(replica, s.GetInsertChannel())
+		leaderID, ok := c.dist.ChannelDistManager.GetShardLeader(c.meta, replica, s.GetInsertChannel())
 		if !ok {
 			continue
 		}
@@ -266,7 +280,15 @@ func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []
 		}
 		packedSegments = append(packedSegments, &meta.Segment{SegmentInfo: s})
 	}
-	plans := c.balancer.AssignSegment(packedSegments, replica.Replica.GetNodes())
+	nodes, err := c.meta.ResourceManager.GetNodes(replica.GetResourceGroup())
+	if err != nil {
+		log.Warn("failed to get node in replica",
+			zap.Int64("replicaID", replica.GetID()),
+			zap.String("resourceGroup", replica.GetResourceGroup()),
+			zap.Error(err))
+		return nil
+	}
+	plans := c.balancer.AssignSegment(packedSegments, nodes)
 	for i := range plans {
 		plans[i].ReplicaID = replica.GetID()
 	}

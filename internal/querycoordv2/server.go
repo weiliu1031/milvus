@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -244,7 +243,7 @@ func (s *Server) initMeta() error {
 
 	log.Info("init meta")
 	s.store = meta.NewMetaStore(s.kv)
-	s.meta = meta.NewMeta(s.idAllocator, s.store)
+	s.meta = meta.NewMeta(s.idAllocator, s.store, s.nodeMgr)
 
 	log.Info("recover meta...")
 	err := s.meta.CollectionManager.Recover()
@@ -259,6 +258,12 @@ func (s *Server) initMeta() error {
 	err = s.meta.ReplicaManager.Recover(collections)
 	if err != nil {
 		log.Error("failed to recover replicas")
+		return err
+	}
+
+	err = s.meta.ResourceManager.Recover()
+	if err != nil {
+		log.Error("failed to recover resource groups")
 		return err
 	}
 
@@ -312,7 +317,8 @@ func (s *Server) Start() error {
 		s.nodeMgr.Add(session.NewNodeInfo(node.ServerID, node.Address))
 		s.taskScheduler.AddExecutor(node.ServerID)
 	}
-	s.checkReplicas()
+
+	s.meta.ResourceManager.CheckNodeStatus()
 	for _, node := range sessions {
 		s.handleNodeUp(node.ServerID)
 	}
@@ -584,27 +590,18 @@ func (s *Server) handleNodeUp(node int64) {
 	s.taskScheduler.AddExecutor(node)
 	s.distController.StartDistInstance(s.ctx, node)
 
-	for _, collection := range s.meta.CollectionManager.GetAll() {
-		log := log.With(zap.Int64("collectionID", collection))
-		replica := s.meta.ReplicaManager.GetByCollectionAndNode(collection, node)
-		if replica == nil {
-			replicas := s.meta.ReplicaManager.GetByCollection(collection)
-			sort.Slice(replicas, func(i, j int) bool {
-				return replicas[i].Nodes.Len() < replicas[j].Nodes.Len()
-			})
-			replica := replicas[0]
-			// TODO(yah01): this may fail, need a component to check whether a node is assigned
-			err := s.meta.ReplicaManager.AddNode(replica.GetID(), node)
-			if err != nil {
-				log.Warn("failed to assign node to replicas",
-					zap.Int64("replicaID", replica.GetID()),
-					zap.Error(err),
-				)
-			}
-			log.Info("assign node to replica",
-				zap.Int64("replicaID", replica.GetID()))
-		}
+	rgName, err := s.meta.ResourceManager.HandleNodeUp(node)
+	if err != nil {
+		log.Warn("HandleNodeUp: failed to assign node to resource group",
+			zap.Int64("nodeID", node),
+			zap.Error(err),
+		)
 	}
+
+	log.Info("HandleNodeUp: assign node to resource group",
+		zap.Int64("nodeID", node),
+		zap.String("resourceGroup", rgName),
+	)
 }
 
 func (s *Server) handleNodeDown(node int64) {
@@ -612,73 +609,25 @@ func (s *Server) handleNodeDown(node int64) {
 	s.taskScheduler.RemoveExecutor(node)
 	s.distController.Remove(node)
 
-	// Refresh the targets, to avoid consuming messages too early from channel
-	// FIXME(yah01): the leads to miss data, the segments flushed between the two check points
-	// are missed, it will recover for a while.
-	channels := s.dist.ChannelDistManager.GetByNode(node)
-	for _, channel := range channels {
-		err := s.targetMgr.UpdateCollectionNextTarget(channel.GetCollectionID())
-		if err != nil {
-			msg := "failed to update next targets for collection"
-			log.Error(msg,
-				zap.Error(err))
-			continue
-		}
-	}
-
 	// Clear dist
 	s.dist.LeaderViewManager.Update(node)
 	s.dist.ChannelDistManager.Update(node)
 	s.dist.SegmentDistManager.Update(node)
 
 	// Clear meta
-	for _, collection := range s.meta.CollectionManager.GetAll() {
-		log := log.With(zap.Int64("collectionID", collection))
-		replica := s.meta.ReplicaManager.GetByCollectionAndNode(collection, node)
-		if replica == nil {
-			continue
-		}
-		err := s.meta.ReplicaManager.RemoveNode(replica.GetID(), node)
-		if err != nil {
-			log.Warn("failed to remove node from collection's replicas",
-				zap.Int64("replicaID", replica.GetID()),
-				zap.Error(err),
-			)
-		}
-		log.Info("remove node from replica",
-			zap.Int64("replicaID", replica.GetID()))
+	rgName, err := s.meta.ResourceManager.HandleNodeDown(node)
+	if err != nil {
+		log.Warn("HandleNodeDown: failed to remove node from resource group",
+			zap.Int64("nodeID", node),
+			zap.Error(err),
+		)
 	}
+
+	log.Info("HandleNodeDown: remove node from resource group",
+		zap.Int64("nodeID", node),
+		zap.String("resourceGroup", rgName),
+	)
 
 	// Clear tasks
 	s.taskScheduler.RemoveByNode(node)
-}
-
-// checkReplicas checks whether replica contains offline node, and remove those nodes
-func (s *Server) checkReplicas() {
-	for _, collection := range s.meta.CollectionManager.GetAll() {
-		log := log.With(zap.Int64("collectionID", collection))
-		replicas := s.meta.ReplicaManager.GetByCollection(collection)
-		for _, replica := range replicas {
-			replica := replica.Clone()
-			toRemove := make([]int64, 0)
-			for node := range replica.Nodes {
-				if s.nodeMgr.Get(node) == nil {
-					toRemove = append(toRemove, node)
-				}
-			}
-
-			if len(toRemove) > 0 {
-				log := log.With(
-					zap.Int64("replicaID", replica.GetID()),
-					zap.Int64s("offlineNodes", toRemove),
-				)
-				log.Info("some nodes are offline, remove them from replica", zap.Any("toRemove", toRemove))
-				replica.RemoveNode(toRemove...)
-				err := s.meta.ReplicaManager.Put(replica)
-				if err != nil {
-					log.Warn("failed to remove offline nodes from replica")
-				}
-			}
-		}
-	}
 }
