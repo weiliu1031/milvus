@@ -123,12 +123,14 @@ func (suite *ServiceSuite) SetupTest() {
 
 	suite.store = meta.NewMetaStore(suite.kv)
 	suite.dist = meta.NewDistributionManager()
-	suite.meta = meta.NewMeta(params.RandomIncrementIDAllocator(), suite.store)
+	suite.nodeMgr = session.NewNodeManager()
+	suite.meta = meta.NewMeta(params.RandomIncrementIDAllocator(), suite.store, suite.nodeMgr)
 	suite.broker = meta.NewMockBroker(suite.T())
 	suite.targetMgr = meta.NewTargetManager(suite.broker, suite.meta)
-	suite.nodeMgr = session.NewNodeManager()
 	for _, node := range suite.nodes {
 		suite.nodeMgr.Add(session.NewNodeInfo(node, "localhost"))
+		err := suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, node)
+		suite.NoError(err)
 	}
 	suite.cluster = session.NewMockCluster(suite.T())
 	suite.jobScheduler = job.NewScheduler()
@@ -746,7 +748,9 @@ func (suite *ServiceSuite) TestLoadBalanceFailed() {
 		suite.Contains(resp.Reason, "failed to balance segments")
 		suite.Contains(resp.Reason, task.ErrTaskCanceled.Error())
 
+		suite.nodeMgr.Add(session.NewNodeInfo(10, "localhost"))
 		suite.meta.ReplicaManager.AddNode(replicas[0].ID, 10)
+		suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 10)
 		req.SourceNodeIDs = []int64{10}
 		resp, err = server.LoadBalance(ctx, req)
 		suite.NoError(err)
@@ -970,6 +974,11 @@ func (suite *ServiceSuite) TestGetShardLeadersFailed() {
 		suite.Equal(commonpb.ErrorCode_NoReplicaAvailable, resp.Status.ErrorCode)
 
 		// Segment not fully loaded
+		for _, node := range suite.nodes {
+			suite.dist.SegmentDistManager.Update(node)
+			suite.dist.ChannelDistManager.Update(node)
+			suite.dist.LeaderViewManager.Update(node)
+		}
 		suite.updateChannelDistWithoutSegment(collection)
 		suite.fetchHeartbeats(time.Now())
 		resp, err = server.GetShardLeaders(ctx, req)
