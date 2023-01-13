@@ -423,6 +423,30 @@ func (coord *QueryCoordMock) GetShardLeaders(ctx context.Context, req *querypb.G
 	}, nil
 }
 
+func (coord *QueryCoordMock) CreateResourceGroup(ctx context.Context, req *milvuspb.CreateResourceGroupRequest) (*commonpb.Status, error) {
+	return nil, nil
+}
+
+func (coord *QueryCoordMock) DropResourceGroup(ctx context.Context, req *milvuspb.DropResourceGroupRequest) (*commonpb.Status, error) {
+	return nil, nil
+}
+
+func (coord *QueryCoordMock) TransferNode(ctx context.Context, req *milvuspb.TransferNodeRequest) (*commonpb.Status, error) {
+	return nil, nil
+}
+
+func (coord *QueryCoordMock) TransferReplica(ctx context.Context, req *querypb.TransferReplicaRequest) (*commonpb.Status, error) {
+	return nil, nil
+}
+
+func (coord *QueryCoordMock) ListResourceGroup(ctx context.Context, req *milvuspb.ListResourceGroupRequest) (*milvuspb.ListResourceGroupResponse, error) {
+	return nil, nil
+}
+
+func (coord *QueryCoordMock) DescribeResourceGroup(ctx context.Context, req *querypb.DescribeResourceGroupRequest) (*querypb.DescribeResourceGroupResponse, error) {
+	return nil, nil
+}
+
 func NewQueryCoordMock(opts ...QueryCoordMockOption) *QueryCoordMock {
 	coord := &QueryCoordMock{
 		nodeID:              UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt()),

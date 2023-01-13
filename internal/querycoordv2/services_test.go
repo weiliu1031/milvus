@@ -326,6 +326,72 @@ func (suite *ServiceSuite) TestLoadCollection() {
 	suite.Contains(resp.Reason, ErrNotHealthy.Error())
 }
 
+func (suite *ServiceSuite) TestResourceGroup() {
+	ctx := context.Background()
+	server := suite.server
+
+	createRG := &milvuspb.CreateResourceGroupRequest{
+		ResourceGroup: "rg1",
+	}
+
+	resp, err := server.CreateResourceGroup(ctx, createRG)
+	suite.NoError(err)
+	suite.Equal(commonpb.ErrorCode_Success, resp.ErrorCode)
+
+	resp, err = server.CreateResourceGroup(ctx, createRG)
+	suite.Equal(commonpb.ErrorCode_UnexpectedError, resp.ErrorCode)
+	suite.Contains(resp.Reason, ErrCreateResourceGroupFailed.Error())
+	suite.Contains(resp.Reason, meta.ErrRGAlreadyExist.Error())
+
+	listRG := &milvuspb.ListResourceGroupRequest{}
+	resp1, err := server.ListResourceGroup(ctx, listRG)
+	suite.NoError(err)
+	suite.Equal(commonpb.ErrorCode_Success, resp1.Status.ErrorCode)
+	suite.Len(resp1.ResourceGroups, 2)
+
+	describeRG := &querypb.DescribeResourceGroupRequest{
+		ResourceGroup: "rg1",
+	}
+	resp2, err := server.DescribeResourceGroup(ctx, describeRG)
+	suite.NoError(err)
+	suite.Equal(commonpb.ErrorCode_Success, resp2.Status.ErrorCode)
+	suite.Equal("rg1", resp2.GetResourceGroup().GetName())
+	suite.Equal(int32(0), resp2.GetResourceGroup().GetCapacity())
+	suite.Equal(int32(0), resp2.GetResourceGroup().GetNumAvailableNode())
+
+	dropRG := &milvuspb.DropResourceGroupRequest{
+		ResourceGroup: "rg1",
+	}
+
+	resp3, err := server.DropResourceGroup(ctx, dropRG)
+	suite.NoError(err)
+	suite.Equal(commonpb.ErrorCode_Success, resp3.ErrorCode)
+
+	resp4, err := server.ListResourceGroup(ctx, listRG)
+	suite.NoError(err)
+	suite.Equal(commonpb.ErrorCode_Success, resp4.Status.ErrorCode)
+	suite.Len(resp4.GetResourceGroups(), 1)
+}
+
+func (suite *ServiceSuite) TestTransfer() {
+	ctx := context.Background()
+	server := suite.server
+
+	err := server.meta.ResourceManager.AddResourceGroup("rg1")
+	suite.NoError(err)
+	err = server.meta.ResourceManager.AddResourceGroup("rg2")
+	suite.NoError(err)
+	// test transfer node
+	resp, err := server.TransferNode(ctx, &milvuspb.TransferNodeRequest{
+		SourceResourceGroup: meta.DefaultResourceGroupName,
+		TargetResourceGroup: "rg1",
+	})
+	suite.Equal(commonpb.ErrorCode_Success, resp.ErrorCode)
+	nodes, err := server.meta.ResourceManager.GetNodes("rg1")
+	suite.NoError(err)
+	suite.Len(nodes, 1)
+}
+
 func (suite *ServiceSuite) TestLoadCollectionFailed() {
 	suite.loadAll()
 	ctx := context.Background()
