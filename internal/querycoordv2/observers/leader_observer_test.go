@@ -306,6 +306,7 @@ func (suite *LeaderObserverTestSuite) TestSyncRemovedSegments() {
 			{
 				Type:      querypb.SyncType_Remove,
 				SegmentID: 3,
+				NodeID:    2,
 			},
 		},
 	}
@@ -357,6 +358,7 @@ func (suite *LeaderObserverTestSuite) TestIgnoreSyncRemovedSegments() {
 			{
 				Type:      querypb.SyncType_Remove,
 				SegmentID: 3,
+				NodeID:    2,
 			},
 		},
 	}

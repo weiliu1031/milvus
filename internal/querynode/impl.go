@@ -1353,14 +1353,13 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 			Reason:    "shard not exist",
 		}, nil
 	}
+
+	removeActions := make([]*querypb.SyncAction, 0)
 	for _, action := range req.GetActions() {
 		log.Info("sync action", zap.String("Action", action.GetType().String()), zap.Int64("segmentID", action.SegmentID))
 		switch action.GetType() {
 		case querypb.SyncType_Remove:
-			shardCluster.ReleaseSegments(ctx, &querypb.ReleaseSegmentsRequest{
-				SegmentIDs: []UniqueID{action.GetSegmentID()},
-				Scope:      querypb.DataScope_Historical,
-			}, true)
+			removeActions = append(removeActions, action)
 		case querypb.SyncType_Set:
 			shardCluster.SyncSegments([]*querypb.ReplicaSegmentsInfo{
 				{
@@ -1377,6 +1376,14 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 				Reason:    "unexpected action type",
 			}, nil
 		}
+	}
+
+	for _, action := range removeActions {
+		shardCluster.ReleaseSegments(ctx, &querypb.ReleaseSegmentsRequest{
+			SegmentIDs: []UniqueID{action.GetSegmentID()},
+			Scope:      querypb.DataScope_Historical,
+			NodeID:     action.NodeID,
+		}, true)
 	}
 
 	return &commonpb.Status{

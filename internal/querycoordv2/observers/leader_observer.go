@@ -127,16 +127,15 @@ func (o *LeaderObserver) findNeedRemovedSegments(leaderView *meta.LeaderView, di
 	for _, s := range dists {
 		distMap[s.GetID()] = struct{}{}
 	}
-	for sid := range leaderView.Segments {
+	for sid, s := range leaderView.Segments {
 		_, ok := distMap[sid]
-		existInCurrentTarget := o.target.GetHistoricalSegment(leaderView.CollectionID, sid, meta.CurrentTarget) != nil
-		existInNextTarget := o.target.GetHistoricalSegment(leaderView.CollectionID, sid, meta.NextTarget) != nil
-		if ok || existInCurrentTarget || existInNextTarget {
+		if ok {
 			continue
 		}
 		ret = append(ret, &querypb.SyncAction{
 			Type:      querypb.SyncType_Remove,
 			SegmentID: sid,
+			NodeID:    s.NodeID,
 		})
 	}
 	return ret

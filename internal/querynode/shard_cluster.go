@@ -552,21 +552,18 @@ func (sc *ShardCluster) LoadSegments(ctx context.Context, req *querypb.LoadSegme
 // ReleaseSegments releases segments via ShardCluster.
 // ShardCluster will wait all on-going search until finished, update the current version,
 // then release the segments through follower.
-func (sc *ShardCluster) ReleaseSegments(ctx context.Context, req *querypb.ReleaseSegmentsRequest, force bool) error {
+func (sc *ShardCluster) ReleaseSegments(ctx context.Context, req *querypb.ReleaseSegmentsRequest, updateLeaderView bool) error {
 	log := sc.getLogger()
 	// add common log fields
 	log = log.With(zap.Int64s("segmentIDs", req.GetSegmentIDs()),
 		zap.String("scope", req.GetScope().String()),
-		zap.Bool("force", force))
+		zap.Bool("force", updateLeaderView))
 
 	var err error
 	var entries []SegmentEntry
 	if req.Scope != querypb.DataScope_Streaming {
 		entries = lo.Map(req.GetSegmentIDs(), func(segmentID int64, _ int) SegmentEntry {
 			nodeID := req.GetNodeID()
-			if force {
-				nodeID = wildcardNodeID
-			}
 			return SegmentEntry{
 				SegmentID: segmentID,
 				NodeID:    nodeID,
@@ -577,25 +574,27 @@ func (sc *ShardCluster) ReleaseSegments(ctx context.Context, req *querypb.Releas
 	// release operation,
 	// requires sc.mut read lock held
 	releaseFn := func() {
-		// try to release segments from nodes
-		node, ok := sc.getNodeImpl(req.GetNodeID())
-		if !ok {
-			log.Warn("node not in cluster", zap.Int64("nodeID", req.NodeID))
-			err = fmt.Errorf("node %d not in cluster ", req.NodeID)
-			return
-		}
+		if !updateLeaderView {
+			// try to release segments from nodes
+			node, ok := sc.getNodeImpl(req.GetNodeID())
+			if !ok {
+				log.Warn("node not in cluster", zap.Int64("nodeID", req.NodeID))
+				err = fmt.Errorf("node %d not in cluster ", req.NodeID)
+				return
+			}
 
-		req = proto.Clone(req).(*querypb.ReleaseSegmentsRequest)
-		req.Base.TargetID = req.GetNodeID()
-		resp, rerr := node.client.ReleaseSegments(ctx, req)
-		if rerr != nil {
-			log.Warn("failed to dispatch release segment request", zap.Error(rerr))
-			err = rerr
-			return
-		}
-		if resp.GetErrorCode() != commonpb.ErrorCode_Success {
-			log.Warn("follower release segment failed", zap.String("reason", resp.GetReason()))
-			err = fmt.Errorf("follower %d failed to release segment, reason %s", req.NodeID, resp.GetReason())
+			req = proto.Clone(req).(*querypb.ReleaseSegmentsRequest)
+			req.Base.TargetID = req.GetNodeID()
+			resp, rerr := node.client.ReleaseSegments(ctx, req)
+			if rerr != nil {
+				log.Warn("failed to dispatch release segment request", zap.Error(rerr))
+				err = rerr
+				return
+			}
+			if resp.GetErrorCode() != commonpb.ErrorCode_Success {
+				log.Warn("follower release segment failed", zap.String("reason", resp.GetReason()))
+				err = fmt.Errorf("follower %d failed to release segment, reason %s", req.NodeID, resp.GetReason())
+			}
 		}
 	}
 
