@@ -18,6 +18,7 @@ package balance
 
 import (
 	"context"
+	"math"
 	"sort"
 
 	"github.com/samber/lo"
@@ -261,7 +262,8 @@ func (b *RowCountBasedBalancer) genChannelPlan(replica *meta.Replica, onlineNode
 
 		start := int64(0)
 		end := int64(len(nodes) - 1)
-		averageChannel := len(channels) / len(onlineNodes)
+
+		averageChannel := int(math.Ceil(float64(len(channels)) / float64(len(onlineNodes))))
 		if averageChannel == 0 || getChannelNum(nodes[start]) >= getChannelNum(nodes[end]) {
 			return channelPlans
 		}
@@ -272,7 +274,7 @@ func (b *RowCountBasedBalancer) genChannelPlan(replica *meta.Replica, onlineNode
 			// segment to move out
 			sourceNode := nodes[end]
 
-			if len(channelsOnNode[targetNode]) >= averageChannel {
+			if len(channelsOnNode[sourceNode])-1 < averageChannel {
 				break
 			}
 

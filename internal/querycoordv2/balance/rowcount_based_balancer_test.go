@@ -281,18 +281,38 @@ func (suite *RowCountBasedBalancerTestSuite) TestBalance() {
 			distributions: map[int64][]*meta.Segment{},
 			distributionChannels: map[int64][]*meta.DmChannel{
 				1: {
-					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v1"}, Node: 2},
-					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v2"}, Node: 2},
+					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v1"}, Node: 1},
+					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v2"}, Node: 1},
 				},
 				2: {
 					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v3"}, Node: 2},
 				},
 				3: {
-					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v4"}, Node: 2},
+					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v4"}, Node: 3},
 				},
 			},
 			expectPlans:        []SegmentAssignPlan{},
 			expectChannelPlans: []ChannelAssignPlan{},
+		},
+		{
+			name:          "balance unstable view",
+			nodes:         []int64{1, 2, 3},
+			segmentCnts:   []int{0, 0, 0},
+			states:        []session.State{session.NodeStateNormal, session.NodeStateNormal, session.NodeStateNormal},
+			shouldMock:    true,
+			distributions: map[int64][]*meta.Segment{},
+			distributionChannels: map[int64][]*meta.DmChannel{
+				1: {
+					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v1"}, Node: 1},
+					{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v2"}, Node: 1},
+				},
+				2: {},
+				3: {},
+			},
+			expectPlans: []SegmentAssignPlan{},
+			expectChannelPlans: []ChannelAssignPlan{
+				{Channel: &meta.DmChannel{VchannelInfo: &datapb.VchannelInfo{CollectionID: 1, ChannelName: "v1"}, Node: 1}, From: 1, To: 2, ReplicaID: 1},
+			},
 		},
 		{
 			name:            "already balanced",
