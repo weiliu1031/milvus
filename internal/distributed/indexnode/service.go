@@ -97,12 +97,12 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	ctx, cancel := context.WithCancel(s.loopCtx)
 	defer cancel()
 
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
 
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
@@ -222,9 +222,7 @@ func (s *Server) Stop() error {
 			return err
 		}
 	}
-	if s.indexnode != nil {
-		s.indexnode.Stop()
-	}
+
 	s.loopCancel()
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
@@ -234,6 +232,10 @@ func (s *Server) Stop() error {
 		s.grpcServer.GracefulStop()
 	}
 	s.loopWg.Wait()
+
+	if s.indexnode != nil {
+		s.indexnode.Stop()
+	}
 
 	return nil
 }
