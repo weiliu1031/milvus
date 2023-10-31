@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -376,6 +377,7 @@ func (mr *MilvusRoles) Run() {
 	for _, coord := range coordinators {
 		if coord != nil {
 			coord.Stop()
+			time.Sleep(10 * time.Second)
 		}
 	}
 	log.Info("All coordinators have stopped")
