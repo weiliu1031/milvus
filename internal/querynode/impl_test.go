@@ -324,6 +324,19 @@ func TestImpl_LoadSegments(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
 	})
 
+	t.Run("segment already loaded", func(t *testing.T) {
+		node.metaReplica.addSegment(1, 1, 1, "channel-1", 0, nil, commonpb.SegmentState_Sealed)
+		req.Infos = []*queryPb.SegmentLoadInfo{
+			{
+				SegmentID: 1,
+			},
+		}
+		req.NeedTransfer = false
+		status, err := node.LoadSegments(ctx, req)
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
+	})
+
 	t.Run("target not match", func(t *testing.T) {
 		req := &queryPb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
