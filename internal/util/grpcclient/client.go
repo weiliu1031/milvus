@@ -51,10 +51,12 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-// GrpcClient abstracts client of grpc
-type GrpcClient[T interface {
+type ComponentWithStates interface {
 	GetComponentStates(ctx context.Context, in *milvuspb.GetComponentStatesRequest, opts ...grpc.CallOption) (*milvuspb.ComponentStates, error)
-}] interface {
+}
+
+// GrpcClient abstracts client of grpc
+type GrpcClient[T ComponentWithStates] interface {
 	SetRole(string)
 	GetRole() string
 	SetGetAddrFunc(func() (string, error))
