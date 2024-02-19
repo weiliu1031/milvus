@@ -74,7 +74,7 @@ func (suite *LeaderCheckerTestSuite) SetupTest() {
 
 	distManager := meta.NewDistributionManager()
 	targetManager := meta.NewTargetManager(suite.broker, suite.meta)
-	suite.checker = NewLeaderChecker(suite.meta, distManager, targetManager, suite.nodeMgr)
+	suite.checker = NewLeaderChecker(suite.meta, distManager, targetManager, suite.nodeMgr, suite.broker)
 }
 
 func (suite *LeaderCheckerTestSuite) TearDownTest() {

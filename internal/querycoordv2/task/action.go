@@ -32,12 +32,16 @@ const (
 	ActionTypeGrow ActionType = iota + 1
 	ActionTypeReduce
 	ActionTypeUpdate
+	ActionTypeSetSegment    // add segment to leader view
+	ActionTypeRemoveSegment // remove segment from leader view
 )
 
 var ActionTypeName = map[ActionType]string{
-	ActionTypeGrow:   "Grow",
-	ActionTypeReduce: "Reduce",
-	ActionTypeUpdate: "Update",
+	ActionTypeGrow:          "Grow",
+	ActionTypeReduce:        "Reduce",
+	ActionTypeUpdate:        "Update",
+	ActionTypeSetSegment:    "SetSegment",
+	ActionTypeRemoveSegment: "RemoveSegment",
 }
 
 func (t ActionType) String() string {
@@ -82,6 +86,8 @@ type SegmentAction struct {
 	segmentID UniqueID
 	scope     querypb.DataScope
 
+	syncAction *querypb.SyncAction
+
 	rpcReturned atomic.Bool
 }
 
@@ -99,6 +105,23 @@ func NewSegmentActionWithScope(nodeID UniqueID, typ ActionType, shard string, se
 	}
 }
 
+// LeaderViewAction used to correct leader view, try to set/remove segment on delegator
+// and it's target node should be delegator's node
+func NewLeaderViewAction(nodeID UniqueID, typ ActionType, shard string, segmentID UniqueID, syncAction *querypb.SyncAction) *SegmentAction {
+	base := NewBaseAction(nodeID, typ, shard)
+	return &SegmentAction{
+		BaseAction:  base,
+		segmentID:   segmentID,
+		scope:       querypb.DataScope_Historical,
+		rpcReturned: *atomic.NewBool(false),
+		syncAction:  syncAction,
+	}
+}
+
+func (action *SegmentAction) SyncAction() *querypb.SyncAction {
+	return action.syncAction
+}
+
 func (action *SegmentAction) SegmentID() UniqueID {
 	return action.segmentID
 }
@@ -108,13 +131,14 @@ func (action *SegmentAction) Scope() querypb.DataScope {
 }
 
 func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	if action.Type() == ActionTypeGrow {
+	switch action.Type() {
+	case ActionTypeGrow:
 		leaderSegmentDist := distMgr.LeaderViewManager.GetSealedSegmentDist(action.SegmentID())
 		nodeSegmentDist := distMgr.SegmentDistManager.GetSegmentDist(action.SegmentID())
 		return lo.Contains(leaderSegmentDist, action.Node()) &&
 			lo.Contains(nodeSegmentDist, action.Node()) &&
 			action.rpcReturned.Load()
-	} else if action.Type() == ActionTypeReduce {
+	case ActionTypeReduce:
 		// FIXME: Now shard leader's segment view is a map of segment ID to node ID,
 		// loading segment replaces the node ID with the new one,
 		// which confuses the condition of finishing,
@@ -132,7 +156,11 @@ func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool 
 			return true
 		}
 		return action.rpcReturned.Load()
-	} else if action.Type() == ActionTypeUpdate {
+	case ActionTypeUpdate:
+		return action.rpcReturned.Load()
+	case ActionTypeSetSegment:
+		return action.rpcReturned.Load()
+	case ActionTypeRemoveSegment:
 		return action.rpcReturned.Load()
 	}
 

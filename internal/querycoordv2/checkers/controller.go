@@ -67,7 +67,7 @@ func NewCheckerController(
 		utils.SegmentChecker: NewSegmentChecker(meta, dist, targetMgr, balancer, nodeMgr),
 		utils.BalanceChecker: NewBalanceChecker(meta, balancer, nodeMgr, scheduler),
 		utils.IndexChecker:   NewIndexChecker(meta, dist, broker, nodeMgr),
-		utils.LeaderChecker:  NewLeaderChecker(meta, dist, targetMgr, nodeMgr),
+		utils.LeaderChecker:  NewLeaderChecker(meta, dist, targetMgr, nodeMgr, broker),
 	}
 
 	manualCheckChs := map[utils.CheckerType]chan struct{}{

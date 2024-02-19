@@ -41,6 +41,8 @@ type LeaderChecker struct {
 	dist    *meta.DistributionManager
 	target  *meta.TargetManager
 	nodeMgr *session.NodeManager
+
+	broker meta.Broker
 }
 
 func NewLeaderChecker(
@@ -48,6 +50,7 @@ func NewLeaderChecker(
 	dist *meta.DistributionManager,
 	target *meta.TargetManager,
 	nodeMgr *session.NodeManager,
+	broker meta.Broker,
 ) *LeaderChecker {
 	return &LeaderChecker{
 		checkerActivation: newCheckerActivation(),
@@ -55,6 +58,7 @@ func NewLeaderChecker(
 		dist:              dist,
 		target:            target,
 		nodeMgr:           nodeMgr,
+		broker:            broker,
 	}
 }
 
@@ -139,7 +143,28 @@ func (c *LeaderChecker) findNeedLoadedSegments(ctx context.Context, replica int6
 			log.RatedDebug(10, "leader checker append a segment to set",
 				zap.Int64("segmentID", s.GetID()),
 				zap.Int64("nodeID", s.Node))
-			action := task.NewSegmentActionWithScope(s.Node, task.ActionTypeGrow, s.GetInsertChannel(), s.GetID(), querypb.DataScope_Historical)
+
+			resp, err := c.broker.GetSegmentInfo(ctx, s.ID)
+			if err != nil || len(resp.GetInfos()) == 0 {
+				log.Warn("failed to get segment info from DataCoord", zap.Error(err))
+				return nil
+			}
+
+			channel := c.target.GetDmChannel(s.CollectionID, s.InsertChannel, meta.NextTargetFirst)
+			if channel == nil {
+				return nil
+			}
+			loadInfo := utils.PackSegmentLoadInfo(resp.Infos[0], channel.GetSeekPosition(), nil)
+
+			syncAction := &querypb.SyncAction{
+				Type:        querypb.SyncType_Set,
+				PartitionID: s.PartitionID,
+				SegmentID:   s.ID,
+				NodeID:      s.Node,
+				Version:     s.Version,
+				Info:        loadInfo,
+			}
+			action := task.NewLeaderViewAction(leaderView.ID, task.ActionTypeSetSegment, s.GetInsertChannel(), s.GetID(), syncAction)
 			t, err := task.NewSegmentTask(
 				ctx,
 				params.Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond),
@@ -157,7 +182,7 @@ func (c *LeaderChecker) findNeedLoadedSegments(ctx context.Context, replica int6
 				continue
 			}
 			// index task shall have lower or equal priority than balance task
-			t.SetPriority(task.TaskPriorityHigh)
+			t.SetPriority(task.TaskPriorityNormal)
 			t.SetReason("add segment to leader view")
 			ret = append(ret, t)
 		}
@@ -190,7 +215,13 @@ func (c *LeaderChecker) findNeedRemovedSegments(ctx context.Context, replica int
 			zap.Int64("segmentID", sid),
 			zap.Int64("nodeID", s.NodeID))
 
-		action := task.NewSegmentActionWithScope(s.NodeID, task.ActionTypeReduce, leaderView.Channel, sid, querypb.DataScope_Historical)
+		syncAction := &querypb.SyncAction{
+			Type:      querypb.SyncType_Remove,
+			SegmentID: sid,
+			NodeID:    s.NodeID,
+		}
+
+		action := task.NewLeaderViewAction(leaderView.ID, task.ActionTypeSetSegment, leaderView.Channel, sid, syncAction)
 		t, err := task.NewSegmentTask(
 			ctx,
 			paramtable.Get().QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond),
@@ -207,7 +238,7 @@ func (c *LeaderChecker) findNeedRemovedSegments(ctx context.Context, replica int
 			continue
 		}
 
-		t.SetPriority(task.TaskPriorityHigh)
+		t.SetPriority(task.TaskPriorityNormal)
 		t.SetReason("remove segment from leader view")
 		ret = append(ret, t)
 	}

@@ -170,6 +170,20 @@ func (mgr *LeaderViewManager) GetLeadersByGrowingSegment(segmentID int64) *Leade
 	return nil
 }
 
+func (mgr *LeaderViewManager) GetLeaderBySealedSegment(segmentID int64) *LeaderView {
+	mgr.rwmutex.RLock()
+	defer mgr.rwmutex.RUnlock()
+
+	for _, views := range mgr.views {
+		for _, view := range views {
+			if _, ok := view.Segments[segmentID]; ok {
+				return view
+			}
+		}
+	}
+	return nil
+}
+
 // GetGrowingSegments returns all segments of the given collection and node.
 func (mgr *LeaderViewManager) GetGrowingSegments(collectionID, nodeID int64) map[int64]*Segment {
 	mgr.rwmutex.RLock()

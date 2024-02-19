@@ -26,6 +26,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -33,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/indexparams"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -136,6 +138,9 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, step int) {
 
 	case ActionTypeReduce:
 		ex.releaseSegment(task, step)
+
+	case ActionTypeSetSegment, ActionTypeRemoveSegment:
+		ex.syncDistribution(task, step)
 	}
 }
 
@@ -309,6 +314,67 @@ func (ex *Executor) releaseSegment(task *SegmentTask, step int) {
 	}
 	elapsed := time.Since(startTs)
 	log.Info("release segment done", zap.Int64("taskID", task.ID()), zap.Duration("time taken", elapsed))
+}
+
+func (ex *Executor) syncDistribution(t *SegmentTask, step int) bool {
+	action := t.actions[0].(*SegmentAction)
+	log := log.With(
+		zap.Int64("collectionID", t.CollectionID()),
+		zap.Int64("replicaID", t.ReplicaID()),
+		zap.String("channelName", t.Shard()),
+		zap.Int64("segmentID", t.SegmentID()),
+		zap.Int64("nodeID", action.Node()),
+	)
+
+	collectionInfo, err := ex.broker.DescribeCollection(t.Context(), t.CollectionID())
+	if err != nil {
+		log.Warn("sync distribution failed, cannot get schema of collection", zap.Error(err))
+		return false
+	}
+
+	// Get collection index info
+	indexInfo, err := ex.broker.DescribeIndex(t.Context(), t.CollectionID())
+	if err != nil {
+		log.Warn("fail to get index info of collection", zap.Error(err))
+		return false
+	}
+
+	partitions, err := utils.GetPartitions(ex.meta.CollectionManager, t.CollectionID())
+	if err != nil {
+		log.Warn("sync distribution failed, cannot get partitions of collection", zap.Error(err))
+		return false
+	}
+
+	req := &querypb.SyncDistributionRequest{
+		Base: commonpbutil.NewMsgBase(
+			commonpbutil.WithMsgType(commonpb.MsgType_SyncDistribution),
+		),
+		CollectionID: t.CollectionID(),
+		ReplicaID:    t.ReplicaID(),
+		Channel:      t.Shard(),
+		Actions:      []*querypb.SyncAction{action.SyncAction()},
+		Schema:       collectionInfo.GetSchema(),
+		LoadMeta: &querypb.LoadMetaInfo{
+			LoadType:     ex.meta.GetLoadType(t.CollectionID()),
+			CollectionID: t.CollectionID(),
+			PartitionIDs: partitions,
+		},
+		Version:       time.Now().UnixNano(),
+		IndexInfoList: indexInfo,
+	}
+
+	resp, err := ex.cluster.SyncDistribution(t.Context(), action.Node(), req)
+	if err != nil {
+		log.Warn("failed to sync distribution", zap.Error(err))
+		return false
+	}
+
+	if resp.ErrorCode != commonpb.ErrorCode_Success {
+		log.Warn("failed to sync distribution", zap.String("reason", resp.GetReason()))
+		return false
+	}
+
+	return true
 }
 
 func (ex *Executor) executeDmChannelAction(task *ChannelTask, step int) {
