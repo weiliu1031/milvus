@@ -1318,6 +1318,16 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 }
 
 func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionResponse, error) {
+	resp := &querypb.GetDataDistributionResponse{}
+	var err error
+	req, err = node.preGetDataDistribution(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		resp, err = node.postGetDataDistribution(ctx, resp)
+	}()
+
 	log := log.Ctx(ctx).With(
 		zap.Int64("msgID", req.GetBase().GetMsgID()),
 		zap.Int64("nodeID", node.GetNodeID()),
@@ -1326,17 +1336,15 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		log.Warn("QueryNode.GetDataDistribution failed",
 			zap.Error(err))
 
-		return &querypb.GetDataDistributionResponse{
-			Status: merr.Status(err),
-		}, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 	defer node.lifetime.Done()
 
 	// check target matches
 	if err := merr.CheckTargetID(node.GetNodeID(), req.GetBase()); err != nil {
-		return &querypb.GetDataDistributionResponse{
-			Status: merr.Status(err),
-		}, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 
 	sealedSegments := node.manager.Segment.GetBy(segments.WithType(commonpb.SegmentState_Sealed))
@@ -1403,13 +1411,14 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		return true
 	})
 
-	return &querypb.GetDataDistributionResponse{
+	resp = &querypb.GetDataDistributionResponse{
 		Status:      merr.Success(),
 		NodeID:      node.GetNodeID(),
 		Segments:    segmentVersionInfos,
 		Channels:    channelVersionInfos,
 		LeaderViews: leaderViews,
-	}, nil
+	}
+	return resp, nil
 }
 
 func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDistributionRequest) (*commonpb.Status, error) {

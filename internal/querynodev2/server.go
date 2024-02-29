@@ -46,6 +46,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	grpcquerynodeclient "github.com/milvus-io/milvus/internal/distributed/querynode/client"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querynodev2/cluster"
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	"github.com/milvus-io/milvus/internal/querynodev2/optimizers"
@@ -85,6 +86,7 @@ var _ types.QueryNodeComponent = (*QueryNode)(nil)
 //	`rootCoord` is a grpc client of root coordinator.
 //	`indexCoord` is a grpc client of index coordinator.
 //	`stateCode` is current statement of this query node, indicating whether it's healthy.
+
 type QueryNode struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -130,6 +132,12 @@ type QueryNode struct {
 
 	// parameter turning hook
 	queryHook optimizers.QueryHook
+
+	injectionMode bool
+	// inject to request, before execute the logic in GetDataDistribution
+	preGetDataDistributionFunc func(ctx context.Context, req *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionRequest, error)
+	// inject to response, after execute the logic in GetDataDistribution
+	postGetDataDistributionFunc func(ctx context.Context, resp *querypb.GetDataDistributionResponse) (*querypb.GetDataDistributionResponse, error)
 }
 
 // NewQueryNode will return a QueryNode with abnormal state.
@@ -142,6 +150,7 @@ func NewQueryNode(ctx context.Context, factory dependency.Factory) *QueryNode {
 		lifetime: lifetime.NewLifetime(commonpb.StateCode_Abnormal),
 	}
 
+	node.injectionMode = true
 	node.tSafeManager = tsafe.NewTSafeReplica()
 	expr.Register("querynode", node)
 	return node
