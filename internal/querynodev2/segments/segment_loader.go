@@ -865,8 +865,8 @@ func (loader *segmentLoader) patchEntryNumber(ctx context.Context, segment *Loca
 		if err != nil {
 			return err
 		}
-
-		rowIDs, err := er.GetInt64FromPayload()
+		// todo:smellthemoon, need to check nulls here?
+		rowIDs, _, err := er.GetInt64FromPayload()
 		if err != nil {
 			return err
 		}

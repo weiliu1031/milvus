@@ -195,13 +195,13 @@ func (v *validateUtil) checkAligned(data []*schemapb.FieldData, schema *typeutil
 			}
 
 			if f.Nullable {
-				n += uint64(getNullsNumber(field.NullData))
+				n += uint64(getNullNumber(field.ValidData))
 			}
 
 			if n != numRows {
 				log.Warn("the num_rows of field is not equal to passed num_rows", zap.String("fieldName", field.GetFieldName()),
 					zap.Int64("fieldNumRows", int64(n)), zap.Int64("passedNumRows", int64(numRows)),
-					zap.Bools("NullData", field.GetNullData()))
+					zap.Bools("ValidData", field.GetValidData()))
 				return errNumRowsMismatch(field.GetFieldName(), n, numRows)
 			}
 		}
@@ -220,7 +220,7 @@ func (v *validateUtil) fillWithDefaultValue(data []*schemapb.FieldData, schema *
 		// if default value is not set, continue
 		// compatible with 2.2.x
 		if fieldSchema.GetDefaultValue() == nil {
-			err = checkNullData(field, fieldSchema, numRows)
+			err = checkValidData(field, fieldSchema, numRows)
 			if err != nil {
 				return err
 			}
@@ -232,74 +232,74 @@ func (v *validateUtil) fillWithDefaultValue(data []*schemapb.FieldData, schema *
 			switch sd := field.GetScalars().GetData().(type) {
 			case *schemapb.ScalarField_BoolData:
 				if len(sd.BoolData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of valid_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetBoolData()
-					sd.BoolData.Data = memsetLoop(sd.BoolData.Data, defaultValue, field.GetNullData())
+					sd.BoolData.Data = memsetLoop(sd.BoolData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			case *schemapb.ScalarField_IntData:
 				if len(sd.IntData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of null_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetIntData()
-					sd.IntData.Data = memsetLoop(sd.IntData.Data, defaultValue, field.GetNullData())
+					sd.IntData.Data = memsetLoop(sd.IntData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			case *schemapb.ScalarField_LongData:
 				if len(sd.LongData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of null_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetLongData()
-					sd.LongData.Data = memsetLoop(sd.LongData.Data, defaultValue, field.GetNullData())
+					sd.LongData.Data = memsetLoop(sd.LongData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			case *schemapb.ScalarField_FloatData:
 				if len(sd.FloatData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of null_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetFloatData()
-					sd.FloatData.Data = memsetLoop(sd.FloatData.Data, defaultValue, field.GetNullData())
+					sd.FloatData.Data = memsetLoop(sd.FloatData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			case *schemapb.ScalarField_DoubleData:
 				if len(sd.DoubleData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of null_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetDoubleData()
-					sd.DoubleData.Data = memsetLoop(sd.DoubleData.Data, defaultValue, field.GetNullData())
+					sd.DoubleData.Data = memsetLoop(sd.DoubleData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			case *schemapb.ScalarField_StringData:
 				if len(sd.StringData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of null_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetStringData()
-					sd.StringData.Data = memsetLoop(sd.StringData.Data, defaultValue, field.GetNullData())
+					sd.StringData.Data = memsetLoop(sd.StringData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			case *schemapb.ScalarField_ArrayData:
@@ -309,14 +309,14 @@ func (v *validateUtil) fillWithDefaultValue(data []*schemapb.FieldData, schema *
 
 			case *schemapb.ScalarField_JsonData:
 				if len(sd.JsonData.Data) != numRows {
-					if len(field.GetNullData()) != numRows {
-						return merr.WrapErrParameterInvalid(numRows, len(field.GetNullData()), "the length of null_data is wrong")
+					if len(field.GetValidData()) != numRows {
+						return merr.WrapErrParameterInvalid(numRows, len(field.GetValidData()), "the length of null_data is wrong")
 					}
 					defaultValue := fieldSchema.GetDefaultValue().GetBytesData()
-					sd.JsonData.Data = memsetLoop(sd.JsonData.Data, defaultValue, field.GetNullData())
+					sd.JsonData.Data = memsetLoop(sd.JsonData.Data, defaultValue, field.GetValidData())
 				}
 				if !fieldSchema.Nullable {
-					field.NullData = []bool{}
+					field.ValidData = []bool{}
 				}
 
 			default:
@@ -331,7 +331,7 @@ func (v *validateUtil) fillWithDefaultValue(data []*schemapb.FieldData, schema *
 			return merr.WrapErrParameterInvalidMsg(fmt.Sprintf("undefined data type:%s", field.Type.String()))
 		}
 
-		err = checkNullData(field, fieldSchema, numRows)
+		err = checkValidData(field, fieldSchema, numRows)
 		if err != nil {
 			return err
 		}
@@ -593,22 +593,22 @@ func verifyOverflowByRange(arr []int32, lb int64, ub int64) error {
 	return nil
 }
 
-func checkNullData(data *schemapb.FieldData, schema *schemapb.FieldSchema, numRows int) error {
+func checkValidData(data *schemapb.FieldData, schema *schemapb.FieldSchema, numRows int) error {
 	expectedNum := 0
-	// if nullable, the length of nullData is numRows
+	// if nullable, the length of ValidData is numRows
 	if schema.GetNullable() {
 		expectedNum = numRows
 	}
-	if len(data.GetNullData()) != expectedNum {
-		return merr.WrapErrParameterInvalid(numRows, len(data.GetNullData()), "the length of null_data is wrong")
+	if len(data.GetValidData()) != expectedNum {
+		return merr.WrapErrParameterInvalid(expectedNum, len(data.GetValidData()), "the length of null_data is wrong")
 	}
 	return nil
 }
 
-func getNullsNumber(nullData []bool) int {
+func getNullNumber(nullData []bool) int {
 	res := 0
 	for _, v := range nullData {
-		if v {
+		if !v {
 			res++
 		}
 	}

@@ -120,8 +120,8 @@ func (p *BinlogFile) ReadBool() ([]bool, error) {
 			log.Warn("Binlog file: binlog data type is not bool")
 			return nil, merr.WrapErrImportFailed("binlog data type is not bool")
 		}
-
-		data, err := event.PayloadReaderInterface.GetBoolFromPayload()
+		// todo: smellthemoon, support it
+		data, _, err := event.PayloadReaderInterface.GetBoolFromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read bool data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read bool data, error: %v", err))
@@ -164,7 +164,7 @@ func (p *BinlogFile) ReadInt8() ([]int8, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not int8")
 		}
 
-		data, err := event.PayloadReaderInterface.GetInt8FromPayload()
+		data, _, err := event.PayloadReaderInterface.GetInt8FromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read int8 data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read int8 data, error: %v", err))
@@ -207,7 +207,7 @@ func (p *BinlogFile) ReadInt16() ([]int16, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not int16")
 		}
 
-		data, err := event.PayloadReaderInterface.GetInt16FromPayload()
+		data, _, err := event.PayloadReaderInterface.GetInt16FromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read int16 data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read int16 data, error: %v", err))
@@ -250,7 +250,7 @@ func (p *BinlogFile) ReadInt32() ([]int32, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not int32")
 		}
 
-		data, err := event.PayloadReaderInterface.GetInt32FromPayload()
+		data, _, err := event.PayloadReaderInterface.GetInt32FromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read int32 data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read int32 data, error: %v", err))
@@ -293,7 +293,7 @@ func (p *BinlogFile) ReadInt64() ([]int64, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not int64")
 		}
 
-		data, err := event.PayloadReaderInterface.GetInt64FromPayload()
+		data, _, err := event.PayloadReaderInterface.GetInt64FromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read int64 data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read int64 data, error: %v", err))
@@ -336,7 +336,7 @@ func (p *BinlogFile) ReadFloat() ([]float32, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not float")
 		}
 
-		data, err := event.PayloadReaderInterface.GetFloatFromPayload()
+		data, _, err := event.PayloadReaderInterface.GetFloatFromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read float data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read float data, error: %v", err))
@@ -379,7 +379,7 @@ func (p *BinlogFile) ReadDouble() ([]float64, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not double")
 		}
 
-		data, err := event.PayloadReaderInterface.GetDoubleFromPayload()
+		data, _, err := event.PayloadReaderInterface.GetDoubleFromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read double data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read double data, error: %v", err))
@@ -423,7 +423,7 @@ func (p *BinlogFile) ReadVarchar() ([]string, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not varchar")
 		}
 
-		data, err := event.PayloadReaderInterface.GetStringFromPayload()
+		data, _, err := event.PayloadReaderInterface.GetStringFromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read varchar data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read varchar data, error: %v", err))
@@ -466,7 +466,7 @@ func (p *BinlogFile) ReadJSON() ([][]byte, error) {
 			return nil, merr.WrapErrImportFailed("binlog data type is not JSON")
 		}
 
-		data, err := event.PayloadReaderInterface.GetJSONFromPayload()
+		data, _, err := event.PayloadReaderInterface.GetJSONFromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read JSON data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read JSON data, error: %v", err))
@@ -508,8 +508,7 @@ func (p *BinlogFile) ReadArray() ([]*schemapb.ScalarField, error) {
 			log.Warn("Binlog file: binlog data type is not Array")
 			return nil, merr.WrapErrImportFailed("binlog data type is not Array")
 		}
-
-		data, err := event.PayloadReaderInterface.GetArrayFromPayload()
+		data, _, err := event.PayloadReaderInterface.GetArrayFromPayload()
 		if err != nil {
 			log.Warn("Binlog file: failed to read Array data", zap.Error(err))
 			return nil, merr.WrapErrImportFailed(fmt.Sprintf("failed to read Array data, error: %v", err))

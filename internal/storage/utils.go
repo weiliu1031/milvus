@@ -518,49 +518,61 @@ func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *sche
 
 		case schemapb.DataType_Bool:
 			srcData := srcFields[field.FieldID].GetScalars().GetBoolData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &BoolFieldData{
-				Data: make([]bool, 0, len(srcData)),
+				Data:      make([]bool, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 
 			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int8:
 			srcData := srcFields[field.FieldID].GetScalars().GetIntData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &Int8FieldData{
-				Data: make([]int8, 0, len(srcData)),
+				Data:      make([]int8, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 			int8SrcData := make([]int8, len(srcData))
 			for i := 0; i < len(srcData); i++ {
 				int8SrcData[i] = int8(srcData[i])
 			}
 			fieldData.Data = append(fieldData.Data, int8SrcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 
 			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int16:
 			srcData := srcFields[field.FieldID].GetScalars().GetIntData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &Int16FieldData{
-				Data: make([]int16, 0, len(srcData)),
+				Data:      make([]int16, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 			int16SrcData := make([]int16, len(srcData))
 			for i := 0; i < len(srcData); i++ {
 				int16SrcData[i] = int16(srcData[i])
 			}
 			fieldData.Data = append(fieldData.Data, int16SrcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 
 			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int32:
 			srcData := srcFields[field.FieldID].GetScalars().GetIntData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &Int32FieldData{
-				Data: make([]int32, 0, len(srcData)),
+				Data:      make([]int32, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 
 			idata.Data[field.FieldID] = fieldData
 
@@ -582,56 +594,74 @@ func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *sche
 				srcData := srcFields[field.FieldID].GetScalars().GetLongData().GetData()
 				fieldData.Data = make([]int64, 0, len(srcData))
 				fieldData.Data = append(fieldData.Data, srcData...)
+				validData := srcFields[field.FieldID].GetValidData()
+				fieldData.ValidData = make([]bool, 0, len(validData))
+				fieldData.ValidData = append(fieldData.ValidData, validData...)
 			}
 
 			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Float:
 			srcData := srcFields[field.FieldID].GetScalars().GetFloatData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &FloatFieldData{
-				Data: make([]float32, 0, len(srcData)),
+				Data:      make([]float32, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 
 			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Double:
 			srcData := srcFields[field.FieldID].GetScalars().GetDoubleData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &DoubleFieldData{
-				Data: make([]float64, 0, len(srcData)),
+				Data:      make([]float64, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 
 			idata.Data[field.FieldID] = fieldData
 		case schemapb.DataType_String, schemapb.DataType_VarChar:
 			srcData := srcFields[field.FieldID].GetScalars().GetStringData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &StringFieldData{
-				Data: make([]string, 0, len(srcData)),
+				Data:      make([]string, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 			idata.Data[field.FieldID] = fieldData
 		case schemapb.DataType_Array:
 			srcData := srcFields[field.FieldID].GetScalars().GetArrayData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &ArrayFieldData{
 				ElementType: field.GetElementType(),
 				Data:        make([]*schemapb.ScalarField, 0, len(srcData)),
+				ValidData:   make([]bool, 0, len(validData)),
 			}
 
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 			idata.Data[field.FieldID] = fieldData
 		case schemapb.DataType_JSON:
 			srcData := srcFields[field.FieldID].GetScalars().GetJsonData().GetData()
+			validData := srcFields[field.FieldID].GetValidData()
 
 			fieldData := &JSONFieldData{
-				Data: make([][]byte, 0, len(srcData)),
+				Data:      make([][]byte, 0, len(srcData)),
+				ValidData: make([]bool, 0, len(validData)),
 			}
 
 			fieldData.Data = append(fieldData.Data, srcData...)
+			fieldData.ValidData = append(fieldData.ValidData, validData...)
 			idata.Data[field.FieldID] = fieldData
 		}
 	}
@@ -649,12 +679,14 @@ func InsertMsgToInsertData(msg *msgstream.InsertMsg, schema *schemapb.Collection
 func mergeBoolField(data *InsertData, fid FieldID, field *BoolFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &BoolFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*BoolFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt8Field(data *InsertData, fid FieldID, field *Int8FieldData) {

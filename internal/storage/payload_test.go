@@ -23,17 +23,18 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestPayload_ReaderAndWriter(t *testing.T) {
 	t.Run("TestBool", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, false, false, false})
+		err = w.AddBoolToPayload([]bool{false, false, false, false}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]bool{false, false, false, false})
+		err = w.AddDataToPayload([]bool{false, false, false, false}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -46,29 +47,31 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 8)
-		bools, err := r.GetBoolFromPayload()
+		bools, valids, err := r.GetBoolFromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []bool{false, false, false, false, false, false, false, false}, bools)
-		ibools, _, err := r.GetDataFromPayload()
+		assert.Equal(t, []bool{false, false, false, false, false, false, false, false}, bools)
+		assert.Nil(t, valids)
+		ibools, valids, _, err := r.GetDataFromPayload()
 		bools = ibools.([]bool)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []bool{false, false, false, false, false, false, false, false}, bools)
+		assert.Nil(t, valids)
+		assert.Equal(t, []bool{false, false, false, false, false, false, false, false}, bools)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestInt8", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int8)
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt8ToPayload([]int8{1, 2, 3})
+		err = w.AddInt8ToPayload([]int8{1, 2, 3}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]int8{4, 5, 6})
+		err = w.AddDataToPayload([]int8{4, 5, 6}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -81,32 +84,34 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 6)
 
-		int8s, err := r.GetInt8FromPayload()
+		int8s, valids, err := r.GetInt8FromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int8{1, 2, 3, 4, 5, 6}, int8s)
+		assert.Nil(t, valids)
+		assert.Equal(t, []int8{1, 2, 3, 4, 5, 6}, int8s)
 
-		iint8s, _, err := r.GetDataFromPayload()
+		iint8s, valids, _, err := r.GetDataFromPayload()
 		int8s = iint8s.([]int8)
 		assert.NoError(t, err)
+		assert.Nil(t, valids)
 
-		assert.ElementsMatch(t, []int8{1, 2, 3, 4, 5, 6}, int8s)
+		assert.Equal(t, []int8{1, 2, 3, 4, 5, 6}, int8s)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestInt16", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int16)
+		w, err := NewPayloadWriter(schemapb.DataType_Int16, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt16ToPayload([]int16{1, 2, 3})
+		err = w.AddInt16ToPayload([]int16{1, 2, 3}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]int16{1, 2, 3})
+		err = w.AddDataToPayload([]int16{1, 2, 3}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -119,30 +124,32 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 6)
-		int16s, err := r.GetInt16FromPayload()
+		int16s, valids, err := r.GetInt16FromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int16{1, 2, 3, 1, 2, 3}, int16s)
+		assert.Nil(t, valids)
+		assert.Equal(t, []int16{1, 2, 3, 1, 2, 3}, int16s)
 
-		iint16s, _, err := r.GetDataFromPayload()
+		iint16s, valids, _, err := r.GetDataFromPayload()
 		int16s = iint16s.([]int16)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int16{1, 2, 3, 1, 2, 3}, int16s)
+		assert.Nil(t, valids)
+		assert.Equal(t, []int16{1, 2, 3, 1, 2, 3}, int16s)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestInt32", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int32)
+		w, err := NewPayloadWriter(schemapb.DataType_Int32, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt32ToPayload([]int32{1, 2, 3})
+		err = w.AddInt32ToPayload([]int32{1, 2, 3}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]int32{1, 2, 3})
+		err = w.AddDataToPayload([]int32{1, 2, 3}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -155,31 +162,33 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 6)
 
-		int32s, err := r.GetInt32FromPayload()
+		int32s, valids, err := r.GetInt32FromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int32{1, 2, 3, 1, 2, 3}, int32s)
+		assert.Equal(t, []int32{1, 2, 3, 1, 2, 3}, int32s)
+		assert.Nil(t, valids)
 
-		iint32s, _, err := r.GetDataFromPayload()
+		iint32s, valids, _, err := r.GetDataFromPayload()
 		int32s = iint32s.([]int32)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int32{1, 2, 3, 1, 2, 3}, int32s)
+		assert.Equal(t, []int32{1, 2, 3, 1, 2, 3}, int32s)
+		assert.Nil(t, valids)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestInt64", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int64)
+		w, err := NewPayloadWriter(schemapb.DataType_Int64, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt64ToPayload([]int64{1, 2, 3})
+		err = w.AddInt64ToPayload([]int64{1, 2, 3}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]int64{1, 2, 3})
+		err = w.AddDataToPayload([]int64{1, 2, 3}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -192,31 +201,33 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 6)
 
-		int64s, err := r.GetInt64FromPayload()
+		int64s, valids, err := r.GetInt64FromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int64{1, 2, 3, 1, 2, 3}, int64s)
+		assert.Equal(t, []int64{1, 2, 3, 1, 2, 3}, int64s)
+		assert.Nil(t, valids)
 
-		iint64s, _, err := r.GetDataFromPayload()
+		iint64s, valids, _, err := r.GetDataFromPayload()
 		int64s = iint64s.([]int64)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []int64{1, 2, 3, 1, 2, 3}, int64s)
+		assert.Equal(t, []int64{1, 2, 3, 1, 2, 3}, int64s)
+		assert.Nil(t, valids)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestFloat32", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Float)
+		w, err := NewPayloadWriter(schemapb.DataType_Float, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddFloatToPayload([]float32{1.0, 2.0, 3.0})
+		err = w.AddFloatToPayload([]float32{1.0, 2.0, 3.0}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]float32{1.0, 2.0, 3.0})
+		err = w.AddDataToPayload([]float32{1.0, 2.0, 3.0}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -229,31 +240,33 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Float, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Float, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 6)
 
-		float32s, err := r.GetFloatFromPayload()
+		float32s, valids, err := r.GetFloatFromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []float32{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float32s)
+		assert.Equal(t, []float32{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float32s)
+		assert.Nil(t, valids)
 
-		ifloat32s, _, err := r.GetDataFromPayload()
+		ifloat32s, valids, _, err := r.GetDataFromPayload()
 		float32s = ifloat32s.([]float32)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []float32{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float32s)
+		assert.Equal(t, []float32{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float32s)
+		assert.Nil(t, valids)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestDouble", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Double)
+		w, err := NewPayloadWriter(schemapb.DataType_Double, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddDoubleToPayload([]float64{1.0, 2.0, 3.0})
+		err = w.AddDoubleToPayload([]float64{1.0, 2.0, 3.0}, nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]float64{1.0, 2.0, 3.0})
+		err = w.AddDataToPayload([]float64{1.0, 2.0, 3.0}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -266,35 +279,37 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Double, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Double, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 6)
 
-		float64s, err := r.GetDoubleFromPayload()
+		float64s, valids, err := r.GetDoubleFromPayload()
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []float64{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float64s)
+		assert.Equal(t, []float64{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float64s)
+		assert.Nil(t, valids)
 
-		ifloat64s, _, err := r.GetDataFromPayload()
+		ifloat64s, valids, _, err := r.GetDataFromPayload()
 		float64s = ifloat64s.([]float64)
 		assert.NoError(t, err)
-		assert.ElementsMatch(t, []float64{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float64s)
+		assert.Nil(t, valids)
+		assert.Equal(t, []float64{1.0, 2.0, 3.0, 1.0, 2.0, 3.0}, float64s)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestAddString", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_String)
+		w, err := NewPayloadWriter(schemapb.DataType_String, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddOneStringToPayload("hello0")
+		err = w.AddOneStringToPayload("hello0", nil)
 		assert.NoError(t, err)
-		err = w.AddOneStringToPayload("hello1")
+		err = w.AddOneStringToPayload("hello1", nil)
 		assert.NoError(t, err)
-		err = w.AddOneStringToPayload("hello2")
+		err = w.AddOneStringToPayload("hello2", nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload("hello3")
+		err = w.AddDataToPayload("hello3", nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -304,33 +319,35 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_String, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_String, buffer, false)
 		assert.NoError(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 4)
 
-		str, err := r.GetStringFromPayload()
+		str, valids, err := r.GetStringFromPayload()
 		assert.NoError(t, err)
+		assert.Nil(t, valids)
 
 		assert.Equal(t, str[0], "hello0")
 		assert.Equal(t, str[1], "hello1")
 		assert.Equal(t, str[2], "hello2")
 		assert.Equal(t, str[3], "hello3")
 
-		istr, _, err := r.GetDataFromPayload()
+		istr, valids, _, err := r.GetDataFromPayload()
 		strArray := istr.([]string)
 		assert.NoError(t, err)
 		assert.Equal(t, strArray[0], "hello0")
 		assert.Equal(t, strArray[1], "hello1")
 		assert.Equal(t, strArray[2], "hello2")
 		assert.Equal(t, strArray[3], "hello3")
+		assert.Nil(t, valids)
 		r.ReleasePayloadReader()
 		w.ReleasePayloadWriter()
 	})
 
 	t.Run("TestAddArray", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Array)
+		w, err := NewPayloadWriter(schemapb.DataType_Array, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
@@ -340,7 +357,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 					Data: []int32{1, 2},
 				},
 			},
-		})
+		}, nil)
 		assert.NoError(t, err)
 		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
 			Data: &schemapb.ScalarField_IntData{
@@ -348,7 +365,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 					Data: []int32{3, 4},
 				},
 			},
-		})
+		}, nil)
 		assert.NoError(t, err)
 		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
 			Data: &schemapb.ScalarField_IntData{
@@ -356,7 +373,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 					Data: []int32{5, 6},
 				},
 			},
-		})
+		}, nil)
 		assert.NoError(t, err)
 		err = w.AddDataToPayload(&schemapb.ScalarField{
 			Data: &schemapb.ScalarField_IntData{
@@ -364,7 +381,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 					Data: []int32{7, 8},
 				},
 			},
-		})
+		}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -374,23 +391,25 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Array, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Array, buffer, false)
 		assert.NoError(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 4)
 
-		arrayList, err := r.GetArrayFromPayload()
+		arrayList, valids, err := r.GetArrayFromPayload()
 		assert.NoError(t, err)
+		assert.Nil(t, valids)
 
 		assert.EqualValues(t, []int32{1, 2}, arrayList[0].GetIntData().GetData())
 		assert.EqualValues(t, []int32{3, 4}, arrayList[1].GetIntData().GetData())
 		assert.EqualValues(t, []int32{5, 6}, arrayList[2].GetIntData().GetData())
 		assert.EqualValues(t, []int32{7, 8}, arrayList[3].GetIntData().GetData())
 
-		iArrayList, _, err := r.GetDataFromPayload()
+		iArrayList, valids, _, err := r.GetDataFromPayload()
 		arrayList = iArrayList.([]*schemapb.ScalarField)
 		assert.NoError(t, err)
+		assert.Nil(t, valids)
 		assert.EqualValues(t, []int32{1, 2}, arrayList[0].GetIntData().GetData())
 		assert.EqualValues(t, []int32{3, 4}, arrayList[1].GetIntData().GetData())
 		assert.EqualValues(t, []int32{5, 6}, arrayList[2].GetIntData().GetData())
@@ -400,17 +419,17 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 	})
 
 	t.Run("TestAddJSON", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_JSON)
+		w, err := NewPayloadWriter(schemapb.DataType_JSON, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddOneJSONToPayload([]byte(`{"1":"1"}`))
+		err = w.AddOneJSONToPayload([]byte(`{"1":"1"}`), nil)
 		assert.NoError(t, err)
-		err = w.AddOneJSONToPayload([]byte(`{"2":"2"}`))
+		err = w.AddOneJSONToPayload([]byte(`{"2":"2"}`), nil)
 		assert.NoError(t, err)
-		err = w.AddOneJSONToPayload([]byte(`{"3":"3"}`))
+		err = w.AddOneJSONToPayload([]byte(`{"3":"3"}`), nil)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]byte(`{"4":"4"}`))
+		err = w.AddDataToPayload([]byte(`{"4":"4"}`), nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -420,23 +439,25 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_JSON, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_JSON, buffer, false)
 		assert.NoError(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
 		assert.Equal(t, length, 4)
 
-		json, err := r.GetJSONFromPayload()
+		json, valids, err := r.GetJSONFromPayload()
 		assert.NoError(t, err)
+		assert.Nil(t, valids)
 
 		assert.EqualValues(t, []byte(`{"1":"1"}`), json[0])
 		assert.EqualValues(t, []byte(`{"2":"2"}`), json[1])
 		assert.EqualValues(t, []byte(`{"3":"3"}`), json[2])
 		assert.EqualValues(t, []byte(`{"4":"4"}`), json[3])
 
-		iJSON, _, err := r.GetDataFromPayload()
+		iJSON, valids, _, err := r.GetDataFromPayload()
 		json = iJSON.([][]byte)
 		assert.NoError(t, err)
+		assert.Nil(t, valids)
 		assert.EqualValues(t, []byte(`{"1":"1"}`), json[0])
 		assert.EqualValues(t, []byte(`{"2":"2"}`), json[1])
 		assert.EqualValues(t, []byte(`{"3":"3"}`), json[2])
@@ -446,7 +467,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 	})
 
 	t.Run("TestBinaryVector", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_BinaryVector, 8)
+		w, err := NewPayloadWriter(schemapb.DataType_BinaryVector, false, 8)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
@@ -461,7 +482,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 
 		err = w.AddBinaryVectorToPayload(in, 8)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload(in2, 8)
+		err = w.AddDataToPayload(in2, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -474,7 +495,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_BinaryVector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_BinaryVector, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
@@ -485,7 +506,8 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.Equal(t, 8, dim)
 		assert.Equal(t, 24, len(binVecs))
 
-		ibinVecs, dim, err := r.GetDataFromPayload()
+		ibinVecs, valids, dim, err := r.GetDataFromPayload()
+		assert.Nil(t, valids)
 		assert.NoError(t, err)
 		binVecs = ibinVecs.([]byte)
 		assert.Equal(t, 8, dim)
@@ -494,13 +516,13 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 	})
 
 	t.Run("TestFloatVector", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, 1)
+		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, false, 1)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
 		err = w.AddFloatVectorToPayload([]float32{1.0, 2.0}, 1)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]float32{3.0, 4.0}, 1)
+		err = w.AddDataToPayload([]float32{3.0, 4.0}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -513,7 +535,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_FloatVector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_FloatVector, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
@@ -523,25 +545,26 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, 1, dim)
 		assert.Equal(t, 4, len(floatVecs))
-		assert.ElementsMatch(t, []float32{1.0, 2.0, 3.0, 4.0}, floatVecs)
+		assert.Equal(t, []float32{1.0, 2.0, 3.0, 4.0}, floatVecs)
 
-		ifloatVecs, dim, err := r.GetDataFromPayload()
+		ifloatVecs, valids, dim, err := r.GetDataFromPayload()
+		assert.Nil(t, valids)
 		assert.NoError(t, err)
 		floatVecs = ifloatVecs.([]float32)
 		assert.Equal(t, 1, dim)
 		assert.Equal(t, 4, len(floatVecs))
-		assert.ElementsMatch(t, []float32{1.0, 2.0, 3.0, 4.0}, floatVecs)
+		assert.Equal(t, []float32{1.0, 2.0, 3.0, 4.0}, floatVecs)
 		defer r.ReleasePayloadReader()
 	})
 
 	t.Run("TestFloat16Vector", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Float16Vector, 1)
+		w, err := NewPayloadWriter(schemapb.DataType_Float16Vector, false, 1)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
 		err = w.AddFloat16VectorToPayload([]byte{1, 2}, 1)
 		assert.NoError(t, err)
-		err = w.AddDataToPayload([]byte{3, 4}, 1)
+		err = w.AddDataToPayload([]byte{3, 4}, nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
@@ -554,7 +577,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Float16Vector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Float16Vector, buffer, false)
 		require.Nil(t, err)
 		length, err = r.GetPayloadLengthFromReader()
 		assert.NoError(t, err)
@@ -564,7 +587,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, 1, dim)
 		assert.Equal(t, 4, len(float16Vecs))
-		assert.ElementsMatch(t, []byte{1, 2, 3, 4}, float16Vecs)
+		assert.Equal(t, []byte{1, 2, 3, 4}, float16Vecs)
 	})
 
 	// t.Run("TestAddDataToPayload", func(t *testing.T) {
@@ -591,23 +614,23 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 	// })
 
 	t.Run("TestAddBoolAfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddBoolToPayload([]bool{})
+		err = w.AddBoolToPayload([]bool{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddBoolToPayload([]bool{false})
+		err = w.AddBoolToPayload([]bool{false}, nil)
 		assert.Error(t, err)
 	})
 
 	t.Run("TestAddInt8AfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int8)
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -615,15 +638,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddInt8ToPayload([]int8{})
+		err = w.AddInt8ToPayload([]int8{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddInt8ToPayload([]int8{0})
+		err = w.AddInt8ToPayload([]int8{0}, nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddInt16AfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int16)
+		w, err := NewPayloadWriter(schemapb.DataType_Int16, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -631,15 +654,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddInt16ToPayload([]int16{})
+		err = w.AddInt16ToPayload([]int16{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddInt16ToPayload([]int16{0})
+		err = w.AddInt16ToPayload([]int16{0}, nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddInt32AfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int32)
+		w, err := NewPayloadWriter(schemapb.DataType_Int32, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -647,15 +670,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddInt32ToPayload([]int32{})
+		err = w.AddInt32ToPayload([]int32{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddInt32ToPayload([]int32{0})
+		err = w.AddInt32ToPayload([]int32{0}, nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddInt64AfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int64)
+		w, err := NewPayloadWriter(schemapb.DataType_Int64, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -663,15 +686,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddInt64ToPayload([]int64{})
+		err = w.AddInt64ToPayload([]int64{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddInt64ToPayload([]int64{0})
+		err = w.AddInt64ToPayload([]int64{0}, nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddFloatAfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Float)
+		w, err := NewPayloadWriter(schemapb.DataType_Float, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -679,15 +702,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddFloatToPayload([]float32{})
+		err = w.AddFloatToPayload([]float32{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddFloatToPayload([]float32{0.0})
+		err = w.AddFloatToPayload([]float32{0.0}, nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddDoubleAfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Double)
+		w, err := NewPayloadWriter(schemapb.DataType_Double, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -695,15 +718,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddDoubleToPayload([]float64{})
+		err = w.AddDoubleToPayload([]float64{}, nil)
 		assert.Error(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddDoubleToPayload([]float64{0.0})
+		err = w.AddDoubleToPayload([]float64{0.0}, nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddOneStringAfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_String)
+		w, err := NewPayloadWriter(schemapb.DataType_String, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -711,15 +734,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		_, err = w.GetPayloadBufferFromWriter()
 		assert.Error(t, err)
 
-		err = w.AddOneStringToPayload("")
+		err = w.AddOneStringToPayload("", nil)
 		assert.NoError(t, err)
 		err = w.FinishPayloadWriter()
 		assert.NoError(t, err)
-		err = w.AddOneStringToPayload("c")
+		err = w.AddOneStringToPayload("c", nil)
 		assert.Error(t, err)
 	})
 	t.Run("TestAddBinVectorAfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_BinaryVector, 8)
+		w, err := NewPayloadWriter(schemapb.DataType_BinaryVector, false, 8)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -743,7 +766,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.Error(t, err)
 	})
 	t.Run("TestAddFloatVectorAfterFinish", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, 8)
+		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, false, 8)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 		defer w.Close()
@@ -766,7 +789,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 
 	t.Run("TestNewReadError", func(t *testing.T) {
 		buffer := []byte{0}
-		r, err := NewPayloadReader(999, buffer)
+		r, err := NewPayloadReader(999, buffer, false)
 		assert.Error(t, err)
 		assert.Nil(t, r)
 	})
@@ -774,15 +797,15 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		r := PayloadReader{}
 		r.colType = 999
 
-		_, _, err := r.GetDataFromPayload()
+		_, _, _, err := r.GetDataFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetBoolError", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int8)
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt8ToPayload([]int8{1, 2, 3})
+		err = w.AddInt8ToPayload([]int8{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -791,22 +814,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetBoolFromPayload()
+		_, _, err = r.GetBoolFromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetBoolFromPayload()
+		_, _, err = r.GetBoolFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetBoolError2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{true, false, true})
+		err = w.AddBoolToPayload([]bool{true, false, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -815,19 +838,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetBoolFromPayload()
+		_, _, err = r.GetBoolFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt8Error", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -836,22 +859,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetInt8FromPayload()
+		_, _, err = r.GetInt8FromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetInt8FromPayload()
+		_, _, err = r.GetInt8FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt8Error2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int8)
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt8ToPayload([]int8{1, 2, 3})
+		err = w.AddInt8ToPayload([]int8{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -860,19 +883,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetInt8FromPayload()
+		_, _, err = r.GetInt8FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt16Error", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -881,22 +904,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetInt16FromPayload()
+		_, _, err = r.GetInt16FromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetInt16FromPayload()
+		_, _, err = r.GetInt16FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt16Error2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int16)
+		w, err := NewPayloadWriter(schemapb.DataType_Int16, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt16ToPayload([]int16{1, 2, 3})
+		err = w.AddInt16ToPayload([]int16{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -905,19 +928,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetInt16FromPayload()
+		_, _, err = r.GetInt16FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt32Error", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -926,22 +949,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetInt32FromPayload()
+		_, _, err = r.GetInt32FromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetInt32FromPayload()
+		_, _, err = r.GetInt32FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt32Error2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int32)
+		w, err := NewPayloadWriter(schemapb.DataType_Int32, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt32ToPayload([]int32{1, 2, 3})
+		err = w.AddInt32ToPayload([]int32{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -950,19 +973,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetInt32FromPayload()
+		_, _, err = r.GetInt32FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt64Error", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -971,22 +994,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetInt64FromPayload()
+		_, _, err = r.GetInt64FromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetInt64FromPayload()
+		_, _, err = r.GetInt64FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetInt64Error2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Int64)
+		w, err := NewPayloadWriter(schemapb.DataType_Int64, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddInt64ToPayload([]int64{1, 2, 3})
+		err = w.AddInt64ToPayload([]int64{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -995,19 +1018,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetInt64FromPayload()
+		_, _, err = r.GetInt64FromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetFloatError", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1016,22 +1039,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Float, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Float, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetFloatFromPayload()
+		_, _, err = r.GetFloatFromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetFloatFromPayload()
+		_, _, err = r.GetFloatFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetFloatError2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Float)
+		w, err := NewPayloadWriter(schemapb.DataType_Float, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddFloatToPayload([]float32{1, 2, 3})
+		err = w.AddFloatToPayload([]float32{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1040,19 +1063,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Float, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Float, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetFloatFromPayload()
+		_, _, err = r.GetFloatFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetDoubleError", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1061,22 +1084,22 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Double, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Double, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetDoubleFromPayload()
+		_, _, err = r.GetDoubleFromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetDoubleFromPayload()
+		_, _, err = r.GetDoubleFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetDoubleError2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Double)
+		w, err := NewPayloadWriter(schemapb.DataType_Double, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddDoubleToPayload([]float64{1, 2, 3})
+		err = w.AddDoubleToPayload([]float64{1, 2, 3}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1085,19 +1108,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_Double, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_Double, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetDoubleFromPayload()
+		_, _, err = r.GetDoubleFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetStringError", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1106,26 +1129,26 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_String, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_String, buffer, false)
 		assert.NoError(t, err)
 
-		_, err = r.GetStringFromPayload()
+		_, _, err = r.GetStringFromPayload()
 		assert.Error(t, err)
 
 		r.colType = 999
-		_, err = r.GetStringFromPayload()
+		_, _, err = r.GetStringFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetStringError2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_String)
+		w, err := NewPayloadWriter(schemapb.DataType_String, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddOneStringToPayload("hello0")
+		err = w.AddOneStringToPayload("hello0", nil)
 		assert.NoError(t, err)
-		err = w.AddOneStringToPayload("hello1")
+		err = w.AddOneStringToPayload("hello1", nil)
 		assert.NoError(t, err)
-		err = w.AddOneStringToPayload("hello2")
+		err = w.AddOneStringToPayload("hello2", nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1134,19 +1157,19 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_String, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_String, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
-		_, err = r.GetStringFromPayload()
+		_, _, err = r.GetStringFromPayload()
 		assert.Error(t, err)
 	})
 	t.Run("TestGetBinaryVectorError", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1155,7 +1178,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_BinaryVector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_BinaryVector, buffer, false)
 		assert.NoError(t, err)
 
 		_, _, err = r.GetBinaryVectorFromPayload()
@@ -1166,7 +1189,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.Error(t, err)
 	})
 	t.Run("TestGetBinaryVectorError2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_BinaryVector, 8)
+		w, err := NewPayloadWriter(schemapb.DataType_BinaryVector, false, 8)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
@@ -1179,7 +1202,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_BinaryVector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_BinaryVector, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
@@ -1187,11 +1210,11 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.Error(t, err)
 	})
 	t.Run("TestGetFloatVectorError", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_Bool)
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
-		err = w.AddBoolToPayload([]bool{false, true, true})
+		err = w.AddBoolToPayload([]bool{false, true, true}, nil)
 		assert.NoError(t, err)
 
 		err = w.FinishPayloadWriter()
@@ -1200,7 +1223,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_FloatVector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_FloatVector, buffer, false)
 		assert.NoError(t, err)
 
 		_, _, err = r.GetFloatVectorFromPayload()
@@ -1211,7 +1234,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.Error(t, err)
 	})
 	t.Run("TestGetFloatVectorError2", func(t *testing.T) {
-		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, 8)
+		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, false, 8)
 		require.Nil(t, err)
 		require.NotNil(t, w)
 
@@ -1224,7 +1247,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		buffer, err := w.GetPayloadBufferFromWriter()
 		assert.NoError(t, err)
 
-		r, err := NewPayloadReader(schemapb.DataType_FloatVector, buffer)
+		r, err := NewPayloadReader(schemapb.DataType_FloatVector, buffer, false)
 		assert.NoError(t, err)
 
 		r.numRows = 99
@@ -1240,7 +1263,7 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 			vec = append(vec, 1)
 		}
 
-		w, err := NewPayloadWriter(schemapb.DataType_FloatVector)
+		w, err := NewPayloadWriter(schemapb.DataType_FloatVector, false)
 		assert.NoError(t, err)
 
 		err = w.AddFloatVectorToPayload(vec, 128)
@@ -1253,5 +1276,653 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.NoError(t, err)
 
 		w.ReleasePayloadWriter()
+	})
+
+	t.Run("TestAddBool with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddBoolToPayload([]bool{false}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt8 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt8ToPayload([]int8{1}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt16 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int16, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt16ToPayload([]int16{1}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt32 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int32, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt32ToPayload([]int32{1}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt64 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int64, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt64ToPayload([]int64{1}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddFloat32 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Float, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddFloatToPayload([]float32{1.0}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddDouble with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Double, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddDoubleToPayload([]float64{1.0}, []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddAddString with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_String, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneStringToPayload("hello0", []bool{false})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddArray with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Array, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{
+					Data: []int32{1, 2},
+				},
+			},
+		}, []bool{true})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddJSON with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_JSON, false)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneJSONToPayload([]byte(`{"1":"1"}`), []bool{true})
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+}
+
+func TestPayload_NullableReaderAndWriter(t *testing.T) {
+	t.Run("TestBool", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddBoolToPayload([]bool{true, false, false, false}, []bool{true, false, true, false})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]bool{true, false, false, false}, []bool{true, false, true, false})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 8, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Bool, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 8)
+		bools, valids, err := r.GetBoolFromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []bool{true, false, false, false, true, false, false, false}, bools)
+		assert.Equal(t, []bool{true, false, true, false, true, false, true, false}, valids)
+		ibools, valids, _, err := r.GetDataFromPayload()
+		bools = ibools.([]bool)
+		assert.NoError(t, err)
+		assert.Equal(t, []bool{true, false, false, false, true, false, false, false}, bools)
+		assert.Equal(t, []bool{true, false, true, false, true, false, true, false}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestInt8", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt8ToPayload([]int8{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]int8{4, 5, 6}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 6, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Int8, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 6)
+
+		int8s, valids, err := r.GetInt8FromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []int8{1, 0, 3, 4, 0, 6}, int8s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+
+		iint8s, valids, _, err := r.GetDataFromPayload()
+		int8s = iint8s.([]int8)
+		assert.NoError(t, err)
+
+		assert.Equal(t, []int8{1, 0, 3, 4, 0, 6}, int8s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestInt16", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int16, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt16ToPayload([]int16{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]int16{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 6, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Int16, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 6)
+		int16s, valids, err := r.GetInt16FromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []int16{1, 0, 3, 1, 0, 3}, int16s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+
+		iint16s, valids, _, err := r.GetDataFromPayload()
+		int16s = iint16s.([]int16)
+		assert.NoError(t, err)
+		assert.Equal(t, []int16{1, 0, 3, 1, 0, 3}, int16s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestInt32", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int32, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt32ToPayload([]int32{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]int32{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 6, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Int32, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 6)
+
+		int32s, valids, err := r.GetInt32FromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []int32{1, 0, 3, 1, 0, 3}, int32s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+
+		iint32s, valids, _, err := r.GetDataFromPayload()
+		int32s = iint32s.([]int32)
+		assert.NoError(t, err)
+		assert.Equal(t, []int32{1, 0, 3, 1, 0, 3}, int32s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestInt64", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int64, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt64ToPayload([]int64{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]int64{1, 2, 3}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 6, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Int64, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 6)
+
+		int64s, valids, err := r.GetInt64FromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []int64{1, 0, 3, 1, 0, 3}, int64s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+
+		iint64s, valids, _, err := r.GetDataFromPayload()
+		int64s = iint64s.([]int64)
+		assert.NoError(t, err)
+		assert.Equal(t, []int64{1, 0, 3, 1, 0, 3}, int64s)
+		assert.Equal(t, []bool{true, false, true, true, false, true}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestFloat32", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Float, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddFloatToPayload([]float32{1.0, 2.0, 3.0}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]float32{1.0, 2.0, 3.0}, []bool{false, true, false})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 6, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Float, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 6)
+
+		float32s, valids, err := r.GetFloatFromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []float32{1.0, 0, 3.0, 0, 2.0, 0}, float32s)
+		assert.Equal(t, []bool{true, false, true, false, true, false}, valids)
+
+		ifloat32s, valids, _, err := r.GetDataFromPayload()
+		float32s = ifloat32s.([]float32)
+		assert.NoError(t, err)
+		assert.Equal(t, []float32{1.0, 0, 3.0, 0, 2.0, 0}, float32s)
+		assert.Equal(t, []bool{true, false, true, false, true, false}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestDouble", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Double, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddDoubleToPayload([]float64{1.0, 2.0, 3.0}, []bool{true, false, true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]float64{1.0, 2.0, 3.0}, []bool{false, true, false})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 6, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Double, buffer, true)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 6)
+
+		float64s, valids, err := r.GetDoubleFromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, []float64{1.0, 0, 3.0, 0, 2.0, 0}, float64s)
+		assert.Equal(t, []bool{true, false, true, false, true, false}, valids)
+
+		ifloat64s, valids, _, err := r.GetDataFromPayload()
+		float64s = ifloat64s.([]float64)
+		assert.NoError(t, err)
+		assert.Equal(t, []float64{1.0, 0, 3.0, 0, 2.0, 0}, float64s)
+		assert.Equal(t, []bool{true, false, true, false, true, false}, valids)
+		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestAddString", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_String, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneStringToPayload("hello0", []bool{true})
+		assert.NoError(t, err)
+		err = w.AddOneStringToPayload("hello1", []bool{false})
+		assert.NoError(t, err)
+		err = w.AddOneStringToPayload("hello2", []bool{true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload("hello3", []bool{false})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 4)
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_String, buffer, true)
+		assert.NoError(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 4)
+
+		str, valids, err := r.GetStringFromPayload()
+		assert.NoError(t, err)
+
+		assert.Equal(t, str[0], "hello0")
+		assert.Equal(t, str[1], "")
+		assert.Equal(t, str[2], "hello2")
+		assert.Equal(t, str[3], "")
+		assert.Equal(t, []bool{true, false, true, false}, valids)
+
+		istr, valids, _, err := r.GetDataFromPayload()
+		strArray := istr.([]string)
+		assert.NoError(t, err)
+		assert.Equal(t, strArray[0], "hello0")
+		assert.Equal(t, strArray[1], "")
+		assert.Equal(t, strArray[2], "hello2")
+		assert.Equal(t, strArray[3], "")
+		assert.Equal(t, []bool{true, false, true, false}, valids)
+		r.ReleasePayloadReader()
+		w.ReleasePayloadWriter()
+	})
+
+	t.Run("TestAddArray", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Array, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{
+					Data: []int32{1, 2},
+				},
+			},
+		}, []bool{true})
+		assert.NoError(t, err)
+		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{
+					Data: []int32{3, 4},
+				},
+			},
+		}, []bool{false})
+		assert.NoError(t, err)
+		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{
+					Data: []int32{5, 6},
+				},
+			},
+		}, []bool{true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload(&schemapb.ScalarField{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{
+					Data: []int32{7, 8},
+				},
+			},
+		}, []bool{false})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 4)
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Array, buffer, true)
+		assert.NoError(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 4)
+
+		arrayList, valids, err := r.GetArrayFromPayload()
+		assert.NoError(t, err)
+
+		assert.EqualValues(t, []int32{1, 2}, arrayList[0].GetIntData().GetData())
+		assert.EqualValues(t, []int32(nil), arrayList[1].GetIntData().GetData())
+		assert.EqualValues(t, []int32{5, 6}, arrayList[2].GetIntData().GetData())
+		assert.EqualValues(t, []int32(nil), arrayList[3].GetIntData().GetData())
+		assert.Equal(t, []bool{true, false, true, false}, valids)
+
+		iArrayList, valids, _, err := r.GetDataFromPayload()
+		arrayList = iArrayList.([]*schemapb.ScalarField)
+		assert.NoError(t, err)
+		assert.EqualValues(t, []int32{1, 2}, arrayList[0].GetIntData().GetData())
+		assert.EqualValues(t, []int32(nil), arrayList[1].GetIntData().GetData())
+		assert.EqualValues(t, []int32{5, 6}, arrayList[2].GetIntData().GetData())
+		assert.EqualValues(t, []int32(nil), arrayList[3].GetIntData().GetData())
+		assert.Equal(t, []bool{true, false, true, false}, valids)
+		r.ReleasePayloadReader()
+		w.ReleasePayloadWriter()
+	})
+
+	t.Run("TestAddJSON", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_JSON, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneJSONToPayload([]byte(`{"1":"1"}`), []bool{true})
+		assert.NoError(t, err)
+		err = w.AddOneJSONToPayload([]byte(`{"2":"2"}`), []bool{false})
+		assert.NoError(t, err)
+		err = w.AddOneJSONToPayload([]byte(`{"3":"3"}`), []bool{true})
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]byte(`{"4":"4"}`), []bool{false})
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 4)
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_JSON, buffer, true)
+		assert.NoError(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 4)
+
+		json, valids, err := r.GetJSONFromPayload()
+		assert.NoError(t, err)
+
+		assert.EqualValues(t, []byte(`{"1":"1"}`), json[0])
+		assert.EqualValues(t, []byte(``), json[1])
+		assert.EqualValues(t, []byte(`{"3":"3"}`), json[2])
+		assert.EqualValues(t, []byte(``), json[3])
+		assert.Equal(t, []bool{true, false, true, false}, valids)
+
+		iJSON, valids, _, err := r.GetDataFromPayload()
+		json = iJSON.([][]byte)
+		assert.NoError(t, err)
+		assert.EqualValues(t, []byte(`{"1":"1"}`), json[0])
+		assert.EqualValues(t, []byte(``), json[1])
+		assert.EqualValues(t, []byte(`{"3":"3"}`), json[2])
+		assert.EqualValues(t, []byte(``), json[3])
+		assert.Equal(t, []bool{true, false, true, false}, valids)
+		r.ReleasePayloadReader()
+		w.ReleasePayloadWriter()
+	})
+
+	t.Run("TestBinaryVector", func(t *testing.T) {
+		_, err := NewPayloadWriter(schemapb.DataType_BinaryVector, true, 8)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestFloatVector", func(t *testing.T) {
+		_, err := NewPayloadWriter(schemapb.DataType_FloatVector, true, 1)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestFloat16Vector", func(t *testing.T) {
+		_, err := NewPayloadWriter(schemapb.DataType_Float16Vector, true, 1)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddBool with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Bool, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddBoolToPayload([]bool{false}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt8 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int8, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt8ToPayload([]int8{1}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt16 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int16, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt16ToPayload([]int16{1}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt32 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int32, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt32ToPayload([]int32{1}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddInt64 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Int64, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddInt64ToPayload([]int64{1}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddFloat32 with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Float, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddFloatToPayload([]float32{1.0}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddDouble with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Double, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddDoubleToPayload([]float64{1.0}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddAddString with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_String, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneStringToPayload("hello0", nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddArray with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Array, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneArrayToPayload(&schemapb.ScalarField{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{
+					Data: []int32{1, 2},
+				},
+			},
+		}, nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("TestAddJSON with wrong valids", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_JSON, true)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddOneJSONToPayload([]byte(`{"1":"1"}`), nil)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
 }

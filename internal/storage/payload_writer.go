@@ -33,6 +33,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -46,17 +47,28 @@ type NativePayloadWriter struct {
 	flushedRows int
 	output      *bytes.Buffer
 	releaseOnce sync.Once
+	dim         int
+	nullable    bool
 }
 
-func NewPayloadWriter(colType schemapb.DataType, dim ...int) (PayloadWriterInterface, error) {
+func NewPayloadWriter(colType schemapb.DataType, nullable bool, dim ...int) (PayloadWriterInterface, error) {
 	var arrowType arrow.DataType
+	var dimension int
 	if typeutil.IsVectorType(colType) {
 		if len(dim) != 1 {
-			return nil, fmt.Errorf("incorrect input numbers")
+			return nil, merr.WrapErrParameterInvalidMsg("incorrect input numbers")
+		}
+		if nullable {
+			return nil, merr.WrapErrParameterInvalidMsg("vector type not supprot nullable")
 		}
 		arrowType = milvusDataTypeToArrowType(colType, dim[0])
+		dimension = dim[0]
 	} else {
+		if len(dim) != 0 {
+			return nil, merr.WrapErrParameterInvalidMsg("incorrect input numbers")
+		}
 		arrowType = milvusDataTypeToArrowType(colType, 1)
+		dimension = 1
 	}
 
 	builder := array.NewBuilder(memory.DefaultAllocator, arrowType)
@@ -68,129 +80,150 @@ func NewPayloadWriter(colType schemapb.DataType, dim ...int) (PayloadWriterInter
 		finished:    false,
 		flushedRows: 0,
 		output:      new(bytes.Buffer),
+		dim:         dimension,
+		nullable:    nullable,
 	}, nil
 }
 
-func (w *NativePayloadWriter) AddDataToPayload(data interface{}, dim ...int) error {
-	switch len(dim) {
-	case 0:
-		switch w.dataType {
-		case schemapb.DataType_Bool:
-			val, ok := data.([]bool)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddBoolToPayload(val)
-		case schemapb.DataType_Int8:
-			val, ok := data.([]int8)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddInt8ToPayload(val)
-		case schemapb.DataType_Int16:
-			val, ok := data.([]int16)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddInt16ToPayload(val)
-		case schemapb.DataType_Int32:
-			val, ok := data.([]int32)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddInt32ToPayload(val)
-		case schemapb.DataType_Int64:
-			val, ok := data.([]int64)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddInt64ToPayload(val)
-		case schemapb.DataType_Float:
-			val, ok := data.([]float32)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddFloatToPayload(val)
-		case schemapb.DataType_Double:
-			val, ok := data.([]float64)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddDoubleToPayload(val)
-		case schemapb.DataType_String, schemapb.DataType_VarChar:
-			val, ok := data.(string)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddOneStringToPayload(val)
-		case schemapb.DataType_Array:
-			val, ok := data.(*schemapb.ScalarField)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddOneArrayToPayload(val)
-		case schemapb.DataType_JSON:
-			val, ok := data.([]byte)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddOneJSONToPayload(val)
-		default:
-			return errors.New("incorrect datatype")
+func (w *NativePayloadWriter) AddDataToPayload(data interface{}, validData []bool) error {
+	switch w.dataType {
+	case schemapb.DataType_Bool:
+		val, ok := data.([]bool)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
 		}
-	case 1:
-		switch w.dataType {
-		case schemapb.DataType_BinaryVector:
-			val, ok := data.([]byte)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddBinaryVectorToPayload(val, dim[0])
-		case schemapb.DataType_FloatVector:
-			val, ok := data.([]float32)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddFloatVectorToPayload(val, dim[0])
-		case schemapb.DataType_Float16Vector:
-			val, ok := data.([]byte)
-			if !ok {
-				return errors.New("incorrect data type")
-			}
-			return w.AddFloat16VectorToPayload(val, dim[0])
-		default:
-			return errors.New("incorrect datatype")
+		return w.AddBoolToPayload(val, validData)
+	case schemapb.DataType_Int8:
+		val, ok := data.([]int8)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
 		}
+		return w.AddInt8ToPayload(val, validData)
+	case schemapb.DataType_Int16:
+		val, ok := data.([]int16)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddInt16ToPayload(val, validData)
+	case schemapb.DataType_Int32:
+		val, ok := data.([]int32)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddInt32ToPayload(val, validData)
+	case schemapb.DataType_Int64:
+		val, ok := data.([]int64)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddInt64ToPayload(val, validData)
+	case schemapb.DataType_Float:
+		val, ok := data.([]float32)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddFloatToPayload(val, validData)
+	case schemapb.DataType_Double:
+		val, ok := data.([]float64)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddDoubleToPayload(val, validData)
+	case schemapb.DataType_String, schemapb.DataType_VarChar:
+		val, ok := data.(string)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddOneStringToPayload(val, validData)
+	case schemapb.DataType_Array:
+		val, ok := data.(*schemapb.ScalarField)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddOneArrayToPayload(val, validData)
+	case schemapb.DataType_JSON:
+		val, ok := data.([]byte)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		return w.AddOneJSONToPayload(val, validData)
+	case schemapb.DataType_BinaryVector:
+		val, ok := data.([]byte)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		if w.nullable {
+			return merr.WrapErrParameterInvalidMsg("BinaryVector not support null")
+		}
+		return w.AddBinaryVectorToPayload(val, w.dim)
+	case schemapb.DataType_FloatVector:
+		val, ok := data.([]float32)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		if w.nullable {
+			return merr.WrapErrParameterInvalidMsg("BinaryVector not support null")
+		}
+		return w.AddFloatVectorToPayload(val, w.dim)
+	case schemapb.DataType_Float16Vector:
+		val, ok := data.([]byte)
+		if !ok {
+			return merr.WrapErrParameterInvalidMsg("incorrect data type")
+		}
+		if w.nullable {
+			return merr.WrapErrParameterInvalidMsg("BinaryVector not support null")
+		}
+		return w.AddFloat16VectorToPayload(val, w.dim)
 	default:
-		return errors.New("incorrect input numbers")
+		return errors.New("unsupported datatype")
 	}
 }
 
-func (w *NativePayloadWriter) AddBoolToPayload(data []bool) error {
+func (w *NativePayloadWriter) AddBoolToPayload(data []bool, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.BooleanBuilder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddByteToPayload(data []byte) error {
+func (w *NativePayloadWriter) AddByteToPayload(data []byte, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.Int8Builder)
@@ -201,102 +234,155 @@ func (w *NativePayloadWriter) AddByteToPayload(data []byte) error {
 	builder.Reserve(len(data))
 	for i := range data {
 		builder.Append(int8(data[i]))
+		if w.nullable && !validData[i] {
+			builder.AppendNull()
+		}
 	}
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddInt8ToPayload(data []int8) error {
+func (w *NativePayloadWriter) AddInt8ToPayload(data []int8, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.Int8Builder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddInt16ToPayload(data []int16) error {
+func (w *NativePayloadWriter) AddInt16ToPayload(data []int16, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.Int16Builder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddInt32ToPayload(data []int32) error {
+func (w *NativePayloadWriter) AddInt32ToPayload(data []int32, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.Int32Builder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddInt64ToPayload(data []int64) error {
+func (w *NativePayloadWriter) AddInt64ToPayload(data []int64, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.Int64Builder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddFloatToPayload(data []float32) error {
+func (w *NativePayloadWriter) AddFloatToPayload(data []float32, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
 
 	if len(data) == 0 {
 		return errors.New("can't add empty msgs into payload")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.Float32Builder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddDoubleToPayload(data []float64) error {
+func (w *NativePayloadWriter) AddDoubleToPayload(data []float64, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
 	}
@@ -305,18 +391,38 @@ func (w *NativePayloadWriter) AddDoubleToPayload(data []float64) error {
 		return errors.New("can't add empty msgs into payload")
 	}
 
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(data) != len(validData) {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
 	builder, ok := w.builder.(*array.Float64Builder)
 	if !ok {
 		return errors.New("failed to cast ArrayBuilder")
 	}
-	builder.AppendValues(data, nil)
+	builder.AppendValues(data, validData)
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddOneStringToPayload(data string) error {
+func (w *NativePayloadWriter) AddOneStringToPayload(data string, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(validData) != 1 {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), len(data))
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.StringBuilder)
@@ -324,14 +430,28 @@ func (w *NativePayloadWriter) AddOneStringToPayload(data string) error {
 		return errors.New("failed to cast ArrayBuilder")
 	}
 
-	builder.Append(data)
+	if w.nullable && !validData[0] {
+		builder.AppendNull()
+	} else {
+		builder.Append(data)
+	}
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddOneArrayToPayload(data *schemapb.ScalarField) error {
+func (w *NativePayloadWriter) AddOneArrayToPayload(data *schemapb.ScalarField, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(validData) != 1 {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), 1)
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	bytes, err := proto.Marshal(data)
@@ -344,14 +464,28 @@ func (w *NativePayloadWriter) AddOneArrayToPayload(data *schemapb.ScalarField) e
 		return errors.New("failed to cast ArrayBuilder")
 	}
 
-	builder.Append(bytes)
+	if w.nullable && !validData[0] {
+		builder.AppendNull()
+	} else {
+		builder.Append(bytes)
+	}
 
 	return nil
 }
 
-func (w *NativePayloadWriter) AddOneJSONToPayload(data []byte) error {
+func (w *NativePayloadWriter) AddOneJSONToPayload(data []byte, validData []bool) error {
 	if w.finished {
 		return errors.New("can't append data to finished writer")
+	}
+
+	if !w.nullable && len(validData) != 0 {
+		msg := fmt.Sprintf("length of validData(%d) must be 0 when not nullable", len(validData))
+		return merr.WrapErrParameterInvalidMsg(msg)
+	}
+
+	if w.nullable && len(validData) != 1 {
+		msg := fmt.Sprintf("length of validData(%d) must equal to data(%d) when nullable", len(validData), 1)
+		return merr.WrapErrParameterInvalidMsg(msg)
 	}
 
 	builder, ok := w.builder.(*array.BinaryBuilder)
@@ -359,7 +493,11 @@ func (w *NativePayloadWriter) AddOneJSONToPayload(data []byte) error {
 		return errors.New("failed to cast ArrayBuilder")
 	}
 
-	builder.Append(data)
+	if w.nullable && !validData[0] {
+		builder.AppendNull()
+	} else {
+		builder.Append(data)
+	}
 
 	return nil
 }
@@ -452,8 +590,9 @@ func (w *NativePayloadWriter) FinishPayloadWriter() error {
 	w.finished = true
 
 	field := arrow.Field{
-		Name: "val",
-		Type: w.arrowType,
+		Name:     "val",
+		Type:     w.arrowType,
+		Nullable: w.nullable,
 	}
 	schema := arrow.NewSchema([]arrow.Field{
 		field,

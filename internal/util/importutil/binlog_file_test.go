@@ -50,7 +50,7 @@ func createBinlogBuf(t *testing.T, dataType schemapb.DataType, data interface{})
 		}
 	}
 
-	evt, err := w.NextInsertEventWriter(dim)
+	evt, err := w.NextInsertEventWriter(false, dim)
 	assert.NoError(t, err)
 	assert.NotNil(t, evt)
 
@@ -59,49 +59,49 @@ func createBinlogBuf(t *testing.T, dataType schemapb.DataType, data interface{})
 
 	switch dataType {
 	case schemapb.DataType_Bool:
-		err = evt.AddBoolToPayload(data.([]bool))
+		err = evt.AddBoolToPayload(data.([]bool), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
 		sizeTotal := len(data.([]bool))
 		w.AddExtra("original_size", fmt.Sprintf("%v", sizeTotal))
 	case schemapb.DataType_Int8:
-		err = evt.AddInt8ToPayload(data.([]int8))
+		err = evt.AddInt8ToPayload(data.([]int8), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
 		sizeTotal := len(data.([]int8))
 		w.AddExtra("original_size", fmt.Sprintf("%v", sizeTotal))
 	case schemapb.DataType_Int16:
-		err = evt.AddInt16ToPayload(data.([]int16))
+		err = evt.AddInt16ToPayload(data.([]int16), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
 		sizeTotal := len(data.([]int16)) * 2
 		w.AddExtra("original_size", fmt.Sprintf("%v", sizeTotal))
 	case schemapb.DataType_Int32:
-		err = evt.AddInt32ToPayload(data.([]int32))
+		err = evt.AddInt32ToPayload(data.([]int32), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
 		sizeTotal := len(data.([]int32)) * 4
 		w.AddExtra("original_size", fmt.Sprintf("%v", sizeTotal))
 	case schemapb.DataType_Int64:
-		err = evt.AddInt64ToPayload(data.([]int64))
+		err = evt.AddInt64ToPayload(data.([]int64), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
 		sizeTotal := len(data.([]int64)) * 8
 		w.AddExtra("original_size", fmt.Sprintf("%v", sizeTotal))
 	case schemapb.DataType_Float:
-		err = evt.AddFloatToPayload(data.([]float32))
+		err = evt.AddFloatToPayload(data.([]float32), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
 		sizeTotal := len(data.([]float32)) * 4
 		w.AddExtra("original_size", fmt.Sprintf("%v", sizeTotal))
 	case schemapb.DataType_Double:
-		err = evt.AddDoubleToPayload(data.([]float64))
+		err = evt.AddDoubleToPayload(data.([]float64), nil)
 		assert.NoError(t, err)
 		// without the two lines, the case will crash at here.
 		// the "original_size" is come from storage.originalSizeKey
@@ -111,7 +111,7 @@ func createBinlogBuf(t *testing.T, dataType schemapb.DataType, data interface{})
 		values := data.([]string)
 		sizeTotal := 0
 		for _, val := range values {
-			err = evt.AddOneStringToPayload(val)
+			err = evt.AddOneStringToPayload(val, nil)
 			assert.NoError(t, err)
 			sizeTotal += binary.Size(val)
 		}
@@ -122,7 +122,7 @@ func createBinlogBuf(t *testing.T, dataType schemapb.DataType, data interface{})
 		rows := data.([][]byte)
 		sizeTotal := 0
 		for i := 0; i < len(rows); i++ {
-			err = evt.AddOneJSONToPayload(rows[i])
+			err = evt.AddOneJSONToPayload(rows[i], nil)
 			assert.NoError(t, err)
 			sizeTotal += binary.Size(rows[i])
 		}
@@ -133,7 +133,7 @@ func createBinlogBuf(t *testing.T, dataType schemapb.DataType, data interface{})
 		rows := data.([]*schemapb.ScalarField)
 		sizeTotal := 0
 		for i := 0; i < len(rows); i++ {
-			err = evt.AddOneArrayToPayload(rows[i])
+			err = evt.AddOneArrayToPayload(rows[i], nil)
 			assert.NoError(t, err)
 			sizeTotal += binary.Size(rows[i])
 		}

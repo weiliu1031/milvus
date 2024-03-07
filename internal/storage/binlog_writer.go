@@ -150,7 +150,7 @@ type InsertBinlogWriter struct {
 }
 
 // NextInsertEventWriter returns an event writer to write insert data to an event.
-func (writer *InsertBinlogWriter) NextInsertEventWriter(dim ...int) (*insertEventWriter, error) {
+func (writer *InsertBinlogWriter) NextInsertEventWriter(nullable bool, dim ...int) (*insertEventWriter, error) {
 	if writer.isClosed() {
 		return nil, fmt.Errorf("binlog has closed")
 	}
@@ -161,9 +161,9 @@ func (writer *InsertBinlogWriter) NextInsertEventWriter(dim ...int) (*insertEven
 		if len(dim) != 1 {
 			return nil, fmt.Errorf("incorrect input numbers")
 		}
-		event, err = newInsertEventWriter(writer.PayloadDataType, dim[0])
+		event, err = newInsertEventWriter(writer.PayloadDataType, nullable, dim[0])
 	} else {
-		event, err = newInsertEventWriter(writer.PayloadDataType)
+		event, err = newInsertEventWriter(writer.PayloadDataType, nullable)
 	}
 	if err != nil {
 		return nil, err

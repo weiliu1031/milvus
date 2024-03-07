@@ -121,6 +121,7 @@ type FieldData interface {
 	RowNum() int
 	GetRow(i int) any
 	AppendRow(row interface{}) error
+	GetNullable() bool
 }
 
 func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema) (FieldData, error) {
@@ -156,49 +157,59 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema)
 
 	case schemapb.DataType_Bool:
 		return &BoolFieldData{
-			Data: make([]bool, 0),
+			Data:      make([]bool, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 
 	case schemapb.DataType_Int8:
 		return &Int8FieldData{
-			Data: make([]int8, 0),
+			Data:      make([]int8, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 
 	case schemapb.DataType_Int16:
 		return &Int16FieldData{
-			Data: make([]int16, 0),
+			Data:      make([]int16, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 
 	case schemapb.DataType_Int32:
 		return &Int32FieldData{
-			Data: make([]int32, 0),
+			Data:      make([]int32, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 
 	case schemapb.DataType_Int64:
 		return &Int64FieldData{
-			Data: make([]int64, 0),
+			Data:      make([]int64, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 	case schemapb.DataType_Float:
 		return &FloatFieldData{
-			Data: make([]float32, 0),
+			Data:      make([]float32, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 
 	case schemapb.DataType_Double:
 		return &DoubleFieldData{
-			Data: make([]float64, 0),
+			Data:      make([]float64, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 	case schemapb.DataType_JSON:
 		return &JSONFieldData{
-			Data: make([][]byte, 0),
+			Data:      make([][]byte, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 	case schemapb.DataType_Array:
 		return &ArrayFieldData{
 			Data:        make([]*schemapb.ScalarField, 0),
 			ElementType: fieldSchema.GetElementType(),
+			ValidData:   make([]bool, 0),
 		}, nil
 	case schemapb.DataType_String, schemapb.DataType_VarChar:
 		return &StringFieldData{
-			Data: make([]string, 0),
+			Data:      make([]string, 0),
+			ValidData: make([]bool, 0),
 		}, nil
 	default:
 		return nil, fmt.Errorf("Unexpected schema data type: %d", dataType)
@@ -206,35 +217,45 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema)
 }
 
 type BoolFieldData struct {
-	Data []bool
+	Data      []bool
+	ValidData []bool
 }
 type Int8FieldData struct {
-	Data []int8
+	Data      []int8
+	ValidData []bool
 }
 type Int16FieldData struct {
-	Data []int16
+	Data      []int16
+	ValidData []bool
 }
 type Int32FieldData struct {
-	Data []int32
+	Data      []int32
+	ValidData []bool
 }
 type Int64FieldData struct {
-	Data []int64
+	Data      []int64
+	ValidData []bool
 }
 type FloatFieldData struct {
-	Data []float32
+	Data      []float32
+	ValidData []bool
 }
 type DoubleFieldData struct {
-	Data []float64
+	Data      []float64
+	ValidData []bool
 }
 type StringFieldData struct {
-	Data []string
+	Data      []string
+	ValidData []bool
 }
 type ArrayFieldData struct {
 	ElementType schemapb.DataType
 	Data        []*schemapb.ScalarField
+	ValidData   []bool
 }
 type JSONFieldData struct {
-	Data [][]byte
+	Data      [][]byte
+	ValidData []bool
 }
 type BinaryVectorFieldData struct {
 	Data []byte
@@ -460,4 +481,47 @@ func (data *JSONFieldData) GetMemorySize() int {
 		size += len(val) + 16
 	}
 	return size
+}
+
+// GetMemorySize implements FieldData.GetMemorySize
+func (data *BoolFieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *Int8FieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *Int16FieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *Int32FieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *Int64FieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *FloatFieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *DoubleFieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+func (data *BinaryVectorFieldData) GetNullable() bool {
+	return false
+}
+func (data *FloatVectorFieldData) GetNullable() bool {
+	return false
+}
+func (data *Float16VectorFieldData) GetNullable() bool {
+	return false
+}
+func (data *StringFieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+
+func (data *ArrayFieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
+}
+
+func (data *JSONFieldData) GetNullable() bool {
+	return len(data.ValidData) != 0
 }
