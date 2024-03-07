@@ -57,10 +57,10 @@ std::shared_ptr<arrow::ArrayBuilder>
 CreateArrowBuilder(DataType data_type, int dim);
 
 std::shared_ptr<arrow::Schema>
-CreateArrowSchema(DataType data_type);
+CreateArrowSchema(DataType data_type, bool nullable);
 
 std::shared_ptr<arrow::Schema>
-CreateArrowSchema(DataType data_type, int dim);
+CreateArrowSchema(DataType data_type, int dim, bool nullable);
 
 int
 GetDimensionFromFileMetaData(const parquet::ColumnDescriptor* schema,
@@ -155,6 +155,7 @@ CreateChunkManager(const StorageConfig& storage_config);
 
 FieldDataPtr
 CreateFieldData(const DataType& type,
+                bool nullable,
                 int64_t dim = 1,
                 int64_t total_num_rows = 0);
 

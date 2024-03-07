@@ -27,7 +27,7 @@ ChunkCache::Read(const std::string& filepath) {
         return ca->second;
     }
     ca.release();
-
+    // lxg
     auto field_data = DownloadAndDecodeRemoteFile(cm_.get(), filepath);
     auto column = Mmap(path, field_data->GetFieldData());
     auto ok =
@@ -98,7 +98,8 @@ ChunkCache::Mmap(const std::filesystem::path& path,
     if (datatype_is_variable(data_type)) {
         AssertInfo(false, "TODO: unimplemented for variable data type");
     } else {
-        column = std::make_shared<Column>(file, data_size, dim, data_type);
+        column = std::make_shared<Column>(
+            file, data_size, dim, data_type, field_data->IsNullable());
     }
 
     // unlink

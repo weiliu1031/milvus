@@ -549,15 +549,15 @@ TEST(Expr, TestArrayRange) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto long_array_fid =
-        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64);
+        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64,false);
     auto bool_array_fid =
-        schema->AddDebugField("bool_array", DataType::ARRAY, DataType::BOOL);
+        schema->AddDebugField("bool_array", DataType::ARRAY, DataType::BOOL,false);
     auto string_array_fid = schema->AddDebugField(
-        "string_array", DataType::ARRAY, DataType::VARCHAR);
+        "string_array", DataType::ARRAY, DataType::VARCHAR,false);
     auto float_array_fid =
-        schema->AddDebugField("double_array", DataType::ARRAY, DataType::FLOAT);
+        schema->AddDebugField("double_array", DataType::ARRAY, DataType::FLOAT,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -688,9 +688,9 @@ TEST(Expr, TestArrayEqual) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto long_array_fid =
-        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64);
+        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -814,7 +814,7 @@ TEST(Expr, PraseArrayContainsExpr) {
         schema->AddDebugField(
             "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
         schema->AddField(
-            FieldName("array"), FieldId(101), DataType::ARRAY, DataType::INT64);
+            FieldName("array"), FieldId(101), DataType::ARRAY, DataType::INT64,false);
         auto plan =
             CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size());
     }
@@ -832,19 +832,19 @@ TEST(Expr, TestArrayContains) {
     using namespace milvus::segcore;
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto int_array_fid =
-        schema->AddDebugField("int_array", DataType::ARRAY, DataType::INT8);
+        schema->AddDebugField("int_array", DataType::ARRAY, DataType::INT8,false);
     auto long_array_fid =
-        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64);
+        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64,false);
     auto bool_array_fid =
-        schema->AddDebugField("bool_array", DataType::ARRAY, DataType::BOOL);
+        schema->AddDebugField("bool_array", DataType::ARRAY, DataType::BOOL,false);
     auto float_array_fid =
-        schema->AddDebugField("float_array", DataType::ARRAY, DataType::FLOAT);
+        schema->AddDebugField("float_array", DataType::ARRAY, DataType::FLOAT,false);
     auto double_array_fid = schema->AddDebugField(
-        "double_array", DataType::ARRAY, DataType::DOUBLE);
+        "double_array", DataType::ARRAY, DataType::DOUBLE,false);
     auto string_array_fid = schema->AddDebugField(
-        "string_array", DataType::ARRAY, DataType::VARCHAR);
+        "string_array", DataType::ARRAY, DataType::VARCHAR,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -1150,15 +1150,15 @@ TEST(Expr, TestArrayBinaryArith) {
     using namespace milvus::segcore;
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto int_array_fid =
-        schema->AddDebugField("int_array", DataType::ARRAY, DataType::INT8);
+        schema->AddDebugField("int_array", DataType::ARRAY, DataType::INT8,false);
     auto long_array_fid =
-        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64);
+        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64,false);
     auto float_array_fid =
-        schema->AddDebugField("float_array", DataType::ARRAY, DataType::FLOAT);
+        schema->AddDebugField("float_array", DataType::ARRAY, DataType::FLOAT,false);
     auto double_array_fid = schema->AddDebugField(
-        "double_array", DataType::ARRAY, DataType::DOUBLE);
+        "double_array", DataType::ARRAY, DataType::DOUBLE,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -1718,9 +1718,9 @@ TEST(Expr, TestArrayStringMatch) {
     using namespace milvus::segcore;
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto string_array_fid = schema->AddDebugField(
-        "string_array", DataType::ARRAY, DataType::VARCHAR);
+        "string_array", DataType::ARRAY, DataType::VARCHAR,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -1800,15 +1800,15 @@ TEST(Expr, TestArrayInTerm) {
     using namespace milvus::segcore;
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto long_array_fid =
-        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64);
+        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64,false);
     auto bool_array_fid =
-        schema->AddDebugField("bool_array", DataType::ARRAY, DataType::BOOL);
+        schema->AddDebugField("bool_array", DataType::ARRAY, DataType::BOOL,false);
     auto float_array_fid =
-        schema->AddDebugField("float_array", DataType::ARRAY, DataType::FLOAT);
+        schema->AddDebugField("float_array", DataType::ARRAY, DataType::FLOAT,false);
     auto string_array_fid = schema->AddDebugField(
-        "string_array", DataType::ARRAY, DataType::VARCHAR);
+        "string_array", DataType::ARRAY, DataType::VARCHAR,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -2012,9 +2012,9 @@ TEST(Expr, TestTermInArray) {
     using namespace milvus::segcore;
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
     auto long_array_fid =
-        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64);
+        schema->AddDebugField("long_array", DataType::ARRAY, DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);

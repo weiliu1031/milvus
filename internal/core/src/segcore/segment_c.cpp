@@ -290,7 +290,8 @@ LoadFieldRawData(CSegmentInterface c_segment,
                 dim = field_meta.get_dim();
             }
         }
-        auto field_data = milvus::storage::CreateFieldData(data_type, dim);
+        auto field_data =
+            milvus::storage::CreateFieldData(data_type, false, dim);
         field_data->FillFieldData(data, row_count);
         milvus::storage::FieldDataChannelPtr channel =
             std::make_shared<milvus::storage::FieldDataChannel>();

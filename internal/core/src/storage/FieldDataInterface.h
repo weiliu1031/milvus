@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <_types/_uint8_t.h>
 #include <cstddef>
 #include <iostream>
 #include <memory>
@@ -39,7 +40,8 @@ using DataType = milvus::DataType;
 
 class FieldDataBase {
  public:
-    explicit FieldDataBase(DataType data_type) : data_type_(data_type) {
+    explicit FieldDataBase(DataType data_type, bool nullable)
+        : data_type_(data_type), nullable_(nullable) {
     }
     virtual ~FieldDataBase() = default;
 
@@ -47,10 +49,18 @@ class FieldDataBase {
     FillFieldData(const void* source, ssize_t element_count) = 0;
 
     virtual void
+    FillFieldData(const void* field_data,
+                  const uint8_t* valid_data,
+                  ssize_t element_count) = 0;
+
+    virtual void
     FillFieldData(const std::shared_ptr<arrow::Array> array) = 0;
 
     virtual const void*
     Data() const = 0;
+
+    virtual const uint8_t*
+    ValidData() const = 0;
 
     virtual const void*
     RawValue(ssize_t offset) const = 0;
@@ -67,6 +77,9 @@ class FieldDataBase {
     virtual bool
     IsFull() const = 0;
 
+    virtual bool
+    IsNullable() const = 0;
+
     virtual void
     Reserve(size_t cap) = 0;
 
@@ -82,8 +95,15 @@ class FieldDataBase {
         return data_type_;
     }
 
+    virtual int64_t
+    get_null_count() const = 0;
+
+    virtual bool
+    is_null(ssize_t offset) const = 0;
+
  protected:
     const DataType data_type_;
+    const bool nullable_;
 };
 
 template <typename Type, bool is_scalar = false>
@@ -102,15 +122,25 @@ class FieldDataImpl : public FieldDataBase {
  public:
     explicit FieldDataImpl(ssize_t dim,
                            DataType data_type,
+                           bool nullable,
                            int64_t buffered_num_rows = 0)
-        : FieldDataBase(data_type),
+        : FieldDataBase(data_type, nullable),
           num_rows_(buffered_num_rows),
           dim_(is_scalar ? 1 : dim) {
         field_data_.resize(num_rows_ * dim_);
+        if (nullable) {
+            valid_data_ =
+                std::shared_ptr<uint8_t[]>(new uint8_t[(num_rows_ + 7) / 8]);
+        }
     }
 
     void
     FillFieldData(const void* source, ssize_t element_count) override;
+
+    void
+    FillFieldData(const void* field_data,
+                  const uint8_t* valid_data,
+                  ssize_t element_count) override;
 
     void
     FillFieldData(const std::shared_ptr<arrow::Array> array) override;
@@ -131,12 +161,32 @@ class FieldDataImpl : public FieldDataBase {
         return field_data_.data();
     }
 
+    const uint8_t*
+    ValidData() const override {
+        return valid_data_.get();
+    }
+
     const void*
     RawValue(ssize_t offset) const override {
         AssertInfo(offset < get_num_rows(),
                    "field data subscript out of range");
         AssertInfo(offset < length(),
                    "subscript position don't has valid value");
+        return &field_data_[offset];
+    }
+
+    std::optional<const void*>
+    Value(ssize_t offset) {
+        if (!is_scalar) {
+            return RawValue(offset);
+        }
+        AssertInfo(offset < get_num_rows(),
+                   "field data subscript out of range");
+        AssertInfo(offset < length(),
+                   "subscript position don't has valid value");
+        if (nullable_ && !valid_data_[offset]) {
+            return std::nullopt;
+        }
         return &field_data_[offset];
     }
 
@@ -166,12 +216,20 @@ class FieldDataImpl : public FieldDataBase {
         return buffered_num_rows == filled_num_rows;
     }
 
+    bool
+    IsNullable() const override {
+        return nullable_;
+    }
+
     void
     Reserve(size_t cap) override {
         std::lock_guard lck(num_rows_mutex_);
         if (cap > num_rows_) {
             num_rows_ = cap;
             field_data_.resize(num_rows_ * dim_);
+        }
+        if (nullable_) {
+            valid_data_ = std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
         }
     }
 
@@ -188,6 +246,11 @@ class FieldDataImpl : public FieldDataBase {
         if (num_rows > num_rows_) {
             num_rows_ = num_rows;
             field_data_.resize(num_rows_ * dim_);
+            if (nullable_) {
+                ssize_t byte_count = (num_rows + 7) / 8;
+                valid_data_ =
+                    std::shared_ptr<uint8_t[]>(new uint8_t[byte_count]);
+            }
         }
     }
 
@@ -202,10 +265,28 @@ class FieldDataImpl : public FieldDataBase {
         return dim_;
     }
 
+    int64_t
+    get_null_count() const override {
+        std::shared_lock lck(tell_mutex_);
+        return null_count;
+    }
+
+    virtual bool
+    is_null(ssize_t offset) const override {
+        std::shared_lock lck(tell_mutex_);
+        if (!nullable_) {
+            return false;
+        }
+        auto bit = (valid_data_[offset >> 3] >> ((offset & 0x07))) & 1;
+        return !bit;
+    }
+
  protected:
     Chunk field_data_;
+    std::shared_ptr<uint8_t[]> valid_data_;
     int64_t num_rows_;
     mutable std::shared_mutex num_rows_mutex_;
+    int64_t null_count;
     size_t length_{};
     mutable std::shared_mutex tell_mutex_;
 
@@ -215,8 +296,11 @@ class FieldDataImpl : public FieldDataBase {
 
 class FieldDataStringImpl : public FieldDataImpl<std::string, true> {
  public:
-    explicit FieldDataStringImpl(DataType data_type, int64_t total_num_rows = 0)
-        : FieldDataImpl<std::string, true>(1, data_type, total_num_rows) {
+    explicit FieldDataStringImpl(DataType data_type,
+                                 bool nullable,
+                                 int64_t total_num_rows = 0)
+        : FieldDataImpl<std::string, true>(
+              1, data_type, nullable, total_num_rows) {
     }
 
     int64_t
@@ -261,8 +345,10 @@ class FieldDataStringImpl : public FieldDataImpl<std::string, true> {
 
 class FieldDataJsonImpl : public FieldDataImpl<Json, true> {
  public:
-    explicit FieldDataJsonImpl(DataType data_type, int64_t total_num_rows = 0)
-        : FieldDataImpl<Json, true>(1, data_type, total_num_rows) {
+    explicit FieldDataJsonImpl(DataType data_type,
+                               bool nullable,
+                               int64_t total_num_rows = 0)
+        : FieldDataImpl<Json, true>(1, data_type, nullable, total_num_rows) {
     }
 
     int64_t
@@ -308,8 +394,10 @@ class FieldDataJsonImpl : public FieldDataImpl<Json, true> {
 
 class FieldDataArrayImpl : public FieldDataImpl<Array, true> {
  public:
-    explicit FieldDataArrayImpl(DataType data_type, int64_t total_num_rows = 0)
-        : FieldDataImpl<Array, true>(1, data_type, total_num_rows) {
+    explicit FieldDataArrayImpl(DataType data_type,
+                                bool nullable,
+                                int64_t total_num_rows = 0)
+        : FieldDataImpl<Array, true>(1, data_type, nullable, total_num_rows) {
     }
 
     int64_t

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <_types/_uint8_t.h>
 #include <fmt/core.h>
 #include <tbb/concurrent_vector.h>
 
@@ -110,6 +111,21 @@ class VectorBase {
                  ssize_t element_count,
                  const DataArray* data,
                  const FieldMeta& field_meta);
+
+    virtual void
+    set_valid_data_raw(ssize_t element_offset,
+                       const void* source,
+                       ssize_t element_count) = 0;
+
+    virtual void
+    set_valid_data_raw(ssize_t element_offset,
+                       const std::vector<storage::FieldDataPtr>& data) = 0;
+
+    void
+    set_valid_data_raw(ssize_t element_offset,
+                       ssize_t element_count,
+                       const DataArray* data,
+                       const FieldMeta& field_meta);
 
     virtual void
     fill_chunk_data(const std::vector<storage::FieldDataPtr>& data) = 0;
@@ -226,6 +242,18 @@ class ConcurrentVectorImpl : public VectorBase {
     }
 
     void
+    set_valid_data_raw(
+        ssize_t element_offset,
+        const std::vector<storage::FieldDataPtr>& datas) override {
+        for (auto& field_data : datas) {
+            auto num_rows = field_data->get_num_rows();
+            set_valid_data_raw(
+                element_offset, field_data->ValidData(), num_rows);
+            element_offset += num_rows;
+        }
+    }
+
+    void
     set_data_raw(ssize_t element_offset,
                  const void* source,
                  ssize_t element_count) override {
@@ -235,6 +263,19 @@ class ConcurrentVectorImpl : public VectorBase {
         this->grow_to_at_least(element_offset + element_count);
         set_data(
             element_offset, static_cast<const Type*>(source), element_count);
+    }
+
+    void
+    set_valid_data_raw(ssize_t element_offset,
+                       const void* source,
+                       ssize_t element_count) override {
+        if (element_count == 0) {
+            return;
+        }
+        auto count = upper_div(element_count, size_per_chunk_);
+        valid_data_.emplace_to_at_least(count, size_per_chunk_);
+        set_valid_data_raw(
+            element_offset, static_cast<const uint8_t*>(source), element_count);
     }
 
     void
@@ -273,6 +314,41 @@ class ConcurrentVectorImpl : public VectorBase {
         }
     }
 
+    void
+    set_valid_data_raw(ssize_t element_offset,
+                       const uint8_t* source,
+                       ssize_t element_count) {
+        auto id = element_offset / size_per_chunk_;
+        auto offset = element_offset % size_per_chunk_;
+        ssize_t source_offset = 0;
+        // first partition:
+        if (offset + element_count <= size_per_chunk_) {
+            // only first
+            fill_valid_data(id, offset, element_count, source, source_offset);
+            return;
+        }
+
+        auto first_size = size_per_chunk_ - offset;
+        fill_valid_data(id, offset, first_size, source, source_offset);
+
+        source_offset += size_per_chunk_ - offset;
+        element_count -= first_size;
+        ++id;
+
+        // the middle
+        while (element_count >= size_per_chunk_) {
+            fill_valid_data(id, 0, size_per_chunk_, source, source_offset);
+            source_offset += size_per_chunk_;
+            element_count -= size_per_chunk_;
+            ++id;
+        }
+
+        // the final
+        if (element_count > 0) {
+            fill_valid_data(id, 0, element_count, source, source_offset);
+        }
+    }
+
     const Chunk&
     get_chunk(ssize_t chunk_index) const {
         return chunks_[chunk_index];
@@ -286,6 +362,11 @@ class ConcurrentVectorImpl : public VectorBase {
     const void*
     get_chunk_data(ssize_t chunk_index) const override {
         return chunks_[chunk_index].data();
+    }
+
+    const uint8_t*
+    get_valid_data(ssize_t index) {
+        return &valid_data_[index];
     }
 
     // just for fun, don't use it directly
@@ -350,10 +431,30 @@ class ConcurrentVectorImpl : public VectorBase {
                     ptr + chunk_offset * Dim);
     }
 
+    void
+    fill_valid_data(ssize_t id,
+                    ssize_t offset,
+                    ssize_t element_count,
+                    const uint8_t* source,
+                    ssize_t source_offset) {
+        if (element_count <= 0) {
+            return;
+        }
+        auto num = valid_data_.size();
+        AssertInfo(
+            id < num,
+            fmt::format(
+                "id out of num when fill valid_data, id={}, num={}", id, num));
+        uint8_t& data = valid_data_[id];
+
+        std::copy_n(source + source_offset, element_count, &data + offset);
+    }
+
     const ssize_t Dim;
 
  private:
     ThreadSafeVector<Chunk> chunks_;
+    ThreadSafeVector<uint8_t> valid_data_;
 };
 
 template <typename Type>

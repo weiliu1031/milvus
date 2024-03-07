@@ -20,7 +20,7 @@ TEST(Binary, Insert) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "vecbin", DataType::VECTOR_BINARY, 128, knowhere::metric::JACCARD);
-    auto i64_fid = schema->AddDebugField("age", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("age", DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
     auto dataset = DataGen(schema, N, 10);
     auto segment = CreateGrowingSegment(schema, empty_index_meta);

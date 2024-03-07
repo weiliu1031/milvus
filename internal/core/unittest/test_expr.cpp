@@ -109,7 +109,7 @@ TEST(Expr, Range) {
     auto schema = std::make_shared<Schema>();
     schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    schema->AddDebugField("age", DataType::INT32);
+    schema->AddDebugField("age", DataType::INT32,false);
     auto plan =
         CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size());
     ShowPlanNodeVisitor shower;
@@ -192,7 +192,7 @@ TEST(Expr, RangeBinary) {
     auto schema = std::make_shared<Schema>();
     schema->AddDebugField(
         "fakevec", DataType::VECTOR_BINARY, 512, knowhere::metric::JACCARD);
-    schema->AddDebugField("age", DataType::INT32);
+    schema->AddDebugField("age", DataType::INT32,false);
     auto plan =
         CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size());
     ShowPlanNodeVisitor shower;
@@ -275,7 +275,7 @@ TEST(Expr, InvalidRange) {
     auto schema = std::make_shared<Schema>();
     schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    schema->AddDebugField("age", DataType::INT32);
+    schema->AddDebugField("age", DataType::INT32,false);
     ASSERT_ANY_THROW(
         CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size()));
 }
@@ -480,7 +480,7 @@ TEST(Expr, TestRange) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i64_fid = schema->AddDebugField("age", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("age", DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -546,8 +546,8 @@ TEST(Expr, TestBinaryRangeJSON) {
     };
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
-    auto json_fid = schema->AddDebugField("json", DataType::JSON);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
+    auto json_fid = schema->AddDebugField("json", DataType::JSON,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -634,8 +634,8 @@ TEST(Expr, TestExistsJson) {
     };
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
-    auto json_fid = schema->AddDebugField("json", DataType::JSON);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
+    auto json_fid = schema->AddDebugField("json", DataType::JSON,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -699,8 +699,8 @@ TEST(Expr, TestUnaryRangeJson) {
     };
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
-    auto json_fid = schema->AddDebugField("json", DataType::JSON);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
+    auto json_fid = schema->AddDebugField("json", DataType::JSON,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -863,8 +863,8 @@ TEST(Expr, TestTermJson) {
     };
 
     auto schema = std::make_shared<Schema>();
-    auto i64_fid = schema->AddDebugField("id", DataType::INT64);
-    auto json_fid = schema->AddDebugField("json", DataType::JSON);
+    auto i64_fid = schema->AddDebugField("id", DataType::INT64,false);
+    auto json_fid = schema->AddDebugField("json", DataType::JSON,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -996,7 +996,7 @@ TEST(Expr, TestTerm) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i64_fid = schema->AddDebugField("age", DataType::INT64);
+    auto i64_fid = schema->AddDebugField("age", DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -1105,8 +1105,8 @@ TEST(Expr, TestCompare) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i32_fid = schema->AddDebugField("age1", DataType::INT32);
-    auto i64_fid = schema->AddDebugField("age2", DataType::INT64);
+    auto i32_fid = schema->AddDebugField("age1", DataType::INT32,false);
+    auto i64_fid = schema->AddDebugField("age2", DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);
@@ -1196,8 +1196,8 @@ TEST(Expr, TestCompareWithScalarIndex) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i32_fid = schema->AddDebugField("age32", DataType::INT32);
-    auto i64_fid = schema->AddDebugField("age64", DataType::INT64);
+    auto i32_fid = schema->AddDebugField("age32", DataType::INT32,false);
+    auto i64_fid = schema->AddDebugField("age64", DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateSealedSegment(schema);
@@ -1259,23 +1259,23 @@ TEST(Expr, TestCompareExpr) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto bool_fid = schema->AddDebugField("bool", DataType::BOOL);
-    auto bool_1_fid = schema->AddDebugField("bool1", DataType::BOOL);
-    auto int8_fid = schema->AddDebugField("int8", DataType::INT8);
-    auto int8_1_fid = schema->AddDebugField("int81", DataType::INT8);
-    auto int16_fid = schema->AddDebugField("int16", DataType::INT16);
-    auto int16_1_fid = schema->AddDebugField("int161", DataType::INT16);
-    auto int32_fid = schema->AddDebugField("int32", DataType::INT32);
-    auto int32_1_fid = schema->AddDebugField("int321", DataType::INT32);
-    auto int64_fid = schema->AddDebugField("int64", DataType::INT64);
-    auto int64_1_fid = schema->AddDebugField("int641", DataType::INT64);
-    auto float_fid = schema->AddDebugField("float", DataType::FLOAT);
-    auto float_1_fid = schema->AddDebugField("float1", DataType::FLOAT);
-    auto double_fid = schema->AddDebugField("double", DataType::DOUBLE);
-    auto double_1_fid = schema->AddDebugField("double1", DataType::DOUBLE);
-    auto str1_fid = schema->AddDebugField("string1", DataType::VARCHAR);
-    auto str2_fid = schema->AddDebugField("string2", DataType::VARCHAR);
-    auto str3_fid = schema->AddDebugField("string3", DataType::VARCHAR);
+    auto bool_fid = schema->AddDebugField("bool", DataType::BOOL,false);
+    auto bool_1_fid = schema->AddDebugField("bool1", DataType::BOOL,false);
+    auto int8_fid = schema->AddDebugField("int8", DataType::INT8,false);
+    auto int8_1_fid = schema->AddDebugField("int81", DataType::INT8,false);
+    auto int16_fid = schema->AddDebugField("int16", DataType::INT16,false);
+    auto int16_1_fid = schema->AddDebugField("int161", DataType::INT16,false);
+    auto int32_fid = schema->AddDebugField("int32", DataType::INT32,false);
+    auto int32_1_fid = schema->AddDebugField("int321", DataType::INT32,false);
+    auto int64_fid = schema->AddDebugField("int64", DataType::INT64,false);
+    auto int64_1_fid = schema->AddDebugField("int641", DataType::INT64,false);
+    auto float_fid = schema->AddDebugField("float", DataType::FLOAT,false);
+    auto float_1_fid = schema->AddDebugField("float1", DataType::FLOAT,false);
+    auto double_fid = schema->AddDebugField("double", DataType::DOUBLE,false);
+    auto double_1_fid = schema->AddDebugField("double1", DataType::DOUBLE,false);
+    auto str1_fid = schema->AddDebugField("string1", DataType::VARCHAR,false);
+    auto str2_fid = schema->AddDebugField("string2", DataType::VARCHAR,false);
+    auto str3_fid = schema->AddDebugField("string3", DataType::VARCHAR,false);
     schema->set_primary_field_id(str1_fid);
 
     auto seg = CreateSealedSegment(schema);
@@ -1414,8 +1414,8 @@ TEST(Expr, TestMultiLogicalExprsOptimization) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto int64_fid = schema->AddDebugField("int64", DataType::INT64);
-    auto str1_fid = schema->AddDebugField("string1", DataType::VARCHAR);
+    auto int64_fid = schema->AddDebugField("int64", DataType::INT64,false);
+    auto str1_fid = schema->AddDebugField("string1", DataType::VARCHAR,false);
     schema->set_primary_field_id(str1_fid);
 
     auto seg = CreateSealedSegment(schema);
@@ -1503,18 +1503,18 @@ TEST(Expr, TestExprs) {
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
         "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto int8_fid = schema->AddDebugField("int8", DataType::INT8);
-    auto int8_1_fid = schema->AddDebugField("int81", DataType::INT8);
-    auto int16_fid = schema->AddDebugField("int16", DataType::INT16);
-    auto int16_1_fid = schema->AddDebugField("int161", DataType::INT16);
-    auto int32_fid = schema->AddDebugField("int32", DataType::INT32);
-    auto int32_1_fid = schema->AddDebugField("int321", DataType::INT32);
-    auto int64_fid = schema->AddDebugField("int64", DataType::INT64);
-    auto int64_1_fid = schema->AddDebugField("int641", DataType::INT64);
-    auto str1_fid = schema->AddDebugField("string1", DataType::VARCHAR);
-    auto str2_fid = schema->AddDebugField("string2", DataType::VARCHAR);
-    auto float_fid = schema->AddDebugField("float", DataType::FLOAT);
-    auto double_fid = schema->AddDebugField("double", DataType::DOUBLE);
+    auto int8_fid = schema->AddDebugField("int8", DataType::INT8,false);
+    auto int8_1_fid = schema->AddDebugField("int81", DataType::INT8,false);
+    auto int16_fid = schema->AddDebugField("int16", DataType::INT16,false);
+    auto int16_1_fid = schema->AddDebugField("int161", DataType::INT16,false);
+    auto int32_fid = schema->AddDebugField("int32", DataType::INT32,false);
+    auto int32_1_fid = schema->AddDebugField("int321", DataType::INT32,false);
+    auto int64_fid = schema->AddDebugField("int64", DataType::INT64,false);
+    auto int64_1_fid = schema->AddDebugField("int641", DataType::INT64,false);
+    auto str1_fid = schema->AddDebugField("string1", DataType::VARCHAR,false);
+    auto str2_fid = schema->AddDebugField("string2", DataType::VARCHAR,false);
+    auto float_fid = schema->AddDebugField("float", DataType::FLOAT,false);
+    auto double_fid = schema->AddDebugField("double", DataType::DOUBLE,false);
     schema->set_primary_field_id(str1_fid);
 
     auto seg = CreateSealedSegment(schema);

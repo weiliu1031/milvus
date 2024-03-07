@@ -43,7 +43,7 @@ TEST(ChunkCacheTest, Read) {
     auto schema = std::make_shared<milvus::Schema>();
     auto fake_id = schema->AddDebugField(
         "fakevec", milvus::DataType::VECTOR_FLOAT, dim, metric_type);
-    auto i64_fid = schema->AddDebugField("counter", milvus::DataType::INT64);
+    auto i64_fid = schema->AddDebugField("counter", milvus::DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto dataset = milvus::segcore::DataGen(schema, N);
@@ -105,7 +105,7 @@ TEST(ChunkCacheTest, TestMultithreads) {
     auto schema = std::make_shared<milvus::Schema>();
     auto fake_id = schema->AddDebugField(
         "fakevec", milvus::DataType::VECTOR_FLOAT, dim, metric_type);
-    auto i64_fid = schema->AddDebugField("counter", milvus::DataType::INT64);
+    auto i64_fid = schema->AddDebugField("counter", milvus::DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto dataset = milvus::segcore::DataGen(schema, N);

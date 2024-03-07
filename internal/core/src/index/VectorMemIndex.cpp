@@ -228,9 +228,8 @@ VectorMemIndex<T>::LoadV2(const Config& config) {
             std::string prefix = item[NAME];
             int slice_num = item[SLICE_NUM];
             auto total_len = static_cast<size_t>(item[TOTAL_LEN]);
-
-            auto new_field_data =
-                milvus::storage::CreateFieldData(DataType::INT8, 1, total_len);
+            auto new_field_data = milvus::storage::CreateFieldData(
+                DataType::INT8, false, 1, total_len);
             for (auto i = 0; i < slice_num; ++i) {
                 std::string file_name =
                     index_prefix + "/" + GenSlicedFileName(prefix, i);
@@ -322,9 +321,8 @@ VectorMemIndex<T>::Load(const Config& config) {
             std::string prefix = item[NAME];
             int slice_num = item[SLICE_NUM];
             auto total_len = static_cast<size_t>(item[TOTAL_LEN]);
-
-            auto new_field_data =
-                milvus::storage::CreateFieldData(DataType::INT8, 1, total_len);
+            auto new_field_data = milvus::storage::CreateFieldData(
+                DataType::INT8, false, 1, total_len);
             auto HandleBatch = [&](int index) {
                 auto batch_data = file_manager_->LoadIndexToMemory(batch);
                 for (int j = index - batch.size() + 1; j <= index; j++) {
@@ -428,7 +426,7 @@ VectorMemIndex<T>::BuildV2(const Config& config) {
         auto total_num_rows = data->num_rows();
         auto col_data = data->GetColumnByName(field_name);
         auto field_data =
-            storage::CreateFieldData(field_type, dim, total_num_rows);
+            storage::CreateFieldData(field_type, false, dim, total_num_rows);
         field_data->FillFieldData(col_data);
         field_datas.push_back(field_data);
     }

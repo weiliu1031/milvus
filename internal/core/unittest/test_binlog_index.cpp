@@ -72,14 +72,14 @@ class BinlogIndexTest : public ::testing::TestWithParam<Param> {
         auto metric_type = metricType;
         vec_field_id = schema->AddDebugField(
             "fakevec", DataType::VECTOR_FLOAT, data_d, metric_type);
-        auto i64_fid = schema->AddDebugField("counter", DataType::INT64);
+        auto i64_fid = schema->AddDebugField("counter", DataType::INT64, false);
         schema->set_primary_field_id(i64_fid);
 
         // generate vector field data
         vec_data = GenRandomFloatVecData(data_n, data_d);
 
         vec_field_data =
-            storage::CreateFieldData(DataType::VECTOR_FLOAT, data_d);
+            storage::CreateFieldData(DataType::VECTOR_FLOAT, false, data_d);
         vec_field_data->FillFieldData(vec_data.get(), data_n);
     }
 
@@ -109,9 +109,9 @@ class BinlogIndexTest : public ::testing::TestWithParam<Param> {
         // load id
         LoadFieldDataInfo row_id_info;
         FieldMeta row_id_field_meta(
-            FieldName("RowID"), RowFieldID, DataType::INT64);
+            FieldName("RowID"), RowFieldID, DataType::INT64, false);
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
-            DataType::INT64);
+            DataType::INT64, false);
         field_data->FillFieldData(dataset.row_ids_.data(), data_n);
         auto field_data_info =
             FieldDataInfo{RowFieldID.get(),
@@ -121,9 +121,9 @@ class BinlogIndexTest : public ::testing::TestWithParam<Param> {
         // load ts
         LoadFieldDataInfo ts_info;
         FieldMeta ts_field_meta(
-            FieldName("Timestamp"), TimestampFieldID, DataType::INT64);
+            FieldName("Timestamp"), TimestampFieldID, DataType::INT64, false);
         field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
-            DataType::INT64);
+            DataType::INT64, false);
         field_data->FillFieldData(dataset.timestamps_.data(), data_n);
         field_data_info =
             FieldDataInfo{TimestampFieldID.get(),

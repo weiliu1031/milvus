@@ -246,7 +246,7 @@ DataGen(SchemaPtr schema,
     auto insert_cols = [&insert_data](
                            auto& data, int64_t count, auto& field_meta) {
         auto array = milvus::segcore::CreateDataArrayFrom(
-            data.data(), count, field_meta);
+            data.data(), nullptr, count, field_meta);
         insert_data->mutable_fields_data()->AddAllocated(array.release());
     };
 
@@ -512,7 +512,7 @@ DataGenForJsonArray(SchemaPtr schema,
     auto insert_cols = [&insert_data](
                            auto& data, int64_t count, auto& field_meta) {
         auto array = milvus::segcore::CreateDataArrayFrom(
-            data.data(), count, field_meta);
+            data.data(), nullptr, count, field_meta);
         insert_data->mutable_fields_data()->AddAllocated(array.release());
     };
     for (auto field_id : schema->get_field_ids()) {
@@ -740,7 +740,7 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
     auto createFieldData = [&field_data, &raw_count](const void* raw_data,
                                                      DataType data_type,
                                                      int64_t dim) {
-        field_data = storage::CreateFieldData(data_type, dim);
+        field_data = storage::CreateFieldData(data_type, false, dim);
         field_data->FillFieldData(raw_data, raw_count);
     };
 
@@ -847,8 +847,9 @@ SealedLoadFieldData(const GeneratedData& dataset,
     auto row_count = dataset.row_ids_.size();
     {
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
-            DataType::INT64);
-        field_data->FillFieldData(dataset.row_ids_.data(), row_count);
+            DataType::INT64, false);
+        // todo:smellthemoon
+        field_data->FillFieldData(dataset.row_ids_.data(), nullptr, row_count);
         auto field_data_info = FieldDataInfo(
             RowFieldID.get(),
             row_count,
@@ -857,8 +858,9 @@ SealedLoadFieldData(const GeneratedData& dataset,
     }
     {
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
-            DataType::INT64);
-        field_data->FillFieldData(dataset.timestamps_.data(), row_count);
+            DataType::INT64, false);
+        field_data->FillFieldData(
+            dataset.timestamps_.data(), nullptr, row_count);
         auto field_data_info = FieldDataInfo(
             TimestampFieldID.get(),
             row_count,

@@ -216,10 +216,11 @@ BaseEventData::Serialize() {
     auto data_type = field_data->get_data_type();
     std::shared_ptr<PayloadWriter> payload_writer;
     if (milvus::datatype_is_vector(data_type)) {
-        payload_writer =
-            std::make_unique<PayloadWriter>(data_type, field_data->get_dim());
+        payload_writer = std::make_unique<PayloadWriter>(
+            data_type, field_data->get_dim(), field_data->IsNullable());
     } else {
-        payload_writer = std::make_unique<PayloadWriter>(data_type);
+        payload_writer = std::make_unique<PayloadWriter>(
+            data_type, field_data->IsNullable());
     }
     switch (data_type) {
         case DataType::VARCHAR:
@@ -228,8 +229,8 @@ BaseEventData::Serialize() {
                  ++offset) {
                 auto str = static_cast<const std::string*>(
                     field_data->RawValue(offset));
-                payload_writer->add_one_string_payload(str->c_str(),
-                                                       str->size());
+                auto size = field_data->is_null(offset) ? -1 : str->size();
+                payload_writer->add_one_string_payload(str->c_str(), size);
             }
             break;
         }
@@ -239,10 +240,11 @@ BaseEventData::Serialize() {
                 auto array =
                     static_cast<const Array*>(field_data->RawValue(offset));
                 auto array_string = array->output_data().SerializeAsString();
-
+                auto size =
+                    field_data->is_null(offset) ? -1 : array_string.size();
                 payload_writer->add_one_binary_payload(
                     reinterpret_cast<const uint8_t*>(array_string.c_str()),
-                    array_string.size());
+                    size);
             }
             break;
         }
@@ -263,8 +265,11 @@ BaseEventData::Serialize() {
             auto payload =
                 Payload{data_type,
                         static_cast<const uint8_t*>(field_data->Data()),
+                        field_data->ValidData(),
                         field_data->get_num_rows(),
-                        field_data->get_dim()};
+                        field_data->get_dim(),
+                        field_data->IsNullable()};
+
             payload_writer->add_payload(payload);
         }
     }

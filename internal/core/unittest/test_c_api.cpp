@@ -3860,7 +3860,7 @@ TEST(CApiTest, SealedSegment_search_float_With_Expr_Predicate_Range) {
 
 TEST(CApiTest, SealedSegment_Update_Field_Size) {
     auto schema = std::make_shared<Schema>();
-    auto str_fid = schema->AddDebugField("string", DataType::VARCHAR);
+    auto str_fid = schema->AddDebugField("string", DataType::VARCHAR,false);
     auto vec_fid = schema->AddDebugField(
         "vector_float", DataType::VECTOR_FLOAT, DIM, "L2");
     schema->set_primary_field_id(str_fid);
@@ -3894,9 +3894,9 @@ TEST(CApiTest, SealedSegment_Update_Field_Size) {
 
 TEST(CApiTest, GrowingSegment_Load_Field_Data) {
     auto schema = std::make_shared<Schema>();
-    schema->AddField(FieldName("RowID"), FieldId(0), DataType::INT64);
-    schema->AddField(FieldName("Timestamp"), FieldId(1), DataType::INT64);
-    auto str_fid = schema->AddDebugField("string", DataType::VARCHAR);
+    schema->AddField(FieldName("RowID"), FieldId(0), DataType::INT64,false);
+    schema->AddField(FieldName("Timestamp"), FieldId(1), DataType::INT64,false);
+    auto str_fid = schema->AddDebugField("string", DataType::VARCHAR,false);
     auto vec_fid = schema->AddDebugField(
         "vector_float", DataType::VECTOR_FLOAT, DIM, "L2");
     schema->set_primary_field_id(str_fid);
@@ -3926,12 +3926,12 @@ TEST(CApiTest, GrowingSegment_Load_Field_Data) {
 
 TEST(CApiTest, RetriveScalarFieldFromSealedSegmentWithIndex) {
     auto schema = std::make_shared<Schema>();
-    auto i8_fid = schema->AddDebugField("age8", DataType::INT8);
-    auto i16_fid = schema->AddDebugField("age16", DataType::INT16);
-    auto i32_fid = schema->AddDebugField("age32", DataType::INT32);
-    auto i64_fid = schema->AddDebugField("age64", DataType::INT64);
-    auto float_fid = schema->AddDebugField("age_float", DataType::FLOAT);
-    auto double_fid = schema->AddDebugField("age_double", DataType::DOUBLE);
+    auto i8_fid = schema->AddDebugField("age8", DataType::INT8,false);
+    auto i16_fid = schema->AddDebugField("age16", DataType::INT16,false);
+    auto i32_fid = schema->AddDebugField("age32", DataType::INT32,false);
+    auto i64_fid = schema->AddDebugField("age64", DataType::INT64,false);
+    auto float_fid = schema->AddDebugField("age_float", DataType::FLOAT,false);
+    auto double_fid = schema->AddDebugField("age_double", DataType::DOUBLE,false);
     schema->set_primary_field_id(i64_fid);
 
     auto segment = CreateSealedSegment(schema).release();

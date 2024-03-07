@@ -27,8 +27,8 @@ TEST(Expr, AlwaysTrue) {
     using namespace milvus::segcore;
     auto schema = std::make_shared<Schema>();
     auto vec_fid = schema->AddDebugField(
-        "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
-    auto i64_fid = schema->AddDebugField("age", DataType::INT64);
+        "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2,false);
+    auto i64_fid = schema->AddDebugField("age", DataType::INT64,false);
     schema->set_primary_field_id(i64_fid);
 
     auto seg = CreateGrowingSegment(schema, empty_index_meta);

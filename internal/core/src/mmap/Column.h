@@ -15,11 +15,13 @@
 // limitations under the License.
 #pragma once
 
+#include <_types/_uint8_t.h>
 #include <sys/mman.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 
 #include "common/FieldMeta.h"
 #include "common/Span.h"
@@ -45,6 +47,14 @@ class ColumnBase {
 
         if (datatype_is_variable(field_meta.get_data_type())) {
             return;
+        }
+        if (!field_meta.is_vector()) {
+            is_scalar = true;
+            AssertInfo(field_meta.is_nullable(), "only support null in scalar");
+        }
+
+        if (field_meta.is_nullable()) {
+            valid_data_ = std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
         }
 
         cap_size_ = field_meta.get_sizeof() * reserve;
@@ -78,6 +88,14 @@ class ColumnBase {
                                         MAP_SHARED,
                                         file.Descriptor(),
                                         0));
+        if (!field_meta.is_vector()) {
+            is_scalar = true;
+            if (field_meta.is_nullable()) {
+                nullable = true;
+                valid_data_ =
+                    std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
+            }
+        }
         AssertInfo(data_ != MAP_FAILED,
                    "failed to create file-backed map, err: {}",
                    strerror(errno));
@@ -88,11 +106,13 @@ class ColumnBase {
     ColumnBase(const File& file,
                size_t size,
                int dim,
-               const DataType& data_type)
+               const DataType& data_type,
+               bool nullable)
         : type_size_(datatype_sizeof(data_type, dim)),
           num_rows_(size / datatype_sizeof(data_type, dim)),
           size_(size),
-          cap_size_(size) {
+          cap_size_(size),
+          nullable(nullable) {
         padding_ = data_type == DataType::JSON ? simdjson::SIMDJSON_PADDING : 0;
 
         data_ = static_cast<char*>(mmap(nullptr,
@@ -104,6 +124,13 @@ class ColumnBase {
         AssertInfo(data_ != MAP_FAILED,
                    "failed to create file-backed map, err: {}",
                    strerror(errno));
+        if (dim == 1) {
+            is_scalar = true;
+            if (nullable) {
+                valid_data_ =
+                    std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
+            }
+        }
     }
 
     virtual ~ColumnBase() {
@@ -128,11 +155,22 @@ class ColumnBase {
         column.padding_ = 0;
         column.num_rows_ = 0;
         column.size_ = 0;
+        column.valid_data_ = nullptr;
     }
 
     const char*
     Data() const {
         return data_;
+    }
+
+    const uint8_t*
+    ValidData() const {
+        return valid_data_.get();
+    }
+
+    size_t
+    Size() const {
+        return size_;
     }
 
     size_t
@@ -167,6 +205,7 @@ class ColumnBase {
                     data_ + size_);
         size_ = required_size;
         num_rows_ += data->Length();
+        AppendValidData(data->ValidData(), size_);
     }
 
     // Append one row
@@ -180,6 +219,12 @@ class ColumnBase {
         std::copy_n(data, size, data_ + size_);
         size_ = required_size;
         num_rows_++;
+    }
+
+    void
+    AppendValidData(const uint8_t* valid_data, size_t size) {
+        AssertInfo(nullable == true, "column not support null");
+        std::copy(valid_data, valid_data + size, valid_data_.get());
     }
 
  protected:
@@ -210,6 +255,9 @@ class ColumnBase {
     }
 
     char* data_{nullptr};
+    bool nullable{false};
+    std::shared_ptr<uint8_t[]> valid_data_{nullptr};
+    bool is_scalar{false};
     // capacity in bytes
     size_t cap_size_{0};
     size_t padding_{0};
@@ -233,8 +281,12 @@ class Column : public ColumnBase {
     }
 
     // mmap mode ctor
-    Column(const File& file, size_t size, int dim, DataType data_type)
-        : ColumnBase(file, size, dim, data_type) {
+    Column(const File& file,
+           size_t size,
+           int dim,
+           DataType data_type,
+           bool nullable)
+        : ColumnBase(file, size, dim, data_type, nullable) {
     }
 
     Column(Column&& column) noexcept : ColumnBase(std::move(column)) {

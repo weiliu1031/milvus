@@ -62,6 +62,7 @@ CreateVectorDataArray(int64_t count, const FieldMeta& field_meta);
 
 std::unique_ptr<DataArray>
 CreateScalarDataArrayFrom(const void* data_raw,
+                          const void* valid_data,
                           int64_t count,
                           const FieldMeta& field_meta);
 
@@ -72,6 +73,7 @@ CreateVectorDataArrayFrom(const void* data_raw,
 
 std::unique_ptr<DataArray>
 CreateDataArrayFrom(const void* data_raw,
+                    const void* valid_data,
                     int64_t count,
                     const FieldMeta& field_meta);
 

@@ -319,6 +319,7 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
         ++system_ready_count_;
     } else {
         // prepare data
+        // lxg
         auto& field_meta = (*schema_)[field_id];
         auto data_type = field_meta.get_data_type();
 
@@ -344,6 +345,8 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                             var_column->Append(str->data(), str_size);
                             field_data_size += str_size;
                         }
+                        var_column->AppendValidData(field_data->ValidData(),
+                                                    field_data->get_num_rows());
                     }
                     var_column->Seal();
                     LoadStringSkipIndex(field_id, 0, *var_column);
@@ -366,6 +369,8 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                                                padded_string_size);
                             field_data_size += padded_string_size;
                         }
+                        var_column->AppendValidData(field_data->ValidData(),
+                                                    field_data->get_num_rows());
                     }
                     var_column->Seal();
                     column = std::move(var_column);
@@ -382,6 +387,8 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                                 static_cast<const milvus::Array*>(rawValue);
                             var_column->Append(*array);
                         }
+                        var_column->AppendValidData(field_data->ValidData(),
+                                                    field_data->get_num_rows());
                     }
                     var_column->Seal();
                     column = std::move(var_column);

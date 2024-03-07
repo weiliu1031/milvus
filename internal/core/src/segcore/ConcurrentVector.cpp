@@ -105,4 +105,15 @@ VectorBase::set_data_raw(ssize_t element_offset,
     }
 }
 
+void
+VectorBase::set_valid_data_raw(ssize_t element_offset,
+                               ssize_t element_count,
+                               const DataArray* data,
+                               const FieldMeta& field_meta) {
+    if (!field_meta.is_nullable()) {
+        return set_valid_data_raw(
+            element_offset, data->valid_data().data(), element_count);
+    }
+}
+
 }  // namespace milvus::segcore

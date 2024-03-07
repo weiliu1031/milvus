@@ -38,6 +38,9 @@ Schema::ParseFrom(const milvus::proto::schema::CollectionSchema& schema_proto) {
          schema_proto.fields()) {
         auto field_id = FieldId(child.fieldid());
         auto name = FieldName(child.name());
+        // todo(smellthemoonst for test, will change it
+        // auto nullable = child.null_able();
+        auto nullable = false;
 
         if (field_id.get() < 100) {
             // system field id
@@ -67,12 +70,15 @@ Schema::ParseFrom(const milvus::proto::schema::CollectionSchema& schema_proto) {
             AssertInfo(type_map.count(MAX_LENGTH), "max_length not found");
             auto max_len =
                 boost::lexical_cast<int64_t>(type_map.at(MAX_LENGTH));
-            schema->AddField(name, field_id, data_type, max_len);
+            schema->AddField(name, field_id, data_type, max_len, nullable);
         } else if (datatype_is_array(data_type)) {
-            schema->AddField(
-                name, field_id, data_type, DataType(child.element_type()));
+            schema->AddField(name,
+                             field_id,
+                             data_type,
+                             DataType(child.element_type()),
+                             nullable);
         } else {
-            schema->AddField(name, field_id, data_type);
+            schema->AddField(name, field_id, data_type, nullable);
         }
 
         if (child.is_primary_key()) {
@@ -90,6 +96,7 @@ Schema::ParseFrom(const milvus::proto::schema::CollectionSchema& schema_proto) {
 
 const FieldMeta FieldMeta::RowIdMeta(FieldName("RowID"),
                                      RowFieldID,
-                                     DataType::INT64);
+                                     DataType::INT64,
+                                     false);
 
 }  // namespace milvus

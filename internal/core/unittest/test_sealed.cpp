@@ -681,20 +681,20 @@ TEST(Sealed, LoadScalarIndex) {
 
     LoadFieldDataInfo row_id_info;
     FieldMeta row_id_field_meta(
-        FieldName("RowID"), RowFieldID, DataType::INT64);
-    auto field_data =
-        std::make_shared<milvus::storage::FieldData<int64_t>>(DataType::INT64);
-    field_data->FillFieldData(dataset.row_ids_.data(), N);
+        FieldName("RowID"), RowFieldID, DataType::INT64, false);
+    auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
+        DataType::INT64, false);
+    field_data->FillFieldData(dataset.row_ids_.data(), nullptr, N);
     auto field_data_info = FieldDataInfo{
         RowFieldID.get(), N, std::vector<storage::FieldDataPtr>{field_data}};
     segment->LoadFieldData(RowFieldID, field_data_info);
 
     LoadFieldDataInfo ts_info;
     FieldMeta ts_field_meta(
-        FieldName("Timestamp"), TimestampFieldID, DataType::INT64);
-    field_data =
-        std::make_shared<milvus::storage::FieldData<int64_t>>(DataType::INT64);
-    field_data->FillFieldData(dataset.timestamps_.data(), N);
+        FieldName("Timestamp"), TimestampFieldID, DataType::INT64, false);
+    field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
+        DataType::INT64, false);
+    field_data->FillFieldData(dataset.timestamps_.data(), N, false);
     field_data_info =
         FieldDataInfo{TimestampFieldID.get(),
                       N,
@@ -963,7 +963,8 @@ TEST(Sealed, BF) {
     SealedLoadFieldData(dataset, *segment, {fake_id.get()});
 
     auto vec_data = GenRandomFloatVecs(N, dim);
-    auto field_data = storage::CreateFieldData(DataType::VECTOR_FLOAT, dim);
+    auto field_data =
+        storage::CreateFieldData(DataType::VECTOR_FLOAT, false, dim);
     field_data->FillFieldData(vec_data.data(), N);
     auto field_data_info = FieldDataInfo{
         fake_id.get(), N, std::vector<storage::FieldDataPtr>{field_data}};
@@ -1017,7 +1018,8 @@ TEST(Sealed, BF_Overflow) {
     SealedLoadFieldData(dataset, *segment, {fake_id.get()});
 
     auto vec_data = GenMaxFloatVecs(N, dim);
-    auto field_data = storage::CreateFieldData(DataType::VECTOR_FLOAT, dim);
+    auto field_data =
+        storage::CreateFieldData(DataType::VECTOR_FLOAT, false, dim);
     field_data->FillFieldData(vec_data.data(), N);
     auto field_data_info = FieldDataInfo{
         fake_id.get(), N, std::vector<storage::FieldDataPtr>{field_data}};
@@ -1402,7 +1404,8 @@ TEST(Sealed, SkipIndexSkipUnaryRange) {
 
     //test for int64
     std::vector<int64_t> pks = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    auto pk_field_data = storage::CreateFieldData(DataType::INT64, 1, 10);
+    auto pk_field_data =
+        storage::CreateFieldData(DataType::INT64, false, 1, 10);
     pk_field_data->FillFieldData(pks.data(), N);
     segment->LoadPrimitiveSkipIndex(
         pk_fid, 0, DataType::INT64, pk_field_data->Data(), N);
@@ -1443,7 +1446,8 @@ TEST(Sealed, SkipIndexSkipUnaryRange) {
 
     //test for int32
     std::vector<int32_t> int32s = {2, 2, 3, 4, 5, 6, 7, 8, 9, 12};
-    auto int32_field_data = storage::CreateFieldData(DataType::INT32, 1, 10);
+    auto int32_field_data =
+        storage::CreateFieldData(DataType::INT32, false, 1, 10);
     int32_field_data->FillFieldData(int32s.data(), N);
     segment->LoadPrimitiveSkipIndex(
         i32_fid, 0, DataType::INT32, int32_field_data->Data(), N);
@@ -1453,7 +1457,8 @@ TEST(Sealed, SkipIndexSkipUnaryRange) {
 
     //test for int16
     std::vector<int16_t> int16s = {2, 2, 3, 4, 5, 6, 7, 8, 9, 12};
-    auto int16_field_data = storage::CreateFieldData(DataType::INT16, 1, 10);
+    auto int16_field_data =
+        storage::CreateFieldData(DataType::INT16, false, 1, 10);
     int16_field_data->FillFieldData(int16s.data(), N);
     segment->LoadPrimitiveSkipIndex(
         i16_fid, 0, DataType::INT16, int16_field_data->Data(), N);
@@ -1463,7 +1468,8 @@ TEST(Sealed, SkipIndexSkipUnaryRange) {
 
     //test for int8
     std::vector<int8_t> int8s = {2, 2, 3, 4, 5, 6, 7, 8, 9, 12};
-    auto int8_field_data = storage::CreateFieldData(DataType::INT8, 1, 10);
+    auto int8_field_data =
+        storage::CreateFieldData(DataType::INT8, false, 1, 10);
     int8_field_data->FillFieldData(int8s.data(), N);
     segment->LoadPrimitiveSkipIndex(
         i8_fid, 0, DataType::INT8, int8_field_data->Data(), N);
@@ -1474,7 +1480,8 @@ TEST(Sealed, SkipIndexSkipUnaryRange) {
     // test for float
     std::vector<float> floats = {
         1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0};
-    auto float_field_data = storage::CreateFieldData(DataType::FLOAT, 1, 10);
+    auto float_field_data =
+        storage::CreateFieldData(DataType::FLOAT, false, 1, 10);
     float_field_data->FillFieldData(floats.data(), N);
     segment->LoadPrimitiveSkipIndex(
         float_fid, 0, DataType::FLOAT, float_field_data->Data(), N);
@@ -1485,7 +1492,8 @@ TEST(Sealed, SkipIndexSkipUnaryRange) {
     // test for double
     std::vector<double> doubles = {
         1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0};
-    auto double_field_data = storage::CreateFieldData(DataType::DOUBLE, 1, 10);
+    auto double_field_data =
+        storage::CreateFieldData(DataType::DOUBLE, false, 1, 10);
     double_field_data->FillFieldData(doubles.data(), N);
     segment->LoadPrimitiveSkipIndex(
         double_fid, 0, DataType::DOUBLE, double_field_data->Data(), N);
@@ -1508,7 +1516,8 @@ TEST(Sealed, SkipIndexSkipBinaryRange) {
 
     //test for int64
     std::vector<int64_t> pks = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    auto pk_field_data = storage::CreateFieldData(DataType::INT64, 1, 10);
+    auto pk_field_data =
+        storage::CreateFieldData(DataType::INT64, false, 1, 10);
     pk_field_data->FillFieldData(pks.data(), N);
     segment->LoadPrimitiveSkipIndex(
         pk_fid, 0, DataType::INT64, pk_field_data->Data(), N);
@@ -1543,7 +1552,8 @@ TEST(Sealed, SkipIndexSkipStringRange) {
 
     //test for string
     std::vector<std::string> strings = {"e", "f", "g", "g", "j"};
-    auto string_field_data = storage::CreateFieldData(DataType::VARCHAR, 1, N);
+    auto string_field_data =
+        storage::CreateFieldData(DataType::VARCHAR, false, 1, N);
     string_field_data->FillFieldData(strings.data(), N);
     auto string_field_data_info =
         FieldDataInfo{string_fid.get(),

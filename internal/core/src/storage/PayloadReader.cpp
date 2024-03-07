@@ -73,11 +73,14 @@ PayloadReader::init(std::shared_ptr<arrow::io::BufferReader> input) {
     st = arrow_reader->GetRecordBatchReader(&rb_reader);
     AssertInfo(st.ok(), "get record batch reader");
 
-    field_data_ = CreateFieldData(column_type_, dim_, total_num_rows);
+    auto nullable =
+        file_meta->schema()->Column(column_index)->schema_node()->is_optional();
+    field_data_ = CreateFieldData(column_type_, nullable, dim_, total_num_rows);
     for (arrow::Result<std::shared_ptr<arrow::RecordBatch>> maybe_batch :
          *rb_reader) {
         AssertInfo(maybe_batch.ok(), "get batch record success");
         auto array = maybe_batch.ValueOrDie()->column(column_index);
+        // to read
         field_data_->FillFieldData(array);
     }
     AssertInfo(field_data_->IsFull(), "field data hasn't been filled done");
