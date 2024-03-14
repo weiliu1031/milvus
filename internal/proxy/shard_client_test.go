@@ -99,3 +99,38 @@ func TestShardClientMgr_UpdateShardLeaders_Ref(t *testing.T) {
 	_, err = mgr.GetClient(context.Background(), UniqueID(3))
 	assert.NoError(t, err)
 }
+
+func TestShardClientMgr_ShardLeadersPartialUpdate(t *testing.T) {
+	mgr := newShardClientMgr()
+
+	genNodeInfos := func(leaderIDs []UniqueID) []nodeInfo {
+		nodeInfos := make([]nodeInfo, len(leaderIDs))
+		for i, id := range leaderIDs {
+			nodeInfos[i] = nodeInfo{
+				nodeID:  id,
+				address: "fake",
+			}
+		}
+		return nodeInfos
+	}
+
+	oldLeaders := map[string][]nodeInfo{
+		"ch1": genNodeInfos([]UniqueID{1, 2}),
+	}
+
+	newLeaders := map[string][]nodeInfo{
+		"ch1": genNodeInfos([]UniqueID{2, 3}),
+	}
+
+	err := mgr.UpdateShardLeaders(oldLeaders, newLeaders)
+	assert.NoError(t, err)
+
+	_, err = mgr.GetClient(context.Background(), UniqueID(1))
+	assert.Error(t, err)
+
+	_, err = mgr.GetClient(context.Background(), UniqueID(2))
+	assert.NoError(t, err)
+
+	_, err = mgr.GetClient(context.Background(), UniqueID(3))
+	assert.NoError(t, err)
+}

@@ -153,19 +153,15 @@ func (c *shardClientMgrImpl) UpdateShardLeaders(oldLeaders map[string][]nodeInfo
 			}
 		}
 	}
-	newLocalMap := make(map[UniqueID]*nodeInfo)
 
+	newLocalMap := make(map[UniqueID]*nodeInfo)
 	for _, nodes := range newLeaders {
 		for i := range nodes {
 			n := &nodes[i]
-			_, ok := oldLocalMap[n.nodeID]
+			_, ok := newLocalMap[n.nodeID]
 			if !ok {
-				_, ok2 := newLocalMap[n.nodeID]
-				if !ok2 {
-					newLocalMap[n.nodeID] = n
-				}
+				newLocalMap[n.nodeID] = n
 			}
-			delete(oldLocalMap, n.nodeID)
 		}
 	}
 	c.clients.Lock()
@@ -174,6 +170,7 @@ func (c *shardClientMgrImpl) UpdateShardLeaders(oldLeaders map[string][]nodeInfo
 	for _, node := range newLocalMap {
 		client, ok := c.clients.data[node.nodeID]
 		if ok {
+			// for node, which exist both in newLocalMap and cache, should be inc ref counter
 			client.inc()
 		} else {
 			// context.Background() is useless
@@ -190,10 +187,14 @@ func (c *shardClientMgrImpl) UpdateShardLeaders(oldLeaders map[string][]nodeInfo
 			c.clients.data[node.nodeID] = client
 		}
 	}
+
+	// for node, which exist in oldLocalMap, but doesn't exist in newLocalMap, should be dec ref counter
 	for _, node := range oldLocalMap {
-		client, ok := c.clients.data[node.nodeID]
-		if ok && client.dec() {
-			delete(c.clients.data, node.nodeID)
+		if _, ok := newLocalMap[node.nodeID]; !ok {
+			client, ok := c.clients.data[node.nodeID]
+			if ok && client.dec() {
+				delete(c.clients.data, node.nodeID)
+			}
 		}
 	}
 	return nil
