@@ -53,16 +53,12 @@ class ColumnBase {
             AssertInfo(field_meta.is_nullable(), "only support null in scalar");
         }
 
-        if (field_meta.is_nullable()) {
-            valid_data_ = std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
-        }
-
-        cap_size_ = field_meta.get_sizeof() * reserve;
+        data_cap_size_ = field_meta.get_sizeof() * reserve;
         auto data_type = field_meta.get_data_type();
 
         // use anon mapping so we are able to free these memory with munmap only
         data_ = static_cast<char*>(mmap(nullptr,
-                                        cap_size_ + padding_,
+                                        data_cap_size_ + padding_,
                                         PROT_READ | PROT_WRITE,
                                         MAP_PRIVATE | MAP_ANON,
                                         -1,
@@ -70,6 +66,19 @@ class ColumnBase {
         AssertInfo(data_ != MAP_FAILED,
                    "failed to create anon map, err: {}",
                    strerror(errno));
+
+        if (field_meta.is_nullable()) {
+            valid_data_cap_size_ = (reserve + 7) / 8;
+            valid_data_ = static_cast<uint8_t*>(mmap(nullptr,
+                                                     valid_data_size_,
+                                                     PROT_READ | PROT_WRITE,
+                                                     MAP_PRIVATE | MAP_ANON,
+                                                     -1,
+                                                     0));
+            AssertInfo(valid_data_ != MAP_FAILED,
+                       "failed to create anon map, err: {}",
+                       strerror(errno));
+        }
     }
 
     // mmap mode ctor
@@ -80,26 +89,37 @@ class ColumnBase {
                        ? simdjson::SIMDJSON_PADDING
                        : 0;
 
-        size_ = size;
-        cap_size_ = size;
+        data_size_ = size;
+        data_cap_size_ = size;
         data_ = static_cast<char*>(mmap(nullptr,
-                                        cap_size_ + padding_,
+                                        data_cap_size_ + padding_,
                                         PROT_READ,
                                         MAP_SHARED,
                                         file.Descriptor(),
                                         0));
+        AssertInfo(data_ != MAP_FAILED,
+                   "failed to create file-backed map, err: {}",
+                   strerror(errno));
+        madvise(data_, data_cap_size_ + padding_, MADV_WILLNEED);
+
         if (!field_meta.is_vector()) {
             is_scalar = true;
             if (field_meta.is_nullable()) {
                 nullable = true;
-                valid_data_ =
-                    std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
+                valid_data_cap_size_ = (num_rows_ + 7) / 8;
+                valid_data_size_ = (num_rows_ + 7) / 8;
+                valid_data_ = static_cast<uint8_t*>(mmap(nullptr,
+                                                         valid_data_cap_size_,
+                                                         PROT_READ | PROT_WRITE,
+                                                         MAP_PRIVATE | MAP_ANON,
+                                                         file.Descriptor(),
+                                                         0));
+                AssertInfo(valid_data_ != MAP_FAILED,
+                           "failed to create file-backed map, err: {}",
+                           strerror(errno));
+                madvise(valid_data_, valid_data_cap_size_, MADV_WILLNEED);
             }
         }
-        AssertInfo(data_ != MAP_FAILED,
-                   "failed to create file-backed map, err: {}",
-                   strerror(errno));
-        madvise(data_, cap_size_ + padding_, MADV_WILLNEED);
     }
 
     // mmap mode ctor
@@ -108,15 +128,15 @@ class ColumnBase {
                int dim,
                const DataType& data_type,
                bool nullable)
-        : type_size_(datatype_sizeof(data_type, dim)),
+        : nullable(nullable),
+          data_cap_size_(size),
+          type_size_(datatype_sizeof(data_type, dim)),
           num_rows_(size / datatype_sizeof(data_type, dim)),
-          size_(size),
-          cap_size_(size),
-          nullable(nullable) {
+          data_size_(size) {
         padding_ = data_type == DataType::JSON ? simdjson::SIMDJSON_PADDING : 0;
 
         data_ = static_cast<char*>(mmap(nullptr,
-                                        cap_size_ + padding_,
+                                        data_cap_size_ + padding_,
                                         PROT_READ,
                                         MAP_SHARED,
                                         file.Descriptor(),
@@ -127,15 +147,31 @@ class ColumnBase {
         if (dim == 1) {
             is_scalar = true;
             if (nullable) {
-                valid_data_ =
-                    std::shared_ptr<uint8_t[]>(new uint8_t[num_rows_]);
+                valid_data_cap_size_ = (num_rows_ + 7) / 8;
+                valid_data_size_ = (num_rows_ + 7) / 8;
+                valid_data_ = static_cast<uint8_t*>(mmap(nullptr,
+                                                         valid_data_cap_size_,
+                                                         PROT_READ | PROT_WRITE,
+                                                         MAP_PRIVATE | MAP_ANON,
+                                                         file.Descriptor(),
+                                                         0));
+                AssertInfo(valid_data_ != MAP_FAILED,
+                           "failed to create file-backed map, err: {}",
+                           strerror(errno));
             }
         }
     }
 
     virtual ~ColumnBase() {
         if (data_ != nullptr) {
-            if (munmap(data_, cap_size_ + padding_)) {
+            if (munmap(data_, data_cap_size_ + padding_)) {
+                AssertInfo(true,
+                           "failed to unmap variable field, err={}",
+                           strerror(errno));
+            }
+        }
+        if (valid_data_ != nullptr) {
+            if (munmap(valid_data_, valid_data_cap_size_)) {
                 AssertInfo(true,
                            "failed to unmap variable field, err={}",
                            strerror(errno));
@@ -145,17 +181,24 @@ class ColumnBase {
 
     ColumnBase(ColumnBase&& column) noexcept
         : data_(column.data_),
-          cap_size_(column.cap_size_),
+          nullable(column.nullable),
+          valid_data_(column.valid_data_),
+          valid_data_cap_size_(column.valid_data_cap_size_),
+          data_cap_size_(column.data_cap_size_),
           padding_(column.padding_),
           type_size_(column.type_size_),
           num_rows_(column.num_rows_),
-          size_(column.size_) {
+          data_size_(column.data_size_),
+          valid_data_size_(column.valid_data_size_) {
         column.data_ = nullptr;
-        column.cap_size_ = 0;
+        column.data_cap_size_ = 0;
         column.padding_ = 0;
         column.num_rows_ = 0;
-        column.size_ = 0;
+        column.data_size_ = 0;
+        column.nullable = false;
         column.valid_data_ = nullptr;
+        column.valid_data_cap_size_ = 0;
+        column.valid_data_size_ = 0;
     }
 
     const char*
@@ -165,12 +208,22 @@ class ColumnBase {
 
     const uint8_t*
     ValidData() const {
-        return valid_data_.get();
+        return valid_data_;
+    }
+
+    bool
+    IsNullable() const {
+        return nullable;
     }
 
     size_t
-    Size() const {
-        return size_;
+    DataSize() const {
+        return data_size_;
+    }
+
+    size_t
+    ValidDataSize() const {
+        return valid_data_size_;
     }
 
     size_t
@@ -180,14 +233,14 @@ class ColumnBase {
 
     const size_t
     ByteSize() const {
-        return cap_size_ + padding_;
+        return data_cap_size_ + padding_ + valid_data_cap_size_;
     }
 
     // The capacity of the column,
     // DO NOT call this for variable length column.
     size_t
     Capacity() const {
-        return cap_size_ / type_size_;
+        return data_cap_size_ / type_size_;
     }
 
     virtual SpanBase
@@ -195,42 +248,48 @@ class ColumnBase {
 
     void
     AppendBatch(const storage::FieldDataPtr& data) {
-        size_t required_size = size_ + data->Size();
-        if (required_size > cap_size_) {
-            Expand(required_size * 2 + padding_);
+        size_t required_size = data_size_ + data->DataSize();
+        if (required_size > data_cap_size_) {
+            ExpandData(required_size * 2 + padding_);
         }
 
         std::copy_n(static_cast<const char*>(data->Data()),
-                    data->Size(),
-                    data_ + size_);
-        size_ = required_size;
+                    data->DataSize(),
+                    data_ + data_size_);
+        data_size_ = required_size;
         num_rows_ += data->Length();
-        AppendValidData(data->ValidData(), size_);
+        AppendValidData(data->ValidData(), data->ValidDataSize());
     }
 
     // Append one row
     void
     Append(const char* data, size_t size) {
-        size_t required_size = size_ + size;
-        if (required_size > cap_size_) {
-            Expand(required_size * 2);
+        size_t required_size = data_size_ + size;
+        if (required_size > data_cap_size_) {
+            ExpandData(required_size * 2);
         }
 
-        std::copy_n(data, size, data_ + size_);
-        size_ = required_size;
+        std::copy_n(data, size, data_ + data_size_);
+        data_size_ = required_size;
         num_rows_++;
     }
 
+    // append valid_data don't need to change num_rows
     void
     AppendValidData(const uint8_t* valid_data, size_t size) {
-        AssertInfo(nullable == true, "column not support null");
-        std::copy(valid_data, valid_data + size, valid_data_.get());
+        if (nullable == true) {
+            size_t required_size = valid_data_size_ + size;
+            if (required_size > valid_data_cap_size_) {
+                ExpandValidData(required_size * 2);
+            }
+            std::copy(valid_data, valid_data + size, valid_data_);
+        }
     }
 
  protected:
     // only for memory mode, not mmap
     void
-    Expand(size_t new_size) {
+    ExpandData(size_t new_size) {
         auto data = static_cast<char*>(mmap(nullptr,
                                             new_size + padding_,
                                             PROT_READ | PROT_WRITE,
@@ -242,8 +301,8 @@ class ColumnBase {
             data != MAP_FAILED, "failed to create map: {}", strerror(errno));
 
         if (data_ != nullptr) {
-            std::memcpy(data, data_, size_);
-            if (munmap(data_, cap_size_ + padding_)) {
+            std::memcpy(data, data_, data_size_);
+            if (munmap(data_, data_cap_size_ + padding_)) {
                 AssertInfo(false,
                            "failed to unmap while expanding, err={}",
                            strerror(errno));
@@ -251,21 +310,51 @@ class ColumnBase {
         }
 
         data_ = data;
-        cap_size_ = new_size;
+        data_cap_size_ = new_size;
+    }
+
+    // only for memory mode, not mmap
+    void
+    ExpandValidData(size_t new_size) {
+        auto valid_data = static_cast<uint8_t*>(mmap(nullptr,
+                                                     new_size,
+                                                     PROT_READ | PROT_WRITE,
+                                                     MAP_PRIVATE | MAP_ANON,
+                                                     -1,
+                                                     0));
+
+        AssertInfo(valid_data != MAP_FAILED,
+                   "failed to create map: {}",
+                   strerror(errno));
+
+        if (valid_data_ != nullptr) {
+            std::memcpy(valid_data, valid_data_, valid_data_size_);
+            if (munmap(valid_data_, valid_data_cap_size_)) {
+                AssertInfo(false,
+                           "failed to unmap while expanding, err={}",
+                           strerror(errno));
+            }
+        }
+
+        valid_data_ = valid_data;
+        valid_data_cap_size_ = new_size;
     }
 
     char* data_{nullptr};
     bool nullable{false};
-    std::shared_ptr<uint8_t[]> valid_data_{nullptr};
+    uint8_t* valid_data_{nullptr};
+    size_t valid_data_cap_size_{0};
+    // std::shared_ptr<uint8_t[]> valid_data_{nullptr};
     bool is_scalar{false};
     // capacity in bytes
-    size_t cap_size_{0};
+    size_t data_cap_size_{0};
     size_t padding_{0};
     const size_t type_size_{1};
     size_t num_rows_{0};
 
     // length in bytes
-    size_t size_{0};
+    size_t data_size_{0};
+    size_t valid_data_size_{0};
 };
 
 class Column : public ColumnBase {
@@ -296,7 +385,7 @@ class Column : public ColumnBase {
 
     SpanBase
     Span() const override {
-        return SpanBase(data_, num_rows_, cap_size_ / num_rows_);
+        return SpanBase(data_, num_rows_, data_cap_size_ / num_rows_);
     }
 };
 
@@ -341,14 +430,14 @@ class VariableColumn : public ColumnBase {
 
     std::string_view
     RawAt(const int i) const {
-        size_t len = (i == indices_.size() - 1) ? size_ - indices_.back()
+        size_t len = (i == indices_.size() - 1) ? data_size_ - indices_.back()
                                                 : indices_[i + 1] - indices_[i];
         return std::string_view(data_ + indices_[i], len);
     }
 
     void
     Append(const char* data, size_t size) {
-        indices_.emplace_back(size_);
+        indices_.emplace_back(data_size_);
         ColumnBase::Append(data, size);
     }
 
@@ -369,7 +458,8 @@ class VariableColumn : public ColumnBase {
             views_.emplace_back(data_ + indices_[i],
                                 indices_[i + 1] - indices_[i]);
         }
-        views_.emplace_back(data_ + indices_.back(), size_ - indices_.back());
+        views_.emplace_back(data_ + indices_.back(),
+                            data_size_ - indices_.back());
     }
 
  private:
@@ -424,7 +514,7 @@ class ArrayColumn : public ColumnBase {
 
     void
     Append(const Array& array) {
-        indices_.emplace_back(size_);
+        indices_.emplace_back(data_size_);
         element_indices_.emplace_back(array.get_offsets());
         ColumnBase::Append(static_cast<const char*>(array.data()),
                            array.byte_size());
@@ -451,7 +541,7 @@ class ArrayColumn : public ColumnBase {
                                 std::move(element_indices_[i]));
         }
         views_.emplace_back(data_ + indices_.back(),
-                            size_ - indices_.back(),
+                            data_size_ - indices_.back(),
                             element_type_,
                             std::move(element_indices_[indices_.size() - 1]));
         element_indices_.clear();

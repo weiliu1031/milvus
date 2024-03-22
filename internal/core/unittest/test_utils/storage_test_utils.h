@@ -78,7 +78,7 @@ PrepareInsertBinlog(int64_t collection_id,
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
             DataType::INT64, false);
         // todo:smellthemoon
-        field_data->FillFieldData(dataset.row_ids_.data(), nullptr, row_count);
+        field_data->FillFieldData(dataset.row_ids_.data(), row_count);
         auto path = prefix + "/" + std::to_string(RowFieldID.get());
         SaveFieldData(field_data, path, RowFieldID.get());
     }
@@ -86,8 +86,7 @@ PrepareInsertBinlog(int64_t collection_id,
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
             DataType::INT64, false);
         // todo:smellthemoon
-        field_data->FillFieldData(
-            dataset.timestamps_.data(), nullptr, row_count);
+        field_data->FillFieldData(dataset.timestamps_.data(), row_count);
         auto path = prefix + "/" + std::to_string(TimestampFieldID.get());
         SaveFieldData(field_data, path, TimestampFieldID.get());
     }

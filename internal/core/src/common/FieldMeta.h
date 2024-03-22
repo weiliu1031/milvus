@@ -228,6 +228,7 @@ class FieldMeta {
           type_(type),
           vector_info_(VectorInfo{dim, metric_type}) {
         Assert(datatype_is_vector(type_));
+        nullable_ = false;
     }
 
     int64_t

@@ -69,7 +69,13 @@ class FieldDataBase {
     Size() const = 0;
 
     virtual int64_t
-    Size(ssize_t index) const = 0;
+    DataSize() const = 0;
+
+    virtual int64_t
+    ValidDataSize() const = 0;
+
+    virtual int64_t
+    DataSize(ssize_t index) const = 0;
 
     virtual size_t
     Length() const = 0;
@@ -192,16 +198,30 @@ class FieldDataImpl : public FieldDataBase {
 
     int64_t
     Size() const override {
+        return DataSize() + ValidDataSize();
+    }
+
+    int64_t
+    DataSize() const override {
         return sizeof(Type) * length() * dim_;
     }
 
     int64_t
-    Size(ssize_t offset) const override {
+    DataSize(ssize_t offset) const override {
         AssertInfo(offset < get_num_rows(),
                    "field data subscript out of range");
         AssertInfo(offset < length(),
                    "subscript position don't has valid value");
         return sizeof(Type) * dim_;
+    }
+
+    int64_t
+    ValidDataSize() const override {
+        int byteSize = (length() + 7) / 8;
+        if (nullable_) {
+            return sizeof(uint8_t) * byteSize;
+        }
+        return 0;
     }
 
     size_t
@@ -304,7 +324,7 @@ class FieldDataStringImpl : public FieldDataImpl<std::string, true> {
     }
 
     int64_t
-    Size() const override {
+    DataSize() const override {
         int64_t data_size = 0;
         for (size_t offset = 0; offset < length(); ++offset) {
             data_size += field_data_[offset].size();
@@ -314,7 +334,7 @@ class FieldDataStringImpl : public FieldDataImpl<std::string, true> {
     }
 
     int64_t
-    Size(ssize_t offset) const override {
+    DataSize(ssize_t offset) const override {
         AssertInfo(offset < get_num_rows(),
                    "field data subscript out of range");
         AssertInfo(offset < length(),
@@ -352,7 +372,7 @@ class FieldDataJsonImpl : public FieldDataImpl<Json, true> {
     }
 
     int64_t
-    Size() const override {
+    DataSize() const override {
         int64_t data_size = 0;
         for (size_t offset = 0; offset < length(); ++offset) {
             data_size += field_data_[offset].data().size();
@@ -362,7 +382,7 @@ class FieldDataJsonImpl : public FieldDataImpl<Json, true> {
     }
 
     int64_t
-    Size(ssize_t offset) const override {
+    DataSize(ssize_t offset) const override {
         AssertInfo(offset < get_num_rows(),
                    "field data subscript out of range");
         AssertInfo(offset < length(),

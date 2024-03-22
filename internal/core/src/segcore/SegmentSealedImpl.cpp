@@ -345,8 +345,9 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                             var_column->Append(str->data(), str_size);
                             field_data_size += str_size;
                         }
-                        var_column->AppendValidData(field_data->ValidData(),
-                                                    field_data->get_num_rows());
+                        var_column->AppendValidData(
+                            field_data->ValidData(),
+                            field_data->ValidDataSize());
                     }
                     var_column->Seal();
                     LoadStringSkipIndex(field_id, 0, *var_column);
@@ -369,8 +370,9 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                                                padded_string_size);
                             field_data_size += padded_string_size;
                         }
-                        var_column->AppendValidData(field_data->ValidData(),
-                                                    field_data->get_num_rows());
+                        var_column->AppendValidData(
+                            field_data->ValidData(),
+                            field_data->ValidDataSize());
                     }
                     var_column->Seal();
                     column = std::move(var_column);
@@ -387,8 +389,9 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                                 static_cast<const milvus::Array*>(rawValue);
                             var_column->Append(*array);
                         }
-                        var_column->AppendValidData(field_data->ValidData(),
-                                                    field_data->get_num_rows());
+                        var_column->AppendValidData(
+                            field_data->ValidData(),
+                            field_data->ValidDataSize());
                     }
                     var_column->Seal();
                     column = std::move(var_column);
@@ -486,7 +489,7 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
         }
 
         for (auto i = 0; i < field_data->get_num_rows(); i++) {
-            auto size = field_data->Size(i);
+            auto size = field_data->DataSize(i);
             indices.emplace_back(total_written);
             total_written += size;
         }
@@ -877,7 +880,7 @@ SegmentSealedImpl::DropFieldData(const FieldId field_id) {
         std::unique_lock lck(mutex_);
         if (get_bit(field_data_ready_bitset_, field_id)) {
             set_bit(field_data_ready_bitset_, field_id, false);
-            insert_record_.drop_field_data(field_id);
+            insert_record_.drop_data(field_id);
         }
         if (get_bit(binlog_index_bitset_, field_id)) {
             set_bit(binlog_index_bitset_, field_id, false);
@@ -1087,6 +1090,12 @@ SegmentSealedImpl::get_raw_data(FieldId field_id,
     // to make sure it won't get released if segment released
     auto column = fields_.at(field_id);
     auto ret = fill_with_empty(field_id, count);
+    if (column->IsNullable()) {
+        bulk_subscript_impl<uint8_t>(column->ValidData(),
+                                     seg_offsets,
+                                     count,
+                                     ret->mutable_valid_data()->mutable_data());
+    }
     switch (field_meta.get_data_type()) {
         case DataType::VARCHAR:
         case DataType::STRING: {

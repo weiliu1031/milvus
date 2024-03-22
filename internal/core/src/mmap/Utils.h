@@ -35,7 +35,17 @@ inline size_t
 GetDataSize(const std::vector<storage::FieldDataPtr>& datas) {
     size_t total_size{0};
     for (auto data : datas) {
-        total_size += data->Size();
+        total_size += data->DataSize();
+    }
+
+    return total_size;
+}
+
+inline size_t
+GetValidDataSize(const std::vector<storage::FieldDataPtr>& datas) {
+    size_t total_size{0};
+    for (auto data : datas) {
+        total_size += data->ValidDataSize();
     }
 
     return total_size;
@@ -44,6 +54,10 @@ GetDataSize(const std::vector<storage::FieldDataPtr>& datas) {
 inline void*
 FillField(DataType data_type, const storage::FieldDataPtr data, void* dst) {
     char* dest = reinterpret_cast<char*>(dst);
+    if (data->IsNullable()) {
+        memcpy(dst, data->ValidData(), data->ValidDataSize());
+        dest += data->ValidDataSize();
+    }
     if (datatype_is_variable(data_type)) {
         switch (data_type) {
             case DataType::STRING:
@@ -70,8 +84,8 @@ FillField(DataType data_type, const storage::FieldDataPtr data, void* dst) {
                           fmt::format("not supported data type {}", data_type));
         }
     } else {
-        memcpy(dst, data->Data(), data->Size());
-        dest += data->Size();
+        memcpy(dst, data->Data(), data->DataSize());
+        dest += data->DataSize();
     }
 
     return dest;
@@ -84,6 +98,10 @@ WriteFieldData(File& file,
                std::vector<std::vector<uint64_t>>& element_indices) {
     size_t total_written{0};
     if (datatype_is_variable(data_type)) {
+        if (data->IsNullable()) {
+            total_written +=
+                file.Write(data->ValidData(), data->ValidDataSize());
+        }
         switch (data_type) {
             case DataType::VARCHAR:
             case DataType::STRING: {
@@ -130,7 +148,7 @@ WriteFieldData(File& file,
                                       datatype_name(data_type)));
         }
     } else {
-        total_written += file.Write(data->Data(), data->Size());
+        total_written += file.Write(data->Data(), data->ValidDataSize());
     }
 
     return total_written;

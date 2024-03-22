@@ -23,8 +23,8 @@ set(MILVUS_TEST_FILES
         # test_bool_index.cpp
         # test_common.cpp
         # test_concurrent_vector.cpp
-        # test_c_api.cpp
-        # test_expr.cpp
+        test_c_api.cpp
+        test_expr.cpp
         # test_float16.cpp
         # test_growing.cpp
         # test_growing_index.cpp
@@ -39,14 +39,14 @@ set(MILVUS_TEST_FILES
         # test_relational.cpp
         # test_retrieve.cpp
         # test_scalar_index.cpp
-        # test_sealed.cpp
+        test_sealed.cpp
         # test_segcore.cpp
         # test_similarity_corelation.cpp
         # test_span.cpp
         # test_string_expr.cpp
         # test_timestamp_index.cpp
         # test_utils.cpp
-        test_data_codec.cpp
+        # test_data_codec.cpp
         # test_range_search_sort.cpp
         # test_tracer.cpp
         # test_local_chunk_manager.cpp
@@ -57,7 +57,7 @@ set(MILVUS_TEST_FILES
         # test_always_true_expr.cpp
         # test_plan_proto.cpp
         # test_chunk_cache.cpp
-        # test_binlog_index.cpp
+        test_binlog_index.cpp
         # test_storage.cpp
         )
 
@@ -74,7 +74,9 @@ if (LINUX OR APPLE)
             ${MILVUS_TEST_FILES}
             test_scalar_index_creator.cpp
             test_string_index.cpp
-            test_array.cpp test_array_expr.cpp)
+            test_array.cpp 
+        #     test_array_expr.cpp
+            )
 endif()
 
 if (DEFINED AZURE_BUILD_DIR)

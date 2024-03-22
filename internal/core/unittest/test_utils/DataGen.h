@@ -849,7 +849,7 @@ SealedLoadFieldData(const GeneratedData& dataset,
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
             DataType::INT64, false);
         // todo:smellthemoon
-        field_data->FillFieldData(dataset.row_ids_.data(), nullptr, row_count);
+        field_data->FillFieldData(dataset.row_ids_.data(), row_count);
         auto field_data_info = FieldDataInfo(
             RowFieldID.get(),
             row_count,
@@ -859,8 +859,7 @@ SealedLoadFieldData(const GeneratedData& dataset,
     {
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
             DataType::INT64, false);
-        field_data->FillFieldData(
-            dataset.timestamps_.data(), nullptr, row_count);
+        field_data->FillFieldData(dataset.timestamps_.data(), row_count);
         auto field_data_info = FieldDataInfo(
             TimestampFieldID.get(),
             row_count,

@@ -34,7 +34,9 @@ static int64_t debug_id = START_USER_FIELDID;
 class Schema {
  public:
     FieldId
-    AddDebugField(const std::string& name, DataType data_type, bool nullable=false) {
+    AddDebugField(const std::string& name,
+                  DataType data_type,
+                  bool nullable = false) {
         auto field_id = FieldId(debug_id);
         debug_id++;
         this->AddField(FieldName(name), field_id, data_type, nullable);
@@ -45,7 +47,7 @@ class Schema {
     AddDebugField(const std::string& name,
                   DataType data_type,
                   DataType element_type,
-                  bool nullable) {
+                  bool nullable = false) {
         auto field_id = FieldId(debug_id);
         debug_id++;
         this->AddField(
