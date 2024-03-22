@@ -223,7 +223,9 @@ CreateScalarDataArray(int64_t count, const FieldMeta& field_meta) {
     data_array->set_field_id(field_meta.get_id().get());
     data_array->set_type(static_cast<milvus::proto::schema::DataType>(
         field_meta.get_data_type()));
-
+    if (field_meta.is_nullable()) {
+        data_array->mutable_valid_data()->Resize(count, false);
+    }
     auto scalar_array = data_array->mutable_scalars();
     switch (data_type) {
         case DataType::BOOL: {
@@ -346,7 +348,7 @@ CreateScalarDataArrayFrom(const void* data_raw,
     auto data_array = std::make_unique<DataArray>();
     data_array->set_field_id(field_meta.get_id().get());
     if (field_meta.is_nullable()) {
-        auto valid_data_ = reinterpret_cast<const uint8_t*>(valid_data);
+        auto valid_data_ = reinterpret_cast<const bool*>(valid_data);
         auto obj = data_array->mutable_valid_data();
         obj->Add(valid_data_, valid_data_ + count);
     }
@@ -497,6 +499,7 @@ MergeDataArray(
     std::vector<std::pair<milvus::SearchResult*, int64_t>>& result_offsets,
     const FieldMeta& field_meta) {
     auto data_type = field_meta.get_data_type();
+    auto nullable = field_meta.is_nullable();
     auto data_array = std::make_unique<DataArray>();
     data_array->set_field_id(field_meta.get_id().get());
     data_array->set_type(static_cast<milvus::proto::schema::DataType>(
@@ -530,6 +533,12 @@ MergeDataArray(
                           fmt::format("unsupported datatype {}", data_type));
             }
             continue;
+        }
+
+        if (nullable) {
+            auto data = src_field_data->valid_data().data();
+            auto obj = data_array->mutable_valid_data();
+            *(obj->Add()) = data[src_offset];
         }
 
         auto scalar_array = data_array->mutable_scalars();

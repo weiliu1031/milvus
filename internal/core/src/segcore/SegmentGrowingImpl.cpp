@@ -19,6 +19,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "ConcurrentVector.h"
 #include "common/Consts.h"
 #include "common/EasyAssert.h"
 #include "common/Types.h"
@@ -484,8 +485,17 @@ SegmentGrowingImpl::bulk_subscript(FieldId field_id,
 
     AssertInfo(!field_meta.is_vector(),
                "Scalar field meta type is vector type");
-    //lxg
+    std::cout << "lxg test growing" << std::endl;
     auto result = CreateScalarDataArray(count, field_meta);
+    if (field_meta.is_nullable()) {
+        auto valid_data_ptr = insert_record_.get_valid_data(field_id);
+        auto res = result->mutable_valid_data()->mutable_data();
+        auto& valid_data = *valid_data_ptr;
+        for (int64_t i = 0; i < count; ++i) {
+            auto offset = seg_offsets[i];
+            res[i] = valid_data[offset];
+        }
+    }
     switch (field_meta.get_data_type()) {
         case DataType::BOOL: {
             bulk_subscript_impl<bool>(vec_ptr,
@@ -650,7 +660,6 @@ SegmentGrowingImpl::bulk_subscript_impl(FieldId field_id,
     AssertInfo(HasRawData(field_id.get()), "Growing segment loss raw data");
 }
 
-// lxg
 template <typename S, typename T>
 void
 SegmentGrowingImpl::bulk_subscript_impl(const VectorBase* vec_raw,

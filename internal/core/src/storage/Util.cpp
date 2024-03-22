@@ -515,9 +515,10 @@ EncodeAndUploadFieldSlice(ChunkManager* chunk_manager,
                           FieldDataMeta field_data_meta,
                           const FieldMeta& field_meta,
                           std::string object_key) {
-    // todo(smellthemoon):make nullable == false temporarily
-    auto field_data = CreateFieldData(
-        field_meta.get_data_type(), false, field_meta.get_dim(), 0);
+    auto field_data = CreateFieldData(field_meta.get_data_type(),
+                                      field_meta.is_nullable(),
+                                      field_meta.get_dim(),
+                                      0);
     field_data->FillFieldData(buf, element_count);
     auto insertData = std::make_shared<InsertData>(field_data);
     insertData->SetFieldDataMeta(field_data_meta);

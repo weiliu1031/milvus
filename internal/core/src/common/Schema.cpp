@@ -38,7 +38,7 @@ Schema::ParseFrom(const milvus::proto::schema::CollectionSchema& schema_proto) {
          schema_proto.fields()) {
         auto field_id = FieldId(child.fieldid());
         auto name = FieldName(child.name());
-        // todo(smellthemoonst for test, will change it
+        // todo(smellthemoon just for test, will change it
         // auto nullable = child.null_able();
         auto nullable = false;
 

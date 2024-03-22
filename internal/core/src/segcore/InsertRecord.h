@@ -522,7 +522,7 @@ struct InsertRecord {
     }
 
     ConcurrentValidDataVector*
-    get_valid_data(FieldId field_id) {
+    get_valid_data(FieldId field_id) const {
         AssertInfo(valid_data_.find(field_id) != valid_data_.end(),
                    "Cannot find valid_data with field_id: " +
                        std::to_string(field_id.get()));

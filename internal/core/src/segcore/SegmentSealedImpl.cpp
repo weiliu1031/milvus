@@ -319,7 +319,6 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
         ++system_ready_count_;
     } else {
         // prepare data
-        // lxg
         auto& field_meta = (*schema_)[field_id];
         auto data_type = field_meta.get_data_type();
 
@@ -1090,11 +1089,16 @@ SegmentSealedImpl::get_raw_data(FieldId field_id,
     // to make sure it won't get released if segment released
     auto column = fields_.at(field_id);
     auto ret = fill_with_empty(field_id, count);
+    std::cout << "lxg debug, nullable" << column->IsNullable() << std::endl;
     if (column->IsNullable()) {
-        bulk_subscript_impl<uint8_t>(column->ValidData(),
-                                     seg_offsets,
-                                     count,
-                                     ret->mutable_valid_data()->mutable_data());
+        auto dst = ret->mutable_valid_data()->mutable_data();
+        // auto valid_data = std::make_unique<bool[]>(count);
+        for (size_t i = 0; i < count; ++i) {
+            auto offset = seg_offsets[i];
+            auto bit =
+                (column->ValidData()[offset >> 3] >> ((offset & 0x07))) & 1;
+            dst[i] = bit;
+        }
     }
     switch (field_meta.get_data_type()) {
         case DataType::VARCHAR:

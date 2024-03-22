@@ -212,6 +212,21 @@ struct GeneratedData {
         PanicInfo(FieldIDInvalid, "field id not find");
     }
 
+    FixedVector<bool>
+    get_col_valid(FieldId field_id) const {
+        for (const auto& target_field_data : raw_->fields_data()) {
+            if (field_id.get() == target_field_data.field_id()) {
+                auto& field_meta = schema_->operator[](field_id);
+                Assert(field_meta.is_nullable());
+                FixedVector<bool> ret(raw_->num_rows());
+                auto src_data = target_field_data.valid_data().data();
+                std::copy_n(src_data, raw_->num_rows(), ret.data());
+                return ret;
+            }
+        }
+        PanicInfo(FieldIDInvalid, "field id not find");
+    }
+
  private:
     GeneratedData() = default;
     friend GeneratedData
@@ -245,8 +260,15 @@ DataGen(SchemaPtr schema,
     auto insert_data = std::make_unique<InsertData>();
     auto insert_cols = [&insert_data](
                            auto& data, int64_t count, auto& field_meta) {
+        auto nullable = field_meta.is_nullable();
+        FixedVector<bool> valid_data(count);
+        if (nullable) {
+            for (int i = 0; i < count; ++i) {
+                valid_data[i] = i % 2 == 0 ? true : false;
+            }
+        }
         auto array = milvus::segcore::CreateDataArrayFrom(
-            data.data(), nullptr, count, field_meta);
+            data.data(), valid_data.data(), count, field_meta);
         insert_data->mutable_fields_data()->AddAllocated(array.release());
     };
 
@@ -743,6 +765,27 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
         field_data = storage::CreateFieldData(data_type, false, dim);
         field_data->FillFieldData(raw_data, raw_count);
     };
+    auto createNullableFieldData = [&field_data, &raw_count](
+                                       const void* raw_data,
+                                       const bool* raw_valid_data,
+                                       DataType data_type,
+                                       int64_t dim) {
+        field_data = storage::CreateFieldData(data_type, true, dim);
+        int byteSize = (raw_count + 7) / 8;
+        auto valid_data = std::make_unique<uint8_t>(byteSize);
+        auto valid_data_ptr = valid_data.get();
+        for (int i = 0; i < raw_count; i++) {
+            bool value = raw_valid_data[i];
+            int byteIndex = i / 8;
+            int bitIndex = i % 8;
+            if (value) {
+                valid_data_ptr[byteIndex] |= (1 << bitIndex);
+            } else {
+                valid_data_ptr[byteIndex] &= ~(1 << bitIndex);
+            }
+        }
+        field_data->FillFieldData(raw_data, valid_data.get(), raw_count);
+    };
 
     if (field_meta.is_vector()) {
         switch (field_meta.get_data_type()) {
@@ -767,48 +810,98 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
         switch (field_meta.get_data_type()) {
             case DataType::BOOL: {
                 auto raw_data = data->scalars().bool_data().data().data();
-                createFieldData(raw_data, DataType::BOOL, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        raw_data, raw_valid_data, DataType::BOOL, dim);
+                } else {
+                    createFieldData(raw_data, DataType::BOOL, dim);
+                }
                 break;
             }
             case DataType::INT8: {
                 auto src_data = data->scalars().int_data().data();
                 std::vector<int8_t> data_raw(src_data.size());
                 std::copy_n(src_data.data(), src_data.size(), data_raw.data());
-                createFieldData(data_raw.data(), DataType::INT8, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        data_raw.data(), raw_valid_data, DataType::INT8, dim);
+                } else {
+                    createFieldData(data_raw.data(), DataType::INT8, dim);
+                }
                 break;
             }
             case DataType::INT16: {
                 auto src_data = data->scalars().int_data().data();
                 std::vector<int16_t> data_raw(src_data.size());
                 std::copy_n(src_data.data(), src_data.size(), data_raw.data());
-                createFieldData(data_raw.data(), DataType::INT16, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        data_raw.data(), raw_valid_data, DataType::INT16, dim);
+                } else {
+                    createFieldData(data_raw.data(), DataType::INT16, dim);
+                }
                 break;
             }
             case DataType::INT32: {
                 auto raw_data = data->scalars().int_data().data().data();
-                createFieldData(raw_data, DataType::INT32, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        raw_data, raw_valid_data, DataType::INT32, dim);
+                } else {
+                    createFieldData(raw_data, DataType::INT32, dim);
+                }
                 break;
             }
             case DataType::INT64: {
                 auto raw_data = data->scalars().long_data().data().data();
-                createFieldData(raw_data, DataType::INT64, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        raw_data, raw_valid_data, DataType::INT64, dim);
+                } else {
+                    createFieldData(raw_data, DataType::INT64, dim);
+                }
                 break;
             }
             case DataType::FLOAT: {
                 auto raw_data = data->scalars().float_data().data().data();
-                createFieldData(raw_data, DataType::FLOAT, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        raw_data, raw_valid_data, DataType::FLOAT, dim);
+                } else {
+                    createFieldData(raw_data, DataType::FLOAT, dim);
+                }
                 break;
             }
             case DataType::DOUBLE: {
                 auto raw_data = data->scalars().double_data().data().data();
-                createFieldData(raw_data, DataType::DOUBLE, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        raw_data, raw_valid_data, DataType::DOUBLE, dim);
+                } else {
+                    createFieldData(raw_data, DataType::DOUBLE, dim);
+                }
                 break;
             }
             case DataType::VARCHAR: {
                 auto begin = data->scalars().string_data().data().begin();
                 auto end = data->scalars().string_data().data().end();
                 std::vector<std::string> data_raw(begin, end);
-                createFieldData(data_raw.data(), DataType::VARCHAR, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(data_raw.data(),
+                                            raw_valid_data,
+                                            DataType::VARCHAR,
+                                            dim);
+                } else {
+                    createFieldData(data_raw.data(), DataType::VARCHAR, dim);
+                }
                 break;
             }
             case DataType::JSON: {
@@ -818,7 +911,13 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
                     auto str = src_data.Get(i);
                     data_raw[i] = Json(simdjson::padded_string(str));
                 }
-                createFieldData(data_raw.data(), DataType::JSON, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        data_raw.data(), raw_valid_data, DataType::JSON, dim);
+                } else {
+                    createFieldData(data_raw.data(), DataType::JSON, dim);
+                }
                 break;
             }
             case DataType::ARRAY: {
@@ -827,7 +926,13 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
                 for (int i = 0; i < src_data.size(); i++) {
                     data_raw[i] = Array(src_data.at(i));
                 }
-                createFieldData(data_raw.data(), DataType::ARRAY, dim);
+                if (field_meta.is_nullable()) {
+                    auto raw_valid_data = data->valid_data().data();
+                    createNullableFieldData(
+                        data_raw.data(), raw_valid_data, DataType::ARRAY, dim);
+                } else {
+                    createFieldData(data_raw.data(), DataType::ARRAY, dim);
+                }
                 break;
             }
             default: {
@@ -848,7 +953,6 @@ SealedLoadFieldData(const GeneratedData& dataset,
     {
         auto field_data = std::make_shared<milvus::storage::FieldData<int64_t>>(
             DataType::INT64, false);
-        // todo:smellthemoon
         field_data->FillFieldData(dataset.row_ids_.data(), row_count);
         auto field_data_info = FieldDataInfo(
             RowFieldID.get(),

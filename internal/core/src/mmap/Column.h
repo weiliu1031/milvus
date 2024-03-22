@@ -50,7 +50,8 @@ class ColumnBase {
         }
         if (!field_meta.is_vector()) {
             is_scalar = true;
-            AssertInfo(field_meta.is_nullable(), "only support null in scalar");
+            AssertInfo(!field_meta.is_nullable(),
+                       "only support null in scalar");
         }
 
         data_cap_size_ = field_meta.get_sizeof() * reserve;
@@ -68,9 +69,10 @@ class ColumnBase {
                    strerror(errno));
 
         if (field_meta.is_nullable()) {
+            nullable = true;
             valid_data_cap_size_ = (reserve + 7) / 8;
             valid_data_ = static_cast<uint8_t*>(mmap(nullptr,
-                                                     valid_data_size_,
+                                                     valid_data_cap_size_,
                                                      PROT_READ | PROT_WRITE,
                                                      MAP_PRIVATE | MAP_ANON,
                                                      -1,

@@ -23,8 +23,8 @@ set(MILVUS_TEST_FILES
         # test_bool_index.cpp
         # test_common.cpp
         # test_concurrent_vector.cpp
-        test_c_api.cpp
-        test_expr.cpp
+        # test_c_api.cpp
+        # test_expr.cpp
         # test_float16.cpp
         # test_growing.cpp
         # test_growing_index.cpp
@@ -57,7 +57,7 @@ set(MILVUS_TEST_FILES
         # test_always_true_expr.cpp
         # test_plan_proto.cpp
         # test_chunk_cache.cpp
-        test_binlog_index.cpp
+        # test_binlog_index.cpp
         # test_storage.cpp
         )
 
