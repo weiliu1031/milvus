@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -69,6 +70,7 @@ func FilterInIndexedSegments(handler Handler, mt *meta, segments ...*SegmentInfo
 	if len(segments) == 0 {
 		return nil
 	}
+	log.Info("start to fileter indexed segment")
 
 	segmentMap := make(map[int64]*SegmentInfo)
 	collectionSegments := make(map[int64][]int64)
@@ -79,6 +81,7 @@ func FilterInIndexedSegments(handler Handler, mt *meta, segments ...*SegmentInfo
 		segmentMap[segment.GetID()] = segment
 		collectionSegments[collectionID] = append(collectionSegments[collectionID], segment.GetID())
 	}
+	tr1 := timerecord.NewTimeRecorder("filter segments")
 	for collection := range collectionSegments {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 		coll, err := handler.GetCollection(ctx, collection)
@@ -93,7 +96,9 @@ func FilterInIndexedSegments(handler Handler, mt *meta, segments ...*SegmentInfo
 			}
 		}
 	}
+	log.Info("finish to update vector field", zap.Duration("cost", tr1.ElapseSpan()))
 
+	tr2 := timerecord.NewTimeRecorder("filter indexed segments")
 	indexedSegments := make([]*SegmentInfo, 0)
 	for _, segment := range segments {
 		if !isFlushState(segment.GetState()) && segment.GetState() != commonpb.SegmentState_Dropped {
@@ -111,6 +116,8 @@ func FilterInIndexedSegments(handler Handler, mt *meta, segments ...*SegmentInfo
 			indexedSegments = append(indexedSegments, segment)
 		}
 	}
+
+	log.Info("finish to filter indexed segment", zap.Duration("cost", tr2.ElapseSpan()))
 
 	return indexedSegments
 }

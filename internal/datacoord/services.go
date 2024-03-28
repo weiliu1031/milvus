@@ -807,6 +807,7 @@ func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 	channels := s.channelManager.GetChannelsByCollectionID(collectionID)
 	channelInfos := make([]*datapb.VchannelInfo, 0, len(channels))
 	flushedIDs := make(typeutil.UniqueSet)
+	log.Info("get channels finished")
 	for _, ch := range channels {
 		channelInfo := s.handler.GetQueryVChanPositions(ch, partitionIDs...)
 		channelInfos = append(channelInfos, channelInfo)

@@ -104,10 +104,18 @@ func (h *ServerHandler) GetDataVChanPositions(channel RWChannel, partitionID Uni
 // we expect QueryCoord gets the indexed segments to load, so the flushed segments below are actually the indexed segments,
 // the unflushed segments are actually the segments without index, even they are flushed.
 func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs ...UniqueID) *datapb.VchannelInfo {
+	log.Info("receive GetQueryVChanPositions",
+		zap.Int64("collectionID", channel.GetCollectionID()),
+		zap.String("channel", channel.GetName()),
+	)
 	// cannot use GetSegmentsByChannel since dropped segments are needed here
 	segments := h.s.meta.SelectSegments(func(s *SegmentInfo) bool {
 		return s.InsertChannel == channel.GetName() && !s.GetIsFake()
 	})
+	log.Info("finish SelectSegment",
+		zap.Int64("collectionID", channel.GetCollectionID()),
+		zap.String("channel", channel.GetName()),
+	)
 	segmentInfos := make(map[int64]*SegmentInfo)
 	indexedSegments := FilterInIndexedSegments(h, h.s.meta, segments...)
 	indexed := make(typeutil.UniqueSet)
