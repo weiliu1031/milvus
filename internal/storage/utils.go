@@ -692,78 +692,92 @@ func mergeBoolField(data *InsertData, fid FieldID, field *BoolFieldData) {
 func mergeInt8Field(data *InsertData, fid FieldID, field *Int8FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int8FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int8FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt16Field(data *InsertData, fid FieldID, field *Int16FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int16FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int16FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt32Field(data *InsertData, fid FieldID, field *Int32FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int32FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int32FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt64Field(data *InsertData, fid FieldID, field *Int64FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int64FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int64FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeFloatField(data *InsertData, fid FieldID, field *FloatFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &FloatFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*FloatFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeDoubleField(data *InsertData, fid FieldID, field *DoubleFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &DoubleFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*DoubleFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeStringField(data *InsertData, fid FieldID, field *StringFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &StringFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*StringFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeArrayField(data *InsertData, fid FieldID, field *ArrayFieldData) {
@@ -771,22 +785,26 @@ func mergeArrayField(data *InsertData, fid FieldID, field *ArrayFieldData) {
 		fieldData := &ArrayFieldData{
 			ElementType: field.ElementType,
 			Data:        nil,
+			ValidData:   nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*ArrayFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeJSONField(data *InsertData, fid FieldID, field *JSONFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &JSONFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*JSONFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeBinaryVectorField(data *InsertData, fid FieldID, field *BinaryVectorFieldData) {

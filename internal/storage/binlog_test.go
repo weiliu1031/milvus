@@ -37,7 +37,7 @@ import (
 
 /* #nosec G103 */
 func TestInsertBinlog(t *testing.T) {
-	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40)
+	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40, false)
 
 	e1, err := w.NextInsertEventWriter(false)
 	assert.NoError(t, err)
@@ -1309,7 +1309,7 @@ func TestNewBinlogReaderError(t *testing.T) {
 	assert.Nil(t, reader)
 	assert.Error(t, err)
 
-	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40)
+	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40, false)
 
 	w.SetEventTimeStamp(1000, 2000)
 
@@ -1348,7 +1348,7 @@ func TestNewBinlogReaderError(t *testing.T) {
 }
 
 func TestNewBinlogWriterTsError(t *testing.T) {
-	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40)
+	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40, false)
 
 	_, err := w.GetBuffer()
 	assert.Error(t, err)
@@ -1376,7 +1376,7 @@ func TestNewBinlogWriterTsError(t *testing.T) {
 }
 
 func TestInsertBinlogWriterCloseError(t *testing.T) {
-	insertWriter := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40)
+	insertWriter := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40, false)
 	e1, err := insertWriter.NextInsertEventWriter(false)
 	assert.NoError(t, err)
 
@@ -1499,7 +1499,7 @@ func (e *testEvent) SetOffset(offset int32) {
 var _ EventWriter = (*testEvent)(nil)
 
 func TestWriterListError(t *testing.T) {
-	insertWriter := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40)
+	insertWriter := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40, false)
 	sizeTotal := 2000000
 	insertWriter.baseBinlogWriter.descriptorEventData.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
 	errorEvent := &testEvent{}

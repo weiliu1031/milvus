@@ -268,7 +268,7 @@ func Test_validateUtil_checkFloatVectorFieldData(t *testing.T) {
 		assert.NoError(t, err)
 
 		v := newValidateUtil()
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 		assert.Error(t, err)
 	})
 }
@@ -721,7 +721,7 @@ func Test_validateUtil_checkAligned(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("mismatch when NullData is incorrect", func(t *testing.T) {
+	t.Run("length of data is incorrect when nullable", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -735,7 +735,7 @@ func Test_validateUtil_checkAligned(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{false, false, false},
+				ValidData: []bool{false, false, false},
 			},
 		}
 
@@ -816,7 +816,7 @@ func Test_validateUtil_checkAligned(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true, false, false, false},
+				ValidData: []bool{true, true, false, false, false, false, false, false},
 			},
 		}
 
@@ -2194,7 +2194,7 @@ func Test_validateUtil_Validate(t *testing.T) {
 	})
 }
 
-func checkFillWithDefaultValueData[T comparable](values []T, v T, length int) bool {
+func checkfillWithValueData[T comparable](values []T, v T, length int) bool {
 	if len(values) != length {
 		return false
 	}
@@ -2207,7 +2207,7 @@ func checkFillWithDefaultValueData[T comparable](values []T, v T, length int) bo
 	return true
 }
 
-func checkJsonFillWithDefaultValueData(values [][]byte, v []byte, length int) (bool, error) {
+func checkJsonfillWithValueData(values [][]byte, v []byte, length int) (bool, error) {
 	if len(values) != length {
 		return false, nil
 	}
@@ -2231,7 +2231,7 @@ func checkJsonFillWithDefaultValueData(values [][]byte, v []byte, length int) (b
 	return true, nil
 }
 
-func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
+func Test_validateUtil_fillWithValue(t *testing.T) {
 	t.Run("bool scalars schema not found", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
@@ -2246,9 +2246,46 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
+	})
+
+	t.Run("bool scalars has no data, will fill according to validData according to validData", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_Bool,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_BoolData{
+							BoolData: &schemapb.BoolArray{
+								Data: []bool{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{false, false},
+			},
+		}
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name: "test",
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+
+		flag := checkfillWithValueData(data[0].GetScalars().GetBoolData().Data, boolNullValue, 2)
+		assert.True(t, flag)
 	})
 
 	t.Run("bool scalars has no data, and schema default value is legal", func(t *testing.T) {
@@ -2265,7 +2302,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2288,15 +2325,15 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetBoolData().Data, schema.Fields[0].GetDefaultValue().GetBoolData(), 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetBoolData().Data, schema.Fields[0].GetDefaultValue().GetBoolData(), 2)
 		assert.True(t, flag)
 	})
 
-	t.Run("bool scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("bool scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -2310,7 +2347,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2333,7 +2370,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -2368,9 +2405,9 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetBoolData().Data, true, 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetBoolData().Data, true, 1)
 		assert.True(t, flag)
 
 		assert.NoError(t, err)
@@ -2390,7 +2427,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{false, true},
+				ValidData: []bool{false, true},
 			},
 		}
 
@@ -2412,11 +2449,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetBoolData().Data, true, 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetBoolData().Data, true, 2)
 		assert.True(t, flag)
 	})
 
@@ -2455,11 +2492,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetBoolData().Data, true, 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetBoolData().Data, true, 1)
 		assert.True(t, flag)
 	})
 
@@ -2479,9 +2516,48 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
+	})
+
+	t.Run("int scalars has no data, will fill according to validData", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_Int32,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_IntData{
+							IntData: &schemapb.IntArray{
+								Data: []int32{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{false, false},
+			},
+		}
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:     "test",
+					DataType: schemapb.DataType_Int32,
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+
+		flag := checkfillWithValueData(data[0].GetScalars().GetIntData().Data, int32(numpyNullValue), 2)
+		assert.True(t, flag)
 	})
 
 	t.Run("int scalars has no data, and schema default value is legal", func(t *testing.T) {
@@ -2498,7 +2574,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2520,15 +2596,15 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetIntData().Data, schema.Fields[0].GetDefaultValue().GetIntData(), 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetIntData().Data, schema.Fields[0].GetDefaultValue().GetIntData(), 2)
 		assert.True(t, flag)
 	})
 
-	t.Run("int scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("int scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -2542,7 +2618,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2564,7 +2640,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -2600,11 +2676,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetIntData().Data, intData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetIntData().Data, intData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -2623,7 +2699,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{false, true},
+				ValidData: []bool{false, true},
 			},
 		}
 
@@ -2645,11 +2721,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetIntData().Data, intData[0], 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetIntData().Data, intData[0], 2)
 		assert.True(t, flag)
 	})
 
@@ -2689,11 +2765,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetIntData().Data, intData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetIntData().Data, intData[0], 1)
 		assert.True(t, flag)
 	})
 	////////////////////////////////////////////////////////////////////
@@ -2712,9 +2788,47 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
+	})
+
+	t.Run("long scalars has no data, will fill according to validData", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_Int64,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_LongData{
+							LongData: &schemapb.LongArray{
+								Data: []int64{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{false, false},
+			},
+		}
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:     "test",
+					DataType: schemapb.DataType_Int32,
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+		flag := checkfillWithValueData(data[0].GetScalars().GetLongData().Data, int64(numpyNullValue), 2)
+		assert.True(t, flag)
 	})
 
 	t.Run("long scalars has no data, and schema default value is legal", func(t *testing.T) {
@@ -2731,7 +2845,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2753,14 +2867,14 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetLongData().Data, schema.Fields[0].GetDefaultValue().GetLongData(), 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetLongData().Data, schema.Fields[0].GetDefaultValue().GetLongData(), 2)
 		assert.True(t, flag)
 	})
 
-	t.Run("long scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("long scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -2774,7 +2888,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2796,7 +2910,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -2832,10 +2946,10 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetLongData().Data, longData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetLongData().Data, longData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -2854,7 +2968,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{false, true},
+				ValidData: []bool{false, true},
 			},
 		}
 
@@ -2876,11 +2990,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetLongData().Data, longData[0], 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetLongData().Data, longData[0], 2)
 		assert.True(t, flag)
 	})
 
@@ -2920,11 +3034,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetLongData().Data, longData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetLongData().Data, longData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -2944,9 +3058,48 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
+	})
+
+	t.Run("float scalars has no data, will fill according to validData", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_Float,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_FloatData{
+							FloatData: &schemapb.FloatArray{
+								Data: []float32{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{false, false},
+			},
+		}
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:     "test",
+					DataType: schemapb.DataType_Float,
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+
+		flag := checkfillWithValueData(data[0].GetScalars().GetFloatData().Data, float32(numpyNullValue), 2)
+		assert.True(t, flag)
 	})
 
 	t.Run("float scalars has no data, and schema default value is legal", func(t *testing.T) {
@@ -2963,7 +3116,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -2985,15 +3138,15 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetFloatData().Data, schema.Fields[0].GetDefaultValue().GetFloatData(), 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetFloatData().Data, schema.Fields[0].GetDefaultValue().GetFloatData(), 2)
 		assert.True(t, flag)
 	})
 
-	t.Run("float scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("float scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -3007,7 +3160,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -3029,7 +3182,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -3065,10 +3218,10 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetFloatData().Data, floatData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetFloatData().Data, floatData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -3087,7 +3240,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{false, true},
+				ValidData: []bool{false, true},
 			},
 		}
 
@@ -3109,11 +3262,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetFloatData().Data, floatData[0], 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetFloatData().Data, floatData[0], 2)
 		assert.True(t, flag)
 	})
 
@@ -3153,11 +3306,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetFloatData().Data, floatData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetFloatData().Data, floatData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -3177,9 +3330,48 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
+	})
+
+	t.Run("double scalars has no data, will fill according to validData", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_Double,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_DoubleData{
+							DoubleData: &schemapb.DoubleArray{
+								Data: []float64{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{false, false},
+			},
+		}
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:     "test",
+					DataType: schemapb.DataType_Double,
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+
+		flag := checkfillWithValueData(data[0].GetScalars().GetDoubleData().Data, float64(numpyNullValue), 2)
+		assert.True(t, flag)
 	})
 
 	t.Run("double scalars has no data, and schema default value is legal", func(t *testing.T) {
@@ -3196,7 +3388,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -3218,15 +3410,15 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetDoubleData().Data, schema.Fields[0].GetDefaultValue().GetDoubleData(), 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetDoubleData().Data, schema.Fields[0].GetDefaultValue().GetDoubleData(), 2)
 		assert.True(t, flag)
 	})
 
-	t.Run("double scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("double scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -3240,7 +3432,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -3262,7 +3454,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -3298,10 +3490,10 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetDoubleData().Data, doubleData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetDoubleData().Data, doubleData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -3320,7 +3512,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, false},
+				ValidData: []bool{true, false},
 			},
 		}
 
@@ -3342,11 +3534,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetDoubleData().Data, doubleData[0], 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetDoubleData().Data, doubleData[0], 2)
 		assert.True(t, flag)
 	})
 
@@ -3386,11 +3578,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetDoubleData().Data, doubleData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetDoubleData().Data, doubleData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -3410,12 +3602,12 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
 	})
 
-	t.Run("string scalars has no data, and schema default value is legal", func(t *testing.T) {
+	t.Run("string scalars has no data, will fill according to validData", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -3429,7 +3621,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{false, false},
 			},
 		}
 
@@ -3451,11 +3643,55 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetStringData().Data, schema.Fields[0].GetDefaultValue().GetStringData(), 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetStringData().Data, stringNullValue, 2)
+		assert.True(t, flag)
+	})
+
+	t.Run("string scalars has no data, and schema default value is legal", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_VarChar,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_StringData{
+							StringData: &schemapb.StringArray{
+								Data: []string{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{true, true},
+			},
+		}
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:     "test",
+					DataType: schemapb.DataType_VarChar,
+					DefaultValue: &schemapb.ValueField{
+						Data: &schemapb.ValueField_StringData{
+							StringData: "b",
+						},
+					},
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+
+		flag := checkfillWithValueData(data[0].GetScalars().GetStringData().Data, schema.Fields[0].GetDefaultValue().GetStringData(), 2)
 		assert.True(t, flag)
 	})
 
@@ -3474,7 +3710,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, false},
+				ValidData: []bool{true, false},
 			},
 		}
 
@@ -3496,11 +3732,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetStringData().Data, stringData[0], 2)
+		flag := checkfillWithValueData(data[0].GetScalars().GetStringData().Data, stringData[0], 2)
 		assert.True(t, flag)
 	})
 
@@ -3540,15 +3776,15 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetStringData().Data, stringData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetStringData().Data, stringData[0], 1)
 		assert.True(t, flag)
 	})
 
-	t.Run("string scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("string scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -3562,7 +3798,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -3584,7 +3820,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -3620,11 +3856,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag := checkFillWithDefaultValueData(data[0].GetScalars().GetStringData().Data, stringData[0], 1)
+		flag := checkfillWithValueData(data[0].GetScalars().GetStringData().Data, stringData[0], 1)
 		assert.True(t, flag)
 	})
 
@@ -3642,9 +3878,49 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
+	})
+
+	t.Run("json scalars has no data, will fill according to validData", func(t *testing.T) {
+		data := []*schemapb.FieldData{
+			{
+				FieldName: "test",
+				Type:      schemapb.DataType_JSON,
+				Field: &schemapb.FieldData_Scalars{
+					Scalars: &schemapb.ScalarField{
+						Data: &schemapb.ScalarField_JsonData{
+							JsonData: &schemapb.JSONArray{
+								Data: [][]byte{},
+							},
+						},
+					},
+				},
+				ValidData: []bool{false, false},
+			},
+		}
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:     "test",
+					DataType: schemapb.DataType_BinaryVector,
+				},
+			},
+		}
+		h, err := typeutil.CreateSchemaHelper(schema)
+		assert.NoError(t, err)
+
+		v := newValidateUtil()
+
+		err = v.fillWithValue(data, h, 2)
+
+		assert.NoError(t, err)
+
+		flag, err := checkJsonfillWithValueData(data[0].GetScalars().GetJsonData().Data, jsonNullValue, 2)
+		assert.True(t, flag)
+		assert.NoError(t, err)
 	})
 
 	t.Run("json scalars has no data, and schema default value is legal", func(t *testing.T) {
@@ -3661,7 +3937,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -3683,16 +3959,16 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag, err := checkJsonFillWithDefaultValueData(data[0].GetScalars().GetJsonData().Data, schema.Fields[0].GetDefaultValue().GetBytesData(), 2)
+		flag, err := checkJsonfillWithValueData(data[0].GetScalars().GetJsonData().Data, schema.Fields[0].GetDefaultValue().GetBytesData(), 2)
 		assert.True(t, flag)
 		assert.NoError(t, err)
 	})
 
-	t.Run("json scalars has no data, but nullData length is false when fill default value", func(t *testing.T) {
+	t.Run("json scalars has no data, but validData length is false when fill default value", func(t *testing.T) {
 		data := []*schemapb.FieldData{
 			{
 				FieldName: "test",
@@ -3706,7 +3982,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, true},
+				ValidData: []bool{true, true},
 			},
 		}
 
@@ -3728,7 +4004,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 3)
+		err = v.fillWithValue(data, h, 3)
 
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
@@ -3763,8 +4039,8 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
-		flag, err := checkJsonFillWithDefaultValueData(data[0].GetScalars().GetJsonData().Data, []byte(`{"XXX": 0}`), 1)
+		err = v.fillWithValue(data, h, 1)
+		flag, err := checkJsonfillWithValueData(data[0].GetScalars().GetJsonData().Data, []byte(`{"XXX": 0}`), 1)
 
 		assert.True(t, flag)
 		assert.NoError(t, err)
@@ -3784,7 +4060,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true, false},
+				ValidData: []bool{true, false},
 			},
 		}
 
@@ -3806,11 +4082,11 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 2)
+		err = v.fillWithValue(data, h, 2)
 
 		assert.NoError(t, err)
 
-		flag, err := checkJsonFillWithDefaultValueData(data[0].GetScalars().GetJsonData().Data, schema.Fields[0].GetDefaultValue().GetBytesData(), 2)
+		flag, err := checkJsonfillWithValueData(data[0].GetScalars().GetJsonData().Data, schema.Fields[0].GetDefaultValue().GetBytesData(), 2)
 		assert.NoError(t, err)
 		assert.True(t, flag)
 	})
@@ -3850,16 +4126,16 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.NoError(t, err)
 
-		flag, err := checkJsonFillWithDefaultValueData(data[0].GetScalars().GetJsonData().Data, []byte(`{"XXX": 0}`), 1)
+		flag, err := checkJsonfillWithValueData(data[0].GetScalars().GetJsonData().Data, []byte(`{"XXX": 0}`), 1)
 		assert.NoError(t, err)
 		assert.True(t, flag)
 	})
 
-	t.Run("check the length of NullData when not has default value", func(t *testing.T) {
+	t.Run("check the length of ValidData when not has default value", func(t *testing.T) {
 		stringData := []string{"a"}
 		data := []*schemapb.FieldData{
 			{
@@ -3891,13 +4167,13 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 
 		assert.Error(t, err)
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
 
-	t.Run("check the length of NullData when has default value", func(t *testing.T) {
+	t.Run("check the length of ValidData when has default value", func(t *testing.T) {
 		stringData := []string{"a"}
 		data := []*schemapb.FieldData{
 			{
@@ -3927,7 +4203,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 						},
 					},
 				},
-				NullData: []bool{true},
+				ValidData: []bool{true},
 			},
 		}
 
@@ -3956,7 +4232,7 @@ func Test_validateUtil_fillWithDefaultValue(t *testing.T) {
 
 		v := newValidateUtil()
 
-		err = v.fillWithDefaultValue(data, h, 1)
+		err = v.fillWithValue(data, h, 1)
 		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
 }

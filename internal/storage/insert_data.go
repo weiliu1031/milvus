@@ -427,13 +427,27 @@ func (data *Float16VectorFieldData) AppendRow(row interface{}) error {
 }
 
 // GetMemorySize implements FieldData.GetMemorySize
-func (data *BoolFieldData) GetMemorySize() int          { return binary.Size(data.Data) }
-func (data *Int8FieldData) GetMemorySize() int          { return binary.Size(data.Data) }
-func (data *Int16FieldData) GetMemorySize() int         { return binary.Size(data.Data) }
-func (data *Int32FieldData) GetMemorySize() int         { return binary.Size(data.Data) }
-func (data *Int64FieldData) GetMemorySize() int         { return binary.Size(data.Data) }
-func (data *FloatFieldData) GetMemorySize() int         { return binary.Size(data.Data) }
-func (data *DoubleFieldData) GetMemorySize() int        { return binary.Size(data.Data) }
+func (data *BoolFieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
+func (data *Int8FieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
+func (data *Int16FieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
+func (data *Int32FieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
+func (data *Int64FieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
+func (data *FloatFieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
+func (data *DoubleFieldData) GetMemorySize() int {
+	return binary.Size(data.Data) + binary.Size(data.ValidData)
+}
 func (data *BinaryVectorFieldData) GetMemorySize() int  { return binary.Size(data.Data) + 4 }
 func (data *FloatVectorFieldData) GetMemorySize() int   { return binary.Size(data.Data) + 4 }
 func (data *Float16VectorFieldData) GetMemorySize() int { return binary.Size(data.Data) + 4 }

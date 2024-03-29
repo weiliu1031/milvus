@@ -97,11 +97,10 @@ WriteFieldData(File& file,
                const storage::FieldDataPtr& data,
                std::vector<std::vector<uint64_t>>& element_indices) {
     size_t total_written{0};
+    if (data->IsNullable()) {
+        total_written += file.Write(data->ValidData(), data->ValidDataSize());
+    }
     if (datatype_is_variable(data_type)) {
-        if (data->IsNullable()) {
-            total_written +=
-                file.Write(data->ValidData(), data->ValidDataSize());
-        }
         switch (data_type) {
             case DataType::VARCHAR:
             case DataType::STRING: {
@@ -148,7 +147,7 @@ WriteFieldData(File& file,
                                       datatype_name(data_type)));
         }
     } else {
-        total_written += file.Write(data->Data(), data->ValidDataSize());
+        total_written += file.Write(data->Data(), data->DataSize());
     }
 
     return total_written;

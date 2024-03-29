@@ -26,8 +26,9 @@ namespace milvus::storage {
 
 PayloadReader::PayloadReader(const uint8_t* data,
                              int length,
-                             DataType data_type)
-    : column_type_(data_type) {
+                             DataType data_type,
+                             bool nullable)
+    : column_type_(data_type), nullable(nullable) {
     auto input = std::make_shared<arrow::io::BufferReader>(data, length);
     init(input);
 }
@@ -72,9 +73,6 @@ PayloadReader::init(std::shared_ptr<arrow::io::BufferReader> input) {
     std::shared_ptr<::arrow::RecordBatchReader> rb_reader;
     st = arrow_reader->GetRecordBatchReader(&rb_reader);
     AssertInfo(st.ok(), "get record batch reader");
-
-    auto nullable =
-        file_meta->schema()->Column(column_index)->schema_node()->is_optional();
     field_data_ = CreateFieldData(column_type_, nullable, dim_, total_num_rows);
     for (arrow::Result<std::shared_ptr<arrow::RecordBatch>> maybe_batch :
          *rb_reader) {

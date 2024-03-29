@@ -346,25 +346,25 @@ func buildRecord(b *array.RecordBuilder, data *storage.InsertData, fields []*sch
 		fBuilder := b.Field(i)
 		switch field.DataType {
 		case schemapb.DataType_Bool:
-			fBuilder.(*array.BooleanBuilder).AppendValues(data.Data[field.FieldID].(*storage.BoolFieldData).Data, nil)
+			fBuilder.(*array.BooleanBuilder).AppendValues(data.Data[field.FieldID].(*storage.BoolFieldData).Data, data.Data[field.FieldID].(*storage.BoolFieldData).ValidData)
 		case schemapb.DataType_Int8:
-			fBuilder.(*array.Int8Builder).AppendValues(data.Data[field.FieldID].(*storage.Int8FieldData).Data, nil)
+			fBuilder.(*array.Int8Builder).AppendValues(data.Data[field.FieldID].(*storage.Int8FieldData).Data, data.Data[field.FieldID].(*storage.Int8FieldData).ValidData)
 		case schemapb.DataType_Int16:
-			fBuilder.(*array.Int16Builder).AppendValues(data.Data[field.FieldID].(*storage.Int16FieldData).Data, nil)
+			fBuilder.(*array.Int16Builder).AppendValues(data.Data[field.FieldID].(*storage.Int16FieldData).Data, data.Data[field.FieldID].(*storage.Int16FieldData).ValidData)
 		case schemapb.DataType_Int32:
-			fBuilder.(*array.Int32Builder).AppendValues(data.Data[field.FieldID].(*storage.Int32FieldData).Data, nil)
+			fBuilder.(*array.Int32Builder).AppendValues(data.Data[field.FieldID].(*storage.Int32FieldData).Data, data.Data[field.FieldID].(*storage.Int32FieldData).ValidData)
 		case schemapb.DataType_Int64:
-			fBuilder.(*array.Int64Builder).AppendValues(data.Data[field.FieldID].(*storage.Int64FieldData).Data, nil)
+			fBuilder.(*array.Int64Builder).AppendValues(data.Data[field.FieldID].(*storage.Int64FieldData).Data, data.Data[field.FieldID].(*storage.Int64FieldData).ValidData)
 		case schemapb.DataType_Float:
-			fBuilder.(*array.Float32Builder).AppendValues(data.Data[field.FieldID].(*storage.FloatFieldData).Data, nil)
+			fBuilder.(*array.Float32Builder).AppendValues(data.Data[field.FieldID].(*storage.FloatFieldData).Data, data.Data[field.FieldID].(*storage.FloatFieldData).ValidData)
 		case schemapb.DataType_Double:
-			fBuilder.(*array.Float64Builder).AppendValues(data.Data[field.FieldID].(*storage.DoubleFieldData).Data, nil)
+			fBuilder.(*array.Float64Builder).AppendValues(data.Data[field.FieldID].(*storage.DoubleFieldData).Data, data.Data[field.FieldID].(*storage.DoubleFieldData).ValidData)
 		case schemapb.DataType_VarChar, schemapb.DataType_String:
-			fBuilder.(*array.StringBuilder).AppendValues(data.Data[field.FieldID].(*storage.StringFieldData).Data, nil)
+			fBuilder.(*array.StringBuilder).AppendValues(data.Data[field.FieldID].(*storage.StringFieldData).Data, data.Data[field.FieldID].(*storage.StringFieldData).ValidData)
 		case schemapb.DataType_Array:
-			appendListValues(fBuilder.(*array.ListBuilder), data.Data[field.FieldID].(*storage.ArrayFieldData))
+			appendListValues(fBuilder.(*array.ListBuilder), data.Data[field.FieldID].(*storage.ArrayFieldData), data.Data[field.FieldID].(*storage.ArrayFieldData).ValidData)
 		case schemapb.DataType_JSON:
-			fBuilder.(*array.BinaryBuilder).AppendValues(data.Data[field.FieldID].(*storage.JSONFieldData).Data, nil)
+			fBuilder.(*array.BinaryBuilder).AppendValues(data.Data[field.FieldID].(*storage.JSONFieldData).Data, data.Data[field.FieldID].(*storage.JSONFieldData).ValidData)
 		case schemapb.DataType_BinaryVector:
 			vecData := data.Data[field.FieldID].(*storage.BinaryVectorFieldData)
 			for i := 0; i < len(vecData.Data); i += vecData.Dim / 8 {
@@ -409,47 +409,47 @@ func buildRecord(b *array.RecordBuilder, data *storage.InsertData, fields []*sch
 	return nil
 }
 
-func appendListValues(builder *array.ListBuilder, data *storage.ArrayFieldData) error {
+func appendListValues(builder *array.ListBuilder, data *storage.ArrayFieldData, validData []bool) error {
 	vb := builder.ValueBuilder()
 	switch data.ElementType {
 	case schemapb.DataType_Bool:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.BooleanBuilder).AppendValues(data.GetBoolData().Data, nil)
 		}
 	case schemapb.DataType_Int8:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.Int8Builder).AppendValues(castIntArray[int8](data.GetIntData().Data), nil)
 		}
 	case schemapb.DataType_Int16:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.Int16Builder).AppendValues(castIntArray[int16](data.GetIntData().Data), nil)
 		}
 	case schemapb.DataType_Int32:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.Int32Builder).AppendValues(data.GetIntData().Data, nil)
 		}
 	case schemapb.DataType_Int64:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.Int64Builder).AppendValues(data.GetLongData().Data, nil)
 		}
 	case schemapb.DataType_Float:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.Float32Builder).AppendValues(data.GetFloatData().Data, nil)
 		}
 	case schemapb.DataType_Double:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.Float64Builder).AppendValues(data.GetDoubleData().Data, nil)
 		}
 	case schemapb.DataType_String, schemapb.DataType_VarChar:
-		for _, data := range data.Data {
-			builder.Append(true)
+		for i, data := range data.Data {
+			builder.Append(validData[i])
 			vb.(*array.StringBuilder).AppendValues(data.GetStringData().Data, nil)
 		}
 

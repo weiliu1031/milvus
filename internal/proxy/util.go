@@ -1450,10 +1450,10 @@ func assignPartitionKeys(ctx context.Context, dbName string, collName string, ke
 	return hashedPartitionNames, err
 }
 
-func memsetLoop[T any](array []T, defaultValue T, nullData []bool) []T {
-	for i := 0; i < len(nullData); i++ {
-		if nullData[i] {
-			array = append(array[:i], append([]T{defaultValue}, array[i:]...)...)
+func memsetLoop[T any](array []T, value T, validData []bool) []T {
+	for i := 0; i < len(validData); i++ {
+		if !validData[i] {
+			array = append(array[:i], append([]T{value}, array[i:]...)...)
 		}
 	}
 	return array

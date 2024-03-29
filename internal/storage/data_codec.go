@@ -236,7 +236,7 @@ func (insertCodec *InsertCodec) Serialize(partitionID UniqueID, segmentID Unique
 		singleData := data.Data[field.FieldID]
 
 		// encode fields
-		writer = NewInsertBinlogWriter(field.DataType, insertCodec.Schema.ID, partitionID, segmentID, field.FieldID)
+		writer = NewInsertBinlogWriter(field.DataType, insertCodec.Schema.ID, partitionID, segmentID, field.FieldID, singleData.GetNullable())
 		var eventWriter *insertEventWriter
 		var err error
 		if typeutil.IsVectorType(field.DataType) {
@@ -470,7 +470,7 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 			}
 			switch dataType {
 			case schemapb.DataType_Bool:
-				singleData, nullData, err := eventReader.GetBoolFromPayload()
+				singleData, validData, err := eventReader.GetBoolFromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -485,12 +485,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				boolFieldData := insertData.Data[fieldID].(*BoolFieldData)
 
 				boolFieldData.Data = append(boolFieldData.Data, singleData...)
-				boolFieldData.ValidData = append(boolFieldData.ValidData, nullData...)
+				boolFieldData.ValidData = append(boolFieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = boolFieldData
 
 			case schemapb.DataType_Int8:
-				singleData, nullData, err := eventReader.GetInt8FromPayload()
+				singleData, validData, err := eventReader.GetInt8FromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -505,12 +505,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				int8FieldData := insertData.Data[fieldID].(*Int8FieldData)
 
 				int8FieldData.Data = append(int8FieldData.Data, singleData...)
-				int8FieldData.ValidData = append(int8FieldData.ValidData, nullData...)
+				int8FieldData.ValidData = append(int8FieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = int8FieldData
 
 			case schemapb.DataType_Int16:
-				singleData, nullData, err := eventReader.GetInt16FromPayload()
+				singleData, validData, err := eventReader.GetInt16FromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -525,12 +525,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				int16FieldData := insertData.Data[fieldID].(*Int16FieldData)
 
 				int16FieldData.Data = append(int16FieldData.Data, singleData...)
-				int16FieldData.ValidData = append(int16FieldData.ValidData, nullData...)
+				int16FieldData.ValidData = append(int16FieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = int16FieldData
 
 			case schemapb.DataType_Int32:
-				singleData, nullData, err := eventReader.GetInt32FromPayload()
+				singleData, validData, err := eventReader.GetInt32FromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -545,12 +545,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				int32FieldData := insertData.Data[fieldID].(*Int32FieldData)
 
 				int32FieldData.Data = append(int32FieldData.Data, singleData...)
-				int32FieldData.ValidData = append(int32FieldData.ValidData, nullData...)
+				int32FieldData.ValidData = append(int32FieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = int32FieldData
 
 			case schemapb.DataType_Int64:
-				singleData, nullData, err := eventReader.GetInt64FromPayload()
+				singleData, validData, err := eventReader.GetInt64FromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -565,12 +565,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				int64FieldData := insertData.Data[fieldID].(*Int64FieldData)
 
 				int64FieldData.Data = append(int64FieldData.Data, singleData...)
-				int64FieldData.ValidData = append(int64FieldData.ValidData, nullData...)
+				int64FieldData.ValidData = append(int64FieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = int64FieldData
 
 			case schemapb.DataType_Float:
-				singleData, nullData, err := eventReader.GetFloatFromPayload()
+				singleData, validData, err := eventReader.GetFloatFromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -585,12 +585,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				floatFieldData := insertData.Data[fieldID].(*FloatFieldData)
 
 				floatFieldData.Data = append(floatFieldData.Data, singleData...)
-				floatFieldData.ValidData = append(floatFieldData.ValidData, nullData...)
+				floatFieldData.ValidData = append(floatFieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = floatFieldData
 
 			case schemapb.DataType_Double:
-				singleData, nullData, err := eventReader.GetDoubleFromPayload()
+				singleData, validData, err := eventReader.GetDoubleFromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -605,12 +605,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				doubleFieldData := insertData.Data[fieldID].(*DoubleFieldData)
 
 				doubleFieldData.Data = append(doubleFieldData.Data, singleData...)
-				doubleFieldData.ValidData = append(doubleFieldData.ValidData, nullData...)
+				doubleFieldData.ValidData = append(doubleFieldData.ValidData, validData...)
 				totalLength += len(singleData)
 				insertData.Data[fieldID] = doubleFieldData
 
 			case schemapb.DataType_String, schemapb.DataType_VarChar:
-				stringPayload, nullData, err := eventReader.GetStringFromPayload()
+				stringPayload, validData, err := eventReader.GetStringFromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -625,12 +625,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				stringFieldData := insertData.Data[fieldID].(*StringFieldData)
 
 				stringFieldData.Data = append(stringFieldData.Data, stringPayload...)
-				stringFieldData.ValidData = append(stringFieldData.ValidData, nullData...)
+				stringFieldData.ValidData = append(stringFieldData.ValidData, validData...)
 				totalLength += len(stringPayload)
 				insertData.Data[fieldID] = stringFieldData
 
 			case schemapb.DataType_Array:
-				arrayPayload, nullData, err := eventReader.GetArrayFromPayload()
+				arrayPayload, validData, err := eventReader.GetArrayFromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -645,12 +645,12 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				arrayFieldData := insertData.Data[fieldID].(*ArrayFieldData)
 
 				arrayFieldData.Data = append(arrayFieldData.Data, arrayPayload...)
-				arrayFieldData.ValidData = append(arrayFieldData.ValidData, nullData...)
+				arrayFieldData.ValidData = append(arrayFieldData.ValidData, validData...)
 				totalLength += len(arrayPayload)
 				insertData.Data[fieldID] = arrayFieldData
 
 			case schemapb.DataType_JSON:
-				jsonPayload, nullData, err := eventReader.GetJSONFromPayload()
+				jsonPayload, validData, err := eventReader.GetJSONFromPayload()
 				if err != nil {
 					eventReader.Close()
 					binlogReader.Close()
@@ -665,7 +665,7 @@ func (insertCodec *InsertCodec) DeserializeInto(fieldBinlogs []*Blob, rowNum int
 				jsonFieldData := insertData.Data[fieldID].(*JSONFieldData)
 
 				jsonFieldData.Data = append(jsonFieldData.Data, jsonPayload...)
-				jsonFieldData.ValidData = append(jsonFieldData.ValidData, nullData...)
+				jsonFieldData.ValidData = append(jsonFieldData.ValidData, validData...)
 				totalLength += len(jsonPayload)
 				insertData.Data[fieldID] = jsonFieldData
 

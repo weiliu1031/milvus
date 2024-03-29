@@ -157,6 +157,16 @@ func GenerateInt64Array(numRows int) []int64 {
 	return ret
 }
 
+func GenerateBoolArray(numRows int) []bool {
+	ret := make([]bool, numRows)
+	for i := 0; i < numRows; i++ {
+		if i%2 == 0 {
+			ret[i] = true
+		}
+	}
+	return ret
+}
+
 func GenerateStringArray(numRows int) []string {
 	ret := make([]string, numRows)
 	for i := 0; i < numRows; i++ {

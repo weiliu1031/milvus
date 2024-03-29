@@ -485,7 +485,6 @@ SegmentGrowingImpl::bulk_subscript(FieldId field_id,
 
     AssertInfo(!field_meta.is_vector(),
                "Scalar field meta type is vector type");
-    std::cout << "lxg test growing" << std::endl;
     auto result = CreateScalarDataArray(count, field_meta);
     if (field_meta.is_nullable()) {
         auto valid_data_ptr = insert_record_.get_valid_data(field_id);

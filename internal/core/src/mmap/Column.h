@@ -50,6 +50,7 @@ class ColumnBase {
         }
         if (!field_meta.is_vector()) {
             is_scalar = true;
+        } else {
             AssertInfo(!field_meta.is_nullable(),
                        "only support null in scalar");
         }

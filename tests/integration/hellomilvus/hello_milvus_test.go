@@ -39,6 +39,11 @@ type HelloMilvusSuite struct {
 	integration.MiniClusterSuite
 }
 
+func checkValidData() error {
+
+	return nil
+}
+
 func (s *HelloMilvusSuite) TestHelloMilvus() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -47,12 +52,50 @@ func (s *HelloMilvusSuite) TestHelloMilvus() {
 	const (
 		dim    = 128
 		dbName = ""
-		rowNum = 3000
+		rowNum = 5
 	)
 
 	collectionName := "TestHelloMilvus" + funcutil.GenRandomStr()
 
-	schema := integration.ConstructSchema(collectionName, dim, true)
+	pk := &schemapb.FieldSchema{
+		FieldID:      100,
+		Name:         integration.Int64Field,
+		IsPrimaryKey: true,
+		Description:  "",
+		DataType:     schemapb.DataType_Int64,
+		TypeParams:   nil,
+		IndexParams:  nil,
+		AutoID:       true,
+	}
+	nullableField := &schemapb.FieldSchema{
+		FieldID:     101,
+		Name:        integration.NullableInt64Field,
+		Description: "",
+		DataType:    schemapb.DataType_Int64,
+		TypeParams:  nil,
+		IndexParams: nil,
+		Nullable:    true,
+	}
+	fVec := &schemapb.FieldSchema{
+		FieldID:      102,
+		Name:         integration.FloatVecField,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_FloatVector,
+		TypeParams: []*commonpb.KeyValuePair{
+			{
+				Key:   common.DimKey,
+				Value: fmt.Sprintf("%d", dim),
+			},
+		},
+		IndexParams: nil,
+	}
+	schema := &schemapb.CollectionSchema{
+		Name:   collectionName,
+		AutoID: true,
+		Fields: []*schemapb.FieldSchema{pk, nullableField, fVec},
+	}
+
 	marshaledSchema, err := proto.Marshal(schema)
 	s.NoError(err)
 
@@ -76,10 +119,25 @@ func (s *HelloMilvusSuite) TestHelloMilvus() {
 
 	fVecColumn := integration.NewFloatVectorFieldData(integration.FloatVecField, rowNum, dim)
 	hashKeys := integration.GenerateHashKeys(rowNum)
+	validData := integration.GenerateBoolArray(rowNum)
+	nullableColumn := &schemapb.FieldData{
+		Type:      schemapb.DataType_Int64,
+		FieldName: integration.NullableInt64Field,
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_LongData{
+					LongData: &schemapb.LongArray{
+						Data: integration.GenerateInt64Array(rowNum),
+					},
+				},
+			},
+		},
+		ValidData: validData,
+	}
 	insertResult, err := c.Proxy.Insert(ctx, &milvuspb.InsertRequest{
 		DbName:         dbName,
 		CollectionName: collectionName,
-		FieldsData:     []*schemapb.FieldData{fVecColumn},
+		FieldsData:     []*schemapb.FieldData{nullableColumn, fVecColumn},
 		HashKeys:       hashKeys,
 		NumRows:        uint32(rowNum),
 	})
@@ -142,9 +200,17 @@ func (s *HelloMilvusSuite) TestHelloMilvus() {
 
 	params := integration.GetSearchParams(integration.IndexFaissIvfFlat, metric.L2)
 	searchReq := integration.ConstructSearchRequest("", collectionName, expr,
-		integration.FloatVecField, schemapb.DataType_FloatVector, nil, metric.L2, params, nq, dim, topk, roundDecimal)
+		integration.FloatVecField, schemapb.DataType_FloatVector, []string{integration.NullableInt64Field, integration.Int64Field}, metric.L2, params, nq, dim, topk, roundDecimal)
 
 	searchResult, err := c.Proxy.Search(ctx, searchReq)
+
+	for _, result := range searchResult.Results.GetFieldsData() {
+		if result.FieldName == integration.NullableInt64Field {
+			s.Equal(len(result.ValidData), len(result.GetScalars().GetLongData().Data))
+		} else {
+			s.Equal(len(result.ValidData), 0)
+		}
+	}
 
 	if searchResult.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 		log.Warn("searchResult fail reason", zap.String("reason", searchResult.GetStatus().GetReason()))

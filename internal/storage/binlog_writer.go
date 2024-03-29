@@ -271,13 +271,14 @@ func (writer *IndexFileBinlogWriter) NextIndexFileEventWriter() (*indexFileEvent
 }
 
 // NewInsertBinlogWriter creates InsertBinlogWriter to write binlog file.
-func NewInsertBinlogWriter(dataType schemapb.DataType, collectionID, partitionID, segmentID, FieldID int64) *InsertBinlogWriter {
+func NewInsertBinlogWriter(dataType schemapb.DataType, collectionID, partitionID, segmentID, FieldID int64, nullable bool) *InsertBinlogWriter {
 	descriptorEvent := newDescriptorEvent()
 	descriptorEvent.PayloadDataType = dataType
 	descriptorEvent.CollectionID = collectionID
 	descriptorEvent.PartitionID = partitionID
 	descriptorEvent.SegmentID = segmentID
 	descriptorEvent.FieldID = FieldID
+	descriptorEvent.Nullable = nullable
 
 	w := &InsertBinlogWriter{
 		baseBinlogWriter: baseBinlogWriter{

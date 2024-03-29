@@ -34,7 +34,7 @@ GetFixPartSize(DescriptorEventData& data) {
            sizeof(data.fix_part.segment_id) + sizeof(data.fix_part.field_id) +
            sizeof(data.fix_part.start_timestamp) +
            sizeof(data.fix_part.end_timestamp) +
-           sizeof(data.fix_part.data_type);
+           sizeof(data.fix_part.data_type) + sizeof(data.fix_part.nullable);
 }
 int
 GetFixPartSize(BaseEventData& data) {
@@ -107,6 +107,8 @@ DescriptorEventDataFixPart::DescriptorEventDataFixPart(BinlogReaderPtr reader) {
     assert(ast.ok());
     ast = reader->Read(sizeof(field_id), &field_id);
     assert(ast.ok());
+    ast = reader->Read(sizeof(nullable), &nullable);
+    assert(ast.ok());
     ast = reader->Read(sizeof(start_timestamp), &start_timestamp);
     assert(ast.ok());
     ast = reader->Read(sizeof(end_timestamp), &end_timestamp);
@@ -120,7 +122,7 @@ DescriptorEventDataFixPart::Serialize() {
     auto fix_part_size = sizeof(collection_id) + sizeof(partition_id) +
                          sizeof(segment_id) + sizeof(field_id) +
                          sizeof(start_timestamp) + sizeof(end_timestamp) +
-                         sizeof(data_type);
+                         sizeof(data_type) + sizeof(nullable);
     std::vector<uint8_t> res(fix_part_size);
     int offset = 0;
     memcpy(res.data() + offset, &collection_id, sizeof(collection_id));
@@ -131,6 +133,8 @@ DescriptorEventDataFixPart::Serialize() {
     offset += sizeof(segment_id);
     memcpy(res.data() + offset, &field_id, sizeof(field_id));
     offset += sizeof(field_id);
+    memcpy(res.data() + offset, &nullable, sizeof(nullable));
+    offset += sizeof(nullable);
     memcpy(res.data() + offset, &start_timestamp, sizeof(start_timestamp));
     offset += sizeof(start_timestamp);
     memcpy(res.data() + offset, &end_timestamp, sizeof(end_timestamp));
@@ -196,7 +200,8 @@ DescriptorEventData::Serialize() {
 
 BaseEventData::BaseEventData(BinlogReaderPtr reader,
                              int event_length,
-                             DataType data_type) {
+                             DataType data_type,
+                             bool nullable) {
     auto ast = reader->Read(sizeof(start_timestamp), &start_timestamp);
     AssertInfo(ast.ok(), "read start timestamp failed");
     ast = reader->Read(sizeof(end_timestamp), &end_timestamp);
@@ -204,11 +209,13 @@ BaseEventData::BaseEventData(BinlogReaderPtr reader,
 
     int payload_length =
         event_length - sizeof(start_timestamp) - sizeof(end_timestamp);
+    std::cout << "payload_length: " << payload_length << std::endl;
     auto res = reader->Read(payload_length);
     AssertInfo(res.first.ok(), "read payload failed");
     auto payload_reader = std::make_shared<PayloadReader>(
-        res.second.get(), payload_length, data_type);
+        res.second.get(), payload_length, data_type, nullable);
     field_data = payload_reader->get_field_data();
+    std::cout << "is_nullable: " << field_data->IsNullable() << std::endl;
 }
 
 std::vector<uint8_t>
@@ -289,11 +296,13 @@ BaseEventData::Serialize() {
     return res;
 }
 
-BaseEvent::BaseEvent(BinlogReaderPtr reader, DataType data_type) {
+BaseEvent::BaseEvent(BinlogReaderPtr reader,
+                     DataType data_type,
+                     bool nullable) {
     event_header = EventHeader(reader);
     auto event_data_length =
         event_header.event_length_ - GetEventHeaderSize(event_header);
-    event_data = BaseEventData(reader, event_data_length, data_type);
+    event_data = BaseEventData(reader, event_data_length, data_type, nullable);
 }
 
 std::vector<uint8_t>
@@ -372,7 +381,7 @@ LocalIndexEvent::LocalIndexEvent(BinlogReaderPtr reader) {
     auto res = reader->Read(index_size);
     AssertInfo(res.first.ok(), "read payload failed");
     auto payload_reader = std::make_shared<PayloadReader>(
-        res.second.get(), index_size, DataType::INT8);
+        res.second.get(), index_size, DataType::INT8, false);
     field_data = payload_reader->get_field_data();
 }
 

@@ -28,7 +28,7 @@ import (
 )
 
 func createBinlogBuf(t *testing.T, dataType schemapb.DataType, data interface{}) []byte {
-	w := storage.NewInsertBinlogWriter(dataType, 10, 20, 30, 40)
+	w := storage.NewInsertBinlogWriter(dataType, 10, 20, 30, 40, false)
 	assert.NotNil(t, w)
 	defer w.Close()
 
