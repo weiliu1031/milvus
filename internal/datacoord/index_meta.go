@@ -35,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type indexMeta struct {
@@ -419,6 +420,46 @@ func (m *indexMeta) GetSegmentIndexStateOnField(collID, segmentID, fieldID Uniqu
 	}
 	state.FailReason = fmt.Sprintf("there is no index on fieldID: %d", fieldID)
 	return state
+}
+
+func (m *indexMeta) GetIndexedSegments(collectionID int64, fieldIDs []UniqueID) []int64 {
+	m.RLock()
+	defer m.RUnlock()
+
+	fieldIndexes, ok := m.indexes[collectionID]
+	if !ok {
+		return nil
+	}
+
+	fieldIDSet := typeutil.NewUniqueSet(fieldIDs...)
+
+	checkSegmentState := func(indexes map[int64]*model.SegmentIndex) bool {
+		indexedFields := 0
+		for indexID, index := range fieldIndexes {
+			if !fieldIDSet.Contain(index.FieldID) {
+				continue
+			}
+
+			if index.IsDeleted {
+				return false
+			}
+
+			if segIdx, ok := indexes[indexID]; ok && segIdx.IndexState == commonpb.IndexState_Finished {
+				indexedFields += 1
+			}
+		}
+
+		return indexedFields == fieldIDSet.Len()
+	}
+
+	ret := make([]int64, 0)
+	for sid, indexes := range m.segmentIndexes {
+		if checkSegmentState(indexes) {
+			ret = append(ret, sid)
+		}
+	}
+
+	return ret
 }
 
 // GetIndexesForCollection gets all indexes info with the specified collection.
