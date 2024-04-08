@@ -294,12 +294,12 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	pipeline.ExcludedSegments(growingInfo)
 
 	flushedInfo := lo.SliceToMap(channel.GetFlushedSegmentIds(), func(id int64) (int64, uint64) {
-		return id, typeutil.MaxTimestamp
+		return id, channel.GetSeekPosition().GetTimestamp()
 	})
 	pipeline.ExcludedSegments(flushedInfo)
 	for _, channelInfo := range req.GetInfos() {
 		droppedInfos := lo.SliceToMap(channelInfo.GetDroppedSegmentIds(), func(id int64) (int64, uint64) {
-			return id, typeutil.MaxTimestamp
+			return id, channel.GetSeekPosition().GetTimestamp()
 		})
 		pipeline.ExcludedSegments(droppedInfos)
 	}
@@ -550,7 +550,10 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 		pipeline := node.pipelineManager.Get(req.GetShard())
 		if pipeline != nil {
 			droppedInfos := lo.SliceToMap(req.GetSegmentIDs(), func(id int64) (int64, uint64) {
-				return id, typeutil.MaxTimestamp
+				if req.GetCheckpoint() == nil {
+					return id, typeutil.MaxTimestamp
+				}
+				return id, req.GetCheckpoint().GetTimestamp()
 			})
 			pipeline.ExcludedSegments(droppedInfos)
 		}
@@ -1407,7 +1410,7 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 			pipeline := node.pipelineManager.Get(req.GetChannel())
 			if pipeline != nil {
 				droppedInfos := lo.SliceToMap(action.GetDroppedInTarget(), func(id int64) (int64, uint64) {
-					return id, typeutil.MaxTimestamp
+					return id, action.GetCheckpoint().Timestamp
 				})
 
 				pipeline.ExcludedSegments(droppedInfos)

@@ -246,7 +246,14 @@ func (ex *Executor) releaseSegment(task *SegmentTask, step int) {
 	ctx := task.Context()
 
 	dstNode := action.Node()
-	req := packReleaseSegmentRequest(task, action)
+
+	channel := ex.targetMgr.GetDmChannel(task.CollectionID(), task.Shard(), meta.CurrentTarget)
+	if channel == nil {
+		err := merr.WrapErrChannelNotFound(task.Shard())
+		log.Warn("failed to release segment", zap.Error(err))
+		return
+	}
+	req := packReleaseSegmentRequest(task, action, channel.GetSeekPosition())
 	if action.Scope() == querypb.DataScope_Streaming {
 		// Any modification to the segment distribution have to set NeedTransfer true,
 		// to protect the version, which serves search/query
@@ -255,11 +262,6 @@ func (ex *Executor) releaseSegment(task *SegmentTask, step int) {
 		req.Shard = task.shard
 
 		if ex.meta.CollectionManager.Exist(task.CollectionID()) {
-			// leader, ok := getShardLeader(ex.meta.ReplicaManager, ex.dist, task.CollectionID(), action.Node(), req.GetShard())
-			// if !ok {
-			// 	log.Warn("no shard leader for the segment to execute releasing", zap.String("shard", req.GetShard()))
-			// 	return
-			// }
 			replica := ex.meta.ReplicaManager.GetByCollectionAndNode(task.CollectionID(), action.Node())
 			if replica == nil {
 				msg := "node doesn't belong to any replica"

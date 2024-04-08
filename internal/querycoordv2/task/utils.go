@@ -164,7 +164,7 @@ func packLoadSegmentRequest(
 	}
 }
 
-func packReleaseSegmentRequest(task *SegmentTask, action *SegmentAction) *querypb.ReleaseSegmentsRequest {
+func packReleaseSegmentRequest(task *SegmentTask, action *SegmentAction, cp *msgpb.MsgPosition) *querypb.ReleaseSegmentsRequest {
 	return &querypb.ReleaseSegmentsRequest{
 		Base: commonpbutil.NewMsgBase(
 			commonpbutil.WithMsgType(commonpb.MsgType_ReleaseSegments),
@@ -177,6 +177,7 @@ func packReleaseSegmentRequest(task *SegmentTask, action *SegmentAction) *queryp
 		Scope:        action.Scope(),
 		Shard:        action.Shard(),
 		NeedTransfer: false,
+		Checkpoint:   cp,
 	}
 }
 

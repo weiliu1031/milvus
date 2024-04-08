@@ -685,10 +685,32 @@ func (suite *TaskSuite) TestReleaseSegmentTask() {
 	timeout := 10 * time.Second
 	targetNode := int64(3)
 	partition := int64(100)
-	channel := &datapb.VchannelInfo{
+
+	channelName := "test-channel-0"
+	vchannel := &datapb.VchannelInfo{
 		CollectionID: suite.collection,
-		ChannelName:  Params.CommonCfg.RootCoordDml.GetValue() + "-test",
+		ChannelName:  channelName,
 	}
+
+	segmentInfos := make([]*datapb.SegmentInfo, 0)
+	segments := make([]*meta.Segment, 0)
+
+	for _, segment := range suite.loadSegments {
+		info := &datapb.SegmentInfo{
+			ID:            segment,
+			CollectionID:  suite.collection,
+			PartitionID:   partition,
+			InsertChannel: channelName,
+		}
+		segmentInfos = append(segmentInfos, info)
+
+		segments = append(segments, &meta.Segment{SegmentInfo: info})
+	}
+	suite.meta.ReplicaManager.Put(utils.CreateTestReplica(1, suite.collection, []int64{targetNode}))
+	suite.meta.CollectionManager.PutCollection(utils.CreateTestCollection(suite.collection, 1), utils.CreateTestPartition(suite.collection, partition))
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, mock.Anything).Return([]*datapb.VchannelInfo{vchannel}, segmentInfos, nil).Maybe()
+	suite.target.UpdateCollectionNextTarget(suite.collection)
+	suite.target.UpdateCollectionCurrentTarget(suite.collection)
 
 	// Expect
 	suite.cluster.EXPECT().ReleaseSegments(mock.Anything, targetNode, mock.Anything).Return(merr.Success(), nil)
@@ -697,20 +719,11 @@ func (suite *TaskSuite) TestReleaseSegmentTask() {
 	view := &meta.LeaderView{
 		ID:           targetNode,
 		CollectionID: suite.collection,
-		Channel:      channel.ChannelName,
+		Channel:      vchannel.ChannelName,
 		Segments:     make(map[int64]*querypb.SegmentDist),
 	}
-	segments := make([]*meta.Segment, 0)
 	tasks := []Task{}
 	for _, segment := range suite.releaseSegments {
-		segments = append(segments, &meta.Segment{
-			SegmentInfo: &datapb.SegmentInfo{
-				ID:            segment,
-				CollectionID:  suite.collection,
-				PartitionID:   partition,
-				InsertChannel: channel.ChannelName,
-			},
-		})
 		view.Segments[segment] = &querypb.SegmentDist{NodeID: targetNode, Version: 0}
 		task, err := NewSegmentTask(
 			ctx,
@@ -718,7 +731,7 @@ func (suite *TaskSuite) TestReleaseSegmentTask() {
 			WrapIDSource(0),
 			suite.collection,
 			suite.replica,
-			NewSegmentAction(targetNode, ActionTypeReduce, channel.GetChannelName(), segment),
+			NewSegmentAction(targetNode, ActionTypeReduce, vchannel.GetChannelName(), segment),
 		)
 		suite.NoError(err)
 		tasks = append(tasks, task)
@@ -751,6 +764,24 @@ func (suite *TaskSuite) TestReleaseGrowingSegmentTask() {
 	timeout := 10 * time.Second
 	targetNode := int64(3)
 
+	channelName := "test-channel-0"
+	vchannel := &datapb.VchannelInfo{
+		CollectionID: suite.collection,
+		ChannelName:  channelName,
+	}
+	segments := make([]*datapb.SegmentInfo, 0)
+	for _, segment := range suite.loadSegments {
+		segments = append(segments, &datapb.SegmentInfo{
+			ID:            segment,
+			PartitionID:   1,
+			InsertChannel: channelName,
+		})
+	}
+	suite.meta.CollectionManager.PutCollection(utils.CreateTestCollection(suite.collection, 1), utils.CreateTestPartition(suite.collection, 1))
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, mock.Anything).Return([]*datapb.VchannelInfo{vchannel}, segments, nil).Maybe()
+	suite.target.UpdateCollectionNextTarget(suite.collection)
+	suite.target.UpdateCollectionCurrentTarget(suite.collection)
+
 	// Expect
 	suite.cluster.EXPECT().ReleaseSegments(mock.Anything, targetNode, mock.Anything).Return(merr.Success(), nil)
 
@@ -762,7 +793,7 @@ func (suite *TaskSuite) TestReleaseGrowingSegmentTask() {
 			WrapIDSource(0),
 			suite.collection,
 			suite.replica,
-			NewSegmentActionWithScope(targetNode, ActionTypeReduce, "", segment, querypb.DataScope_Streaming),
+			NewSegmentActionWithScope(targetNode, ActionTypeReduce, channelName, segment, querypb.DataScope_Streaming),
 		)
 		suite.NoError(err)
 		tasks = append(tasks, task)
@@ -772,11 +803,12 @@ func (suite *TaskSuite) TestReleaseGrowingSegmentTask() {
 
 	growings := map[int64]*meta.Segment{}
 	for _, segment := range suite.releaseSegments[1:] {
-		growings[segment] = utils.CreateTestSegment(suite.collection, 1, segment, targetNode, 1, "")
+		growings[segment] = utils.CreateTestSegment(suite.collection, 1, segment, targetNode, 1, channelName)
 	}
 	suite.dist.LeaderViewManager.Update(targetNode, &meta.LeaderView{
 		ID:              targetNode,
 		GrowingSegments: growings,
+		Channel:         channelName,
 	})
 
 	segmentsNum := len(suite.releaseSegments)
