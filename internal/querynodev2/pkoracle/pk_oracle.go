@@ -34,6 +34,8 @@ type PkOracle interface {
 	Remove(filters ...CandidateFilter) error
 	// CheckCandidate checks whether candidate with provided key exists.
 	Exists(candidate Candidate, workerID int64) bool
+
+	Size() int
 }
 
 var _ PkOracle = (*pkOracle)(nil)
@@ -59,6 +61,10 @@ func (pko *pkOracle) Get(pk storage.PrimaryKey, filters ...CandidateFilter) ([]i
 	})
 
 	return result, nil
+}
+
+func (pko *pkOracle) Size() int {
+	return pko.candidates.Len()
 }
 
 func (pko *pkOracle) candidateKey(candidate Candidate, workerID int64) string {

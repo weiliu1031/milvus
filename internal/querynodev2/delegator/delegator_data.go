@@ -186,6 +186,8 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 	log := sd.getLogger(context.Background())
 
 	log.Debug("start to process delete", zap.Uint64("ts", ts))
+
+	pkNum := 0
 	// add deleteData into buffer.
 	cacheItems := make([]deletebuffer.BufferItem, 0, len(deleteData))
 	for _, entry := range deleteData {
@@ -197,6 +199,7 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 				RowCount: entry.RowCount,
 			},
 		})
+		pkNum += (len(entry.PrimaryKeys))
 	}
 
 	sd.deleteBuffer.Put(&deletebuffer.Item{
@@ -204,6 +207,7 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 		Data: cacheItems,
 	})
 
+	tr = timerecord.NewTimeRecorder(method)
 	// segment => delete data
 	delRecords := make(map[int64]DeleteData)
 	for _, data := range deleteData {
@@ -223,10 +227,14 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 		}
 	}
 
+	timeCost := tr.ElapseSpan().Seconds()
+	log.Debug("bf cost", zap.Uint64("ts", ts), zap.Int("pkNum", pkNum), zap.Int("bfNum", sd.pkOracle.Size()), zap.Float64("time cost", timeCost), zap.Int64("qps", int64(float64(pkNum*sd.pkOracle.Size())/timeCost)))
+
 	offlineSegments := typeutil.NewConcurrentSet[int64]()
 
 	sealed, growing, version := sd.distribution.PinOnlineSegments()
 
+	tr = timerecord.NewTimeRecorder(method)
 	eg, ctx := errgroup.WithContext(context.Background())
 	for _, entry := range sealed {
 		entry := entry
@@ -263,7 +271,8 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 
 	// not error return in apply delete
 	_ = eg.Wait()
-
+	timeCost = tr.ElapseSpan().Seconds()
+	log.Debug("forward cost", zap.Uint64("ts", ts), zap.Int("pkNum", pkNum), zap.Int("bfNum", sd.pkOracle.Size()), zap.Int("sealed", len(sealed)), zap.Int("growing", len(growing)), zap.Float64("time cost", timeCost))
 	sd.distribution.Unpin(version)
 	offlineSegIDs := offlineSegments.Collect()
 	if len(offlineSegIDs) > 0 {
