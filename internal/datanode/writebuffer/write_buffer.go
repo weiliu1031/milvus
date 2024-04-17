@@ -96,6 +96,8 @@ type writeBufferBase struct {
 	flushTimestamp *atomic.Uint64
 
 	storagev2Cache *metacache.StorageV2Cache
+
+	isDropped *atomic.Bool
 }
 
 func newWriteBufferBase(channel string, metacache metacache.MetaCache, storageV2Cache *metacache.StorageV2Cache, syncMgr syncmgr.SyncManager, option *writeBufferOption) (*writeBufferBase, error) {
@@ -140,6 +142,7 @@ func newWriteBufferBase(channel string, metacache metacache.MetaCache, storageV2
 		syncPolicies:     option.syncPolicies,
 		flushTimestamp:   flushTs,
 		storagev2Cache:   storageV2Cache,
+		isDropped:        atomic.NewBool(false),
 	}, nil
 }
 
@@ -560,8 +563,12 @@ func (wb *writeBufferBase) Close(drop bool) {
 	wb.mut.Lock()
 	defer wb.mut.Unlock()
 	if !drop {
+		if !wb.isDropped.Load() {
+			log.Info("Unexpected remove channel", zap.String("channel", wb.channelName))
+		}
 		return
 	}
+	wb.isDropped.Store(true)
 
 	var futures []*conc.Future[error]
 	for id := range wb.buffers {

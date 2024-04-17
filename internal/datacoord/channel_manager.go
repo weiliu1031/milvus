@@ -641,6 +641,9 @@ type ackEvent struct {
 }
 
 func (c *ChannelManagerImpl) updateWithTimer(updates *ChannelOpSet, state datapb.ChannelWatchState) error {
+	if state == datapb.ChannelWatchState_ToRelease {
+		log.Info("check release source", zap.Array("updates", updates))
+	}
 	channelsWithTimer := []string{}
 	for _, op := range updates.Collect() {
 		if op.Type == Add {
@@ -788,6 +791,7 @@ func (c *ChannelManagerImpl) Release(nodeID UniqueID, channelName string) error 
 		return fmt.Errorf("fail to find matching nodeID: %d with channelName: %s", nodeID, channelName)
 	}
 
+	log.Info("release channel", zap.Any("channel", toReleaseChannel))
 	toReleaseUpdates := NewChannelOpSet(NewAddOp(nodeID, toReleaseChannel))
 	err := c.updateWithTimer(toReleaseUpdates, datapb.ChannelWatchState_ToRelease)
 	if err != nil {
