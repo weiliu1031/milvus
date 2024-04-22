@@ -228,7 +228,7 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 	}
 
 	timeCost := tr.ElapseSpan().Seconds()
-	log.Debug("bf cost", zap.Uint64("ts", ts), zap.Int("pkNum", pkNum), zap.Int("bfNum", sd.pkOracle.Size()), zap.Float64("time cost", timeCost), zap.Int64("qps", int64(float64(pkNum*sd.pkOracle.Size())/timeCost)))
+	log.Info("bf cost", zap.Uint64("ts", ts), zap.Int("pkNum", pkNum), zap.Int("bfNum", sd.pkOracle.Size()), zap.Float64("time cost", timeCost), zap.Int64("qps", int64(float64(pkNum*sd.pkOracle.Size())/timeCost)))
 
 	offlineSegments := typeutil.NewConcurrentSet[int64]()
 
@@ -272,7 +272,7 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 	// not error return in apply delete
 	_ = eg.Wait()
 	timeCost = tr.ElapseSpan().Seconds()
-	log.Debug("forward cost", zap.Uint64("ts", ts), zap.Int("pkNum", pkNum), zap.Int("bfNum", sd.pkOracle.Size()), zap.Int("sealed", len(sealed)), zap.Int("growing", len(growing)), zap.Float64("time cost", timeCost))
+	log.Info("forward cost", zap.Uint64("ts", ts), zap.Int("pkNum", pkNum), zap.Int("bfNum", sd.pkOracle.Size()), zap.Int("sealed", len(sealed)), zap.Int("growing", len(growing)), zap.Float64("time cost", timeCost))
 	sd.distribution.Unpin(version)
 	offlineSegIDs := offlineSegments.Collect()
 	if len(offlineSegIDs) > 0 {
@@ -295,7 +295,7 @@ func (sd *shardDelegator) applyDelete(ctx context.Context, nodeID int64, worker 
 		)
 		delRecord, ok := delRecords[segmentEntry.SegmentID]
 		if ok {
-			log.Debug("delegator plan to applyDelete via worker")
+			log.Debug("delegator plan to applyDelete via worker", zap.Int64("segmentID", segmentEntry.SegmentID), zap.Int("rowCount", len(delRecord.PrimaryKeys)))
 			err := retry.Do(ctx, func() error {
 				if sd.Stopped() {
 					return retry.Unrecoverable(merr.WrapErrChannelNotAvailable(sd.vchannelName, "channel is unsubscribing"))

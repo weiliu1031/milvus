@@ -40,6 +40,8 @@ type BloomFilterSet struct {
 	segType      commonpb.SegmentState
 	currentStat  *storage.PkStatistics
 	historyStats []*storage.PkStatistics
+
+	kHashFunc uint
 }
 
 // MayPkExist returns whether any bloom filters returns positive.
@@ -57,6 +59,36 @@ func (s *BloomFilterSet) MayPkExist(pk storage.PrimaryKey) bool {
 		}
 	}
 	return false
+}
+
+func (s *BloomFilterSet) TestLocations(pk storage.PrimaryKey, locs []uint64) bool {
+	s.statsMutex.RLock()
+	defer s.statsMutex.RUnlock()
+
+	if s.currentStat != nil && s.currentStat.TestLocations(pk, locs) {
+		return true
+	}
+
+	// for sealed, if one of the stats shows it exist, then we have to check it
+	for _, historyStat := range s.historyStats {
+		k := historyStat.PkFilter.K()
+		if k > uint(len(locs)) {
+			log.Error("locations num is less than hash func num",
+				zap.Int("locationNum", len(locs)),
+				zap.Uint("hashFuncNum", k),
+				zap.Int64("segmentID", s.segmentID))
+			// make it false positive
+			return true
+		}
+		if historyStat.TestLocations(pk, locs[:k]) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *BloomFilterSet) GetHashFuncNum() uint {
+	return s.kHashFunc
 }
 
 // ID implement candidate.
@@ -80,9 +112,13 @@ func (s *BloomFilterSet) UpdateBloomFilter(pks []storage.PrimaryKey) {
 	defer s.statsMutex.Unlock()
 
 	if s.currentStat == nil {
+		m, k := bloom.EstimateParameters(paramtable.Get().CommonCfg.BloomFilterSize.GetAsUint(),
+			paramtable.Get().CommonCfg.MaxBloomFalsePositive.GetAsFloat())
+		if k > s.kHashFunc {
+			s.kHashFunc = k
+		}
 		s.currentStat = &storage.PkStatistics{
-			PkFilter: bloom.NewWithEstimates(paramtable.Get().CommonCfg.BloomFilterSize.GetAsUint(),
-				paramtable.Get().CommonCfg.MaxBloomFalsePositive.GetAsFloat()),
+			PkFilter: bloom.New(m, k),
 		}
 	}
 
@@ -109,18 +145,10 @@ func (s *BloomFilterSet) AddHistoricalStats(stats *storage.PkStatistics) {
 	s.statsMutex.Lock()
 	defer s.statsMutex.Unlock()
 
-	s.historyStats = append(s.historyStats, stats)
-}
-
-// initCurrentStat initialize currentStats if nil.
-// Note: invoker shall acquire statsMutex lock first.
-func (s *BloomFilterSet) initCurrentStat() {
-	if s.currentStat == nil {
-		s.currentStat = &storage.PkStatistics{
-			PkFilter: bloom.NewWithEstimates(paramtable.Get().CommonCfg.BloomFilterSize.GetAsUint(),
-				paramtable.Get().CommonCfg.MaxBloomFalsePositive.GetAsFloat()),
-		}
+	if stats.PkFilter.K() > s.kHashFunc {
+		s.kHashFunc = s.kHashFunc
 	}
+	s.historyStats = append(s.historyStats, stats)
 }
 
 // NewBloomFilterSet returns a new BloomFilterSet.

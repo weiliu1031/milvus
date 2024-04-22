@@ -1020,6 +1020,12 @@ func (s *DelegatorDataSuite) TestDelegatorData_ExcludeSegments() {
 	s.True(s.delegator.VerifyExcludedSegments(1, 5))
 }
 
+func (s *DelegatorDataSuite) TestDelegatorData_GetSegmentInfo() {
+	m, k := bloom.EstimateParameters(5, 0.05)
+	s.Equal(1, int(m))
+	s.Equal(1, int(k))
+}
+
 func TestDelegatorDataSuite(t *testing.T) {
 	suite.Run(t, new(DelegatorDataSuite))
 }
