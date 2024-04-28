@@ -150,6 +150,7 @@ func (lb *LBPolicyImpl) ExecuteWithRetry(ctx context.Context, workload ChannelWo
 		zap.String("channelName", workload.channel),
 	)
 
+	log.Info("execute workload with retry for collection", zap.Uint("retryTimes", workload.retryTimes))
 	var lastErr error
 	err := retry.Do(ctx, func() error {
 		targetNode, err := lb.selectNode(ctx, workload, excludeNodes)
@@ -201,6 +202,11 @@ func (lb *LBPolicyImpl) Execute(ctx context.Context, workload CollectionWorkLoad
 	dml2leaders, err := globalMetaCache.GetShards(ctx, true, workload.db, workload.collectionName, workload.collectionID)
 	if err != nil {
 		log.Ctx(ctx).Warn("failed to get shards", zap.Error(err))
+		return err
+	}
+	log.Info("execute workload for collection", zap.Int64("collectionID", workload.collectionID), zap.Any("leaders", dml2leaders))
+	if len(dml2leaders) == 0 {
+		log.Ctx(ctx).Warn("no available shard leader exist for collection", zap.Int64("collectionID", workload.collectionID))
 		return err
 	}
 
