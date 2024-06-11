@@ -448,7 +448,7 @@ dataCoord:
   autoUpgradeSegmentIndex: false # whether auto upgrade segment index to index engine's version
   enableCompaction: true # Enable data segment compaction
   compaction:
-    enableAutoCompaction: true
+    enableAutoCompaction: false
     indexBasedCompaction: true
     rpcTimeout: 10
     maxParallelTaskNum: 10

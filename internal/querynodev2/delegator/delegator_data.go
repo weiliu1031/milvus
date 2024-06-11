@@ -178,12 +178,15 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 	sd.deleteMut.Lock()
 	defer sd.deleteMut.Unlock()
 
+	begin := time.Now()
+	counter := 0
 	log := sd.getLogger(context.Background())
 
 	log.Debug("start to process delete", zap.Uint64("ts", ts))
 	// add deleteData into buffer.
 	cacheItems := make([]deletebuffer.BufferItem, 0, len(deleteData))
 	for _, entry := range deleteData {
+		counter += len(entry.PrimaryKeys)
 		cacheItems = append(cacheItems, deletebuffer.BufferItem{
 			PartitionID: entry.PartitionID,
 			DeleteData: storage.DeleteData{
@@ -199,34 +202,35 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 		Data: cacheItems,
 	})
 
+	retMap := sd.applyBFInParallel(deleteData, segments.GetBFApplyPool())
 	// segment => delete data
 	delRecords := make(map[int64]DeleteData)
-	for _, data := range deleteData {
-		pks := data.PrimaryKeys
-		batchSize := paramtable.Get().CommonCfg.BloomFilterApplyBatchSize.GetAsInt()
-		for idx := 0; idx < len(pks); idx += batchSize {
-			endIdx := idx + batchSize
-			if endIdx > len(pks) {
-				endIdx = len(pks)
-			}
+	retMap.Range(func(key int, value *BatchApplyRet) bool {
+		startIdx := value.StartIdx
+		pk2SegmentIDs := value.Segment2Hits
 
-			pk2SegmentIDs := sd.pkOracle.BatchGet(pks[idx:endIdx], pkoracle.WithPartitionID(data.PartitionID))
-			for i, segmentIDs := range pk2SegmentIDs {
-				for _, segmentID := range segmentIDs {
+		pks := deleteData[value.DeleteDataIdx].PrimaryKeys
+		tss := deleteData[value.DeleteDataIdx].Timestamps
+
+		for segmentID, hits := range pk2SegmentIDs {
+			for i, hit := range hits {
+				if hit {
 					delRecord := delRecords[segmentID]
-					delRecord.PrimaryKeys = append(delRecord.PrimaryKeys, pks[idx+i])
-					delRecord.Timestamps = append(delRecord.Timestamps, data.Timestamps[idx+i])
+					delRecord.PrimaryKeys = append(delRecord.PrimaryKeys, pks[startIdx+i])
+					delRecord.Timestamps = append(delRecord.Timestamps, tss[startIdx+i])
 					delRecord.RowCount++
 					delRecords[segmentID] = delRecord
 				}
 			}
 		}
-	}
+		return true
+	})
 
 	offlineSegments := typeutil.NewConcurrentSet[int64]()
 
 	sealed, growing, version := sd.distribution.PinOnlineSegments()
 
+	start := time.Now()
 	eg, ctx := errgroup.WithContext(context.Background())
 	for _, entry := range sealed {
 		entry := entry
@@ -260,9 +264,9 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 			return nil
 		})
 	}
-
 	// not error return in apply delete
 	_ = eg.Wait()
+	applyDeleteCost := time.Since(start)
 
 	sd.distribution.Unpin(version)
 	offlineSegIDs := offlineSegments.Collect()
@@ -273,6 +277,47 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 
 	metrics.QueryNodeProcessCost.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.DeleteLabel).
 		Observe(float64(tr.ElapseSpan().Milliseconds()))
+
+	log.Info("process delete", zap.Int("pkNum", counter), zap.Duration("total cost", time.Since(begin)), zap.Duration("apply delete cost", applyDeleteCost))
+}
+
+type BatchApplyRet = struct {
+	DeleteDataIdx int
+	StartIdx      int
+	Segment2Hits  map[int64][]bool
+}
+
+func (sd *shardDelegator) applyBFInParallel(deleteDatas []*DeleteData, pool *conc.Pool[any]) *typeutil.ConcurrentMap[int, *BatchApplyRet] {
+	retIdx := 0
+	retMap := typeutil.NewConcurrentMap[int, *BatchApplyRet]()
+	batchSize := paramtable.Get().CommonCfg.BloomFilterApplyBatchSize.GetAsInt()
+
+	var futures []*conc.Future[any]
+	for didx, data := range deleteDatas {
+		pks := data.PrimaryKeys
+		for idx := 0; idx < len(pks); idx += batchSize {
+			startIdx := idx
+			endIdx := startIdx + batchSize
+			if endIdx > len(pks) {
+				endIdx = len(pks)
+			}
+
+			retIdx += 1
+			future := pool.Submit(func() (any, error) {
+				ret := sd.pkOracle.BatchGet(pks[startIdx:endIdx], pkoracle.WithPartitionID(data.PartitionID))
+				retMap.Insert(retIdx, &BatchApplyRet{
+					DeleteDataIdx: didx,
+					StartIdx:      startIdx,
+					Segment2Hits:  ret,
+				})
+				return nil, nil
+			})
+			futures = append(futures, future)
+		}
+	}
+	conc.AwaitAll(futures...)
+
+	return retMap
 }
 
 // applyDelete handles delete record and apply them to corresponding workers.
