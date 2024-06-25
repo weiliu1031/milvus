@@ -638,6 +638,164 @@ func AppendFieldData(dst []*schemapb.FieldData, src []*schemapb.FieldData, idx i
 	return
 }
 
+// AppendFieldData appends fields data of specified index from src to dst
+func AppendFieldDataWithPreAllocate(dst []*schemapb.FieldData, src []*schemapb.FieldData, srcIdx int64, dstIdx int64, dstCapacity int) (appendSize int64) {
+	for i, fieldData := range src {
+		switch fieldType := fieldData.Field.(type) {
+		case *schemapb.FieldData_Scalars:
+			if dst[i] == nil || dst[i].GetScalars() == nil {
+				dst[i] = &schemapb.FieldData{
+					Type:      fieldData.Type,
+					FieldName: fieldData.FieldName,
+					FieldId:   fieldData.FieldId,
+					IsDynamic: fieldData.IsDynamic,
+					Field: &schemapb.FieldData_Scalars{
+						Scalars: &schemapb.ScalarField{},
+					},
+				}
+			}
+			dstScalar := dst[i].GetScalars()
+			switch srcScalar := fieldType.Scalars.Data.(type) {
+			case *schemapb.ScalarField_BoolData:
+				if dstScalar.GetBoolData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_BoolData{
+						BoolData: &schemapb.BoolArray{
+							Data: make([]bool, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetBoolData().Data[dstIdx] = srcScalar.BoolData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.BoolData.Data[srcIdx]))
+			case *schemapb.ScalarField_IntData:
+				if dstScalar.GetIntData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_IntData{
+						IntData: &schemapb.IntArray{
+							Data: make([]int32, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetIntData().Data[dstIdx] = srcScalar.IntData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.IntData.Data[srcIdx]))
+			case *schemapb.ScalarField_LongData:
+				if dstScalar.GetLongData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_LongData{
+						LongData: &schemapb.LongArray{
+							Data: make([]int64, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetLongData().Data[dstIdx] = srcScalar.LongData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.LongData.Data[srcIdx]))
+			case *schemapb.ScalarField_FloatData:
+				if dstScalar.GetFloatData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_FloatData{
+						FloatData: &schemapb.FloatArray{
+							Data: make([]float32, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetFloatData().Data[dstIdx] = srcScalar.FloatData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.FloatData.Data[srcIdx]))
+			case *schemapb.ScalarField_DoubleData:
+				if dstScalar.GetDoubleData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_DoubleData{
+						DoubleData: &schemapb.DoubleArray{
+							Data: make([]float64, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetDoubleData().Data[dstIdx] = srcScalar.DoubleData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.DoubleData.Data[srcIdx]))
+			case *schemapb.ScalarField_StringData:
+				if dstScalar.GetStringData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_StringData{
+						StringData: &schemapb.StringArray{
+							Data: make([]string, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetStringData().Data[dstIdx] = srcScalar.StringData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.StringData.Data[srcIdx]))
+			case *schemapb.ScalarField_ArrayData:
+				if dstScalar.GetArrayData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_ArrayData{
+						ArrayData: &schemapb.ArrayArray{
+							Data:        []*schemapb.ScalarField{srcScalar.ArrayData.Data[srcIdx]},
+							ElementType: srcScalar.ArrayData.ElementType,
+						},
+					}
+				}
+				dstScalar.GetArrayData().Data[dstIdx] = srcScalar.ArrayData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.ArrayData.Data[srcIdx]))
+			case *schemapb.ScalarField_JsonData:
+				if dstScalar.GetJsonData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_JsonData{
+						JsonData: &schemapb.JSONArray{
+							// Data: [][]byte{srcScalar.JsonData.Data[srcIdx]},
+							Data: make([][]byte, dstCapacity),
+						},
+					}
+				}
+				dstScalar.GetJsonData().Data[dstIdx] = srcScalar.JsonData.Data[srcIdx]
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcScalar.JsonData.Data[srcIdx]))
+			default:
+				log.Error("Not supported field type", zap.String("field type", fieldData.Type.String()))
+			}
+		case *schemapb.FieldData_Vectors:
+			dim := fieldType.Vectors.Dim
+			if dst[i] == nil || dst[i].GetVectors() == nil {
+				dst[i] = &schemapb.FieldData{
+					Type:      fieldData.Type,
+					FieldName: fieldData.FieldName,
+					FieldId:   fieldData.FieldId,
+					Field: &schemapb.FieldData_Vectors{
+						Vectors: &schemapb.VectorField{
+							Dim: dim,
+						},
+					},
+				}
+			}
+			dstVector := dst[i].GetVectors()
+			switch srcVector := fieldType.Vectors.Data.(type) {
+			case *schemapb.VectorField_BinaryVector:
+				if dstVector.GetBinaryVector() == nil {
+					dstVector.Data = &schemapb.VectorField_BinaryVector{
+						BinaryVector: make([]byte, int(dim)/8*dstCapacity),
+					}
+				}
+
+				dstBinaryVector := dstVector.Data.(*schemapb.VectorField_BinaryVector)
+				dstBinaryVector.BinaryVector = append(dstBinaryVector.BinaryVector, srcVector.BinaryVector[srcIdx*(dim/8):(srcIdx+1)*(dim/8)]...)
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcVector.BinaryVector[srcIdx*(dim/8) : (srcIdx+1)*(dim/8)]))
+			case *schemapb.VectorField_FloatVector:
+				if dstVector.GetFloatVector() == nil {
+					dstVector.Data = &schemapb.VectorField_FloatVector{
+						FloatVector: &schemapb.FloatArray{
+							Data: make([]float32, int(dim)*dstCapacity),
+						},
+					}
+				}
+				dstVector.GetFloatVector().Data = append(dstVector.GetFloatVector().Data, srcVector.FloatVector.Data[srcIdx*dim:(srcIdx+1)*dim]...)
+				/* #nosec G103 */
+				appendSize += int64(unsafe.Sizeof(srcVector.FloatVector.Data[srcIdx*dim : (srcIdx+1)*dim]))
+			default:
+				log.Error("Not supported field type", zap.String("field type", fieldData.Type.String()))
+			}
+		}
+	}
+
+	return
+}
+
 // DeleteFieldData delete fields data appended last time
 func DeleteFieldData(dst []*schemapb.FieldData) {
 	for i, fieldData := range dst {

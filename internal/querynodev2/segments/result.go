@@ -404,19 +404,20 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 	cursors := make([]int64, len(validRetrieveResults))
 
 	var availableCount int
-	var retSize int64
-	maxOutputSize := paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64()
+	candidateOffset := make([]int, loopEnd)
+	candidateCursor := make([]int64, loopEnd)
 	for j := 0; j < loopEnd && (limit == -1 || availableCount < limit); j++ {
 		sel, drainOneResult := typeutil.SelectMinPKWithTimestamp(validRetrieveResults, cursors)
 		if sel == -1 || (param.mergeStopForBest && drainOneResult) {
 			break
 		}
 
+		candidateOffset[availableCount] = sel
+		candidateCursor[availableCount] = cursors[sel]
 		pk := typeutil.GetPK(validRetrieveResults[sel].GetIds(), cursors[sel])
 		ts := validRetrieveResults[sel].Timestamps[cursors[sel]]
 		if currentTs, ok := idTsMap[pk]; !ok {
 			typeutil.AppendPKs(ret.Ids, pk)
-			retSize += typeutil.AppendFieldData(ret.FieldsData, validRetrieveResults[sel].Result.GetFieldsData(), cursors[sel])
 			idTsMap[pk] = ts
 			availableCount++
 		} else {
@@ -424,17 +425,22 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 			skipDupCnt++
 			if ts != 0 && ts > currentTs {
 				idTsMap[pk] = ts
-				typeutil.DeleteFieldData(ret.FieldsData)
-				retSize += typeutil.AppendFieldData(ret.FieldsData, validRetrieveResults[sel].Result.GetFieldsData(), cursors[sel])
 			}
 		}
 
+		cursors[sel]++
+	}
+
+	var retSize int64
+	maxOutputSize := paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64()
+	for dstIdx := 0; dstIdx < availableCount; dstIdx++ {
+		sel := candidateOffset[dstIdx]
+		srcIdx := candidateCursor[dstIdx]
+		retSize += typeutil.AppendFieldDataWithPreAllocate(ret.FieldsData, validRetrieveResults[sel].Result.GetFieldsData(), srcIdx, int64(dstIdx), availableCount)
 		// limit retrieve result to avoid oom
 		if retSize > maxOutputSize {
 			return nil, fmt.Errorf("query results exceed the maxOutputSize Limit %d", maxOutputSize)
 		}
-
-		cursors[sel]++
 	}
 
 	if skipDupCnt > 0 {
@@ -449,6 +455,10 @@ func mergeInternalRetrieveResultsAndFillIfEmpty(
 	retrieveResults []*internalpb.RetrieveResults,
 	param *mergeParam,
 ) (*internalpb.RetrieveResults, error) {
+	if len(retrieveResults) == 1 {
+		return retrieveResults[0], nil
+	}
+
 	mergedResult, err := MergeInternalRetrieveResult(ctx, retrieveResults, param)
 	if err != nil {
 		return nil, err
