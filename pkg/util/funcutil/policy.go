@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/descriptor"
-	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"

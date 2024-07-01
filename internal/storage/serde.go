@@ -33,7 +33,7 @@ import (
 	"github.com/apache/arrow/go/v12/parquet/compress"
 	"github.com/apache/arrow/go/v12/parquet/pqarrow"
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/common"
@@ -421,7 +421,10 @@ var serdeMap = func() map[schemapb.DataType]serdeEntry {
 			return false
 		},
 		func(v any) uint64 {
-			return uint64(v.(*schemapb.ScalarField).XXX_Size())
+			if v == nil {
+				return 8
+			}
+			return uint64(proto.Size(v.(*schemapb.ScalarField)))
 		},
 	}
 

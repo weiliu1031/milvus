@@ -41,7 +41,6 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/tecbot/gorocksdb v0.0.0-20191217155057-f0fad39f321c // indirect
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.0.865
-	github.com/tidwall/gjson v1.14.4
 	github.com/tikv/client-go/v2 v2.0.4
 	go.etcd.io/etcd/api/v3 v3.5.5
 	go.etcd.io/etcd/client/v3 v3.5.5
@@ -68,6 +67,7 @@ require (
 	github.com/jolestar/go-commons-pool/v2 v2.1.2
 	github.com/milvus-io/milvus/pkg v0.0.0-00010101000000-000000000000
 	github.com/pkg/errors v0.9.1
+	github.com/tidwall/gjson v1.17.1
 	github.com/valyala/fastjson v1.6.4
 	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -256,3 +256,5 @@ replace (
 )
 
 exclude github.com/apache/pulsar-client-go/oauth2 v0.0.0-20211108044248-fe3b7c4e445b
+
+replace github.com/milvus-io/milvus-proto/go-api/v2 => /home/zilliz/code/milvus-proto/go-api

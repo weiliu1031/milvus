@@ -215,13 +215,13 @@ build-3rdparty:
 generated-proto-without-cpp: download-milvus-proto
 	@echo "Generate proto ..."
 	@mkdir -p ${GOPATH}/bin
-	@which protoc-gen-go 1>/dev/null || (echo "Installing protoc-gen-go" && cd /tmp && go install github.com/golang/protobuf/protoc-gen-go@v1.3.2)
+	@which protoc-gen-go 1>/dev/null || (echo "Installing protoc-gen-go" && go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0) || (echo "Installing protoc-gen-go-grpc" && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.4.0)
 	@(env bash $(PWD)/scripts/generate_proto.sh)
 
 generated-proto: download-milvus-proto build-3rdparty
 	@echo "Generate proto ..."
 	@mkdir -p ${GOPATH}/bin
-	@which protoc-gen-go 1>/dev/null || (echo "Installing protoc-gen-go" && cd /tmp && go install github.com/golang/protobuf/protoc-gen-go@v1.3.2)
+	@which protoc-gen-go 1>/dev/null || (echo "Installing protoc-gen-go" && go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0) || (echo "Installing protoc-gen-go-grpc" && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.4.0)
 	@(env bash $(PWD)/scripts/generate_proto.sh)
 
 build-cpp: generated-proto
