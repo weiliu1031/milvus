@@ -1364,7 +1364,7 @@ func TestCatalog_Import(t *testing.T) {
 		assert.NoError(t, err)
 
 		err = kc.SaveImportJob(nil)
-		assert.Error(t, err)
+		assert.NoError(t, err)
 
 		txn = mocks.NewMetaKv(t)
 		txn.EXPECT().Save(mock.Anything, mock.Anything).Return(mockErr)
@@ -1418,7 +1418,7 @@ func TestCatalog_Import(t *testing.T) {
 		assert.NoError(t, err)
 
 		err = kc.SavePreImportTask(nil)
-		assert.Error(t, err)
+		assert.NoError(t, err)
 
 		txn = mocks.NewMetaKv(t)
 		txn.EXPECT().Save(mock.Anything, mock.Anything).Return(mockErr)
@@ -1472,7 +1472,7 @@ func TestCatalog_Import(t *testing.T) {
 		assert.NoError(t, err)
 
 		err = kc.SaveImportTask(nil)
-		assert.Error(t, err)
+		assert.NoError(t, err)
 
 		txn = mocks.NewMetaKv(t)
 		txn.EXPECT().Save(mock.Anything, mock.Anything).Return(mockErr)

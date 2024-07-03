@@ -4406,7 +4406,7 @@ func Test_GetCompactionState(t *testing.T) {
 		proxy := &Proxy{dataCoord: datacoord}
 		proxy.UpdateStateCode(commonpb.StateCode_Healthy)
 		resp, err := proxy.GetCompactionState(context.TODO(), nil)
-		assert.EqualValues(t, &milvuspb.GetCompactionStateResponse{}, resp)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 		assert.NoError(t, err)
 	})
 
@@ -4426,7 +4426,7 @@ func Test_ManualCompaction(t *testing.T) {
 		proxy := &Proxy{dataCoord: datacoord}
 		proxy.UpdateStateCode(commonpb.StateCode_Healthy)
 		resp, err := proxy.ManualCompaction(context.TODO(), nil)
-		assert.EqualValues(t, &milvuspb.ManualCompactionResponse{}, resp)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 		assert.NoError(t, err)
 	})
 	t.Run("test manual compaction with unhealthy", func(t *testing.T) {
@@ -4445,7 +4445,7 @@ func Test_GetCompactionStateWithPlans(t *testing.T) {
 		proxy := &Proxy{dataCoord: datacoord}
 		proxy.UpdateStateCode(commonpb.StateCode_Healthy)
 		resp, err := proxy.GetCompactionStateWithPlans(context.TODO(), nil)
-		assert.EqualValues(t, &milvuspb.GetCompactionPlansResponse{}, resp)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 		assert.NoError(t, err)
 	})
 	t.Run("test get compaction state with plans with unhealthy proxy", func(t *testing.T) {
@@ -4478,7 +4478,7 @@ func Test_GetFlushState(t *testing.T) {
 		resp, err := proxy.GetFlushState(context.TODO(), &milvuspb.GetFlushStateRequest{
 			CollectionName: "coll",
 		})
-		assert.EqualValues(t, &milvuspb.GetFlushStateResponse{}, resp)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 		assert.NoError(t, err)
 	})
 

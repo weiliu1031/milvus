@@ -420,7 +420,7 @@ func (b etcd210) Backup(meta *meta.Meta, backupFile string) error {
 		instance = metaRootPath
 	}
 	header := &BackupHeader{
-		Version:   BackupHeaderVersionV1,
+		Version:   int32(BackupHeaderVersionV1),
 		Instance:  instance,
 		MetaPath:  metaPath,
 		Entries:   int64(len(saves)),
@@ -472,7 +472,7 @@ func (b etcd210) BackupV2(file string) error {
 	}
 
 	header := &BackupHeader{
-		Version:   BackupHeaderVersionV1,
+		Version:   int32(BackupHeaderVersionV1),
 		Instance:  instance,
 		MetaPath:  metaPath,
 		Entries:   int64(len(saves)),

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -167,7 +168,8 @@ func (suite *ReduceSuite) TestReduceAllFunc() {
                  placeholder_tag: "$0"
                >`
 	var planpb planpb.PlanNode
-	proto.UnmarshalText(planStr, &planpb)
+	// proto.UnmarshalText(planStr, &planpb)
+	prototext.Unmarshal([]byte(planStr), &planpb)
 	serializedPlan, err := proto.Marshal(&planpb)
 	suite.NoError(err)
 	plan, err := createSearchPlanByExpr(context.Background(), suite.collection, serializedPlan)
