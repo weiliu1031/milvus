@@ -1583,6 +1583,7 @@ func (loader *segmentLoader) checkSegmentSize(ctx context.Context, segmentLoadIn
 // getResourceUsageEstimateOfSegment estimates the resource usage of the segment
 func getResourceUsageEstimateOfSegment(schema *schemapb.CollectionSchema, loadInfo *querypb.SegmentLoadInfo, multiplyFactor resourceEstimateFactor) (usage *ResourceUsage, err error) {
 	var segmentMemorySize, segmentDiskSize uint64
+	var indexMemorySize uint64
 	var mmapFieldCount int
 
 	vecFieldID2IndexInfo := make(map[int64]*querypb.FieldIndexInfo)
@@ -1591,8 +1592,13 @@ func getResourceUsageEstimateOfSegment(schema *schemapb.CollectionSchema, loadIn
 		vecFieldID2IndexInfo[fieldID] = fieldIndexInfo
 	}
 
+	toMB := func(mem uint64) float64 {
+		return float64(mem) / 1024 / 1024
+	}
+
 	for _, fieldBinlog := range loadInfo.BinlogPaths {
 		fieldID := fieldBinlog.FieldID
+		var fieldMemorySize, fieldDiskSize uint64
 		var mmapEnabled bool
 		if fieldIndexInfo, ok := vecFieldID2IndexInfo[fieldID]; ok {
 			mmapEnabled = isIndexMmapEnable(fieldIndexInfo)
@@ -1603,44 +1609,74 @@ func getResourceUsageEstimateOfSegment(schema *schemapb.CollectionSchema, loadIn
 					loadInfo.GetSegmentID(),
 					fieldIndexInfo.GetBuildID())
 			}
-			segmentMemorySize += neededMemSize
+			fieldMemorySize += neededMemSize
 			if mmapEnabled {
-				segmentDiskSize += neededMemSize + neededDiskSize
+				fieldDiskSize += neededMemSize + neededDiskSize
 			} else {
-				segmentDiskSize += neededDiskSize
+				fieldDiskSize += neededDiskSize
 			}
+			indexMemorySize += fieldMemorySize
+			segmentDiskSize += fieldDiskSize
 		} else {
 			mmapEnabled = common.IsFieldMmapEnabled(schema, fieldID) ||
 				(!common.FieldHasMmapKey(schema, fieldID) && params.Params.QueryNodeCfg.MmapEnabled.GetAsBool())
 			binlogSize := uint64(getBinlogDataMemorySize(fieldBinlog))
-			segmentMemorySize += binlogSize
+			fieldMemorySize += binlogSize
 			if mmapEnabled {
-				segmentDiskSize += uint64(getBinlogDataDiskSize(fieldBinlog))
+				fieldDiskSize += uint64(getBinlogDataDiskSize(fieldBinlog))
 			} else {
 				if multiplyFactor.enableTempSegmentIndex {
-					segmentMemorySize += uint64(float64(binlogSize) * multiplyFactor.tempSegmentIndexFactor)
+					fieldMemorySize += uint64(float64(binlogSize) * multiplyFactor.tempSegmentIndexFactor)
 				}
 			}
+			segmentMemorySize += fieldMemorySize
+			segmentDiskSize += fieldDiskSize
 		}
 		if mmapEnabled {
 			mmapFieldCount++
 		}
+
+		log.Info("predict memory and disk usage for field (in MiB)",
+			zap.Int64("collectionID", loadInfo.CollectionID),
+			zap.Int64("segmentID", loadInfo.SegmentID),
+			zap.Int64("fieldID", fieldID),
+			zap.Float64("fieldBinlogSize(MB)", toMB(uint64(getBinlogDataMemorySize(fieldBinlog)))),
+			zap.Float64("fieldBinlogSize(MB)", toMB(uint64(getBinlogDataDiskSize(fieldBinlog)))),
+			zap.Float64("fieldMemoryCost(MB)", toMB(fieldMemorySize)),
+			zap.Float64("fieldDiskCost(MB)", toMB(fieldDiskSize)),
+		)
 	}
 
 	// get size of stats data
+	stateLogMemSize := uint64(0)
 	for _, fieldBinlog := range loadInfo.Statslogs {
-		segmentMemorySize += uint64(getBinlogDataMemorySize(fieldBinlog))
+		stateLogMemSize += uint64(getBinlogDataMemorySize(fieldBinlog))
 	}
+	segmentMemorySize += stateLogMemSize
+	log.Info("predict memory and disk usage for stat log (in MiB)",
+		zap.Int64("collectionID", loadInfo.CollectionID),
+		zap.Int64("segmentID", loadInfo.SegmentID),
+		zap.Float64("stateLogMemCost(MB)", toMB(stateLogMemSize)),
+	)
 
 	// binlog & statslog use general load factor
 	segmentMemorySize = uint64(float64(segmentMemorySize) * multiplyFactor.memoryUsageFactor)
 
 	// get size of delete data
+	deltaLogMemSize := uint64(0)
 	for _, fieldBinlog := range loadInfo.Deltalogs {
-		segmentMemorySize += uint64(float64(getBinlogDataMemorySize(fieldBinlog)) * multiplyFactor.deltaDataExpansionFactor)
+		deltaLogMemSize += uint64(float64(getBinlogDataMemorySize(fieldBinlog)) * multiplyFactor.deltaDataExpansionFactor)
 	}
+	segmentMemorySize += deltaLogMemSize
+
+	log.Info("predict memory and disk usage for delta log (in MiB)",
+		zap.Int64("collectionID", loadInfo.CollectionID),
+		zap.Int64("segmentID", loadInfo.SegmentID),
+		zap.Float64("deltaLogMemCost(MB)", toMB(deltaLogMemSize)),
+	)
+
 	return &ResourceUsage{
-		MemorySize:     segmentMemorySize,
+		MemorySize:     segmentMemorySize + indexMemorySize,
 		DiskSize:       segmentDiskSize,
 		MmapFieldCount: mmapFieldCount,
 	}, nil

@@ -63,6 +63,9 @@ func (c *IndexAttrCache) GetIndexResourceUsage(indexInfo *querypb.FieldIndexInfo
 	if indexType == indexparamcheck.IndexDISKANN {
 		neededMemSize := indexInfo.IndexSize / UsedDiskMemoryRatio
 		neededDiskSize := indexInfo.IndexSize - neededMemSize
+
+		// force set disk ann memory cost to 128 MB, limit by DEFAULT_FIELD_MAX_MEMORY_LIMIT
+		neededMemSize = 128 * 1024 * 1024
 		return uint64(neededMemSize), uint64(neededDiskSize), nil
 	}
 	if indexType == indexparamcheck.IndexINVERTED {
