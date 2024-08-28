@@ -452,9 +452,6 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 func (t *queryTask) Execute(ctx context.Context) error {
 	tr := timerecord.NewTimeRecorder(fmt.Sprintf("proxy execute query %d", t.ID()))
 	defer tr.CtxElapse(ctx, "done")
-	log := log.Ctx(ctx).With(zap.Int64("collection", t.GetCollectionID()),
-		zap.Int64s("partitionIDs", t.GetPartitionIDs()),
-		zap.String("requestType", "query"))
 
 	t.resultBuf = typeutil.NewConcurrentSet[*internalpb.RetrieveResults]()
 	err := t.lb.Execute(ctx, CollectionWorkLoad{
@@ -465,11 +462,18 @@ func (t *queryTask) Execute(ctx context.Context) error {
 		exec:           t.queryShard,
 	})
 	if err != nil {
-		log.Warn("fail to execute query", zap.Error(err))
+		log.Ctx(ctx).Warn("fail to execute query",
+			zap.Int64("collection", t.GetCollectionID()),
+			zap.Int64s("partitionIDs", t.GetPartitionIDs()),
+			zap.String("requestType", "query"),
+			zap.Error(err))
 		return errors.Wrap(err, "failed to query")
 	}
 
-	log.Debug("Query Execute done.")
+	log.Ctx(ctx).Debug("Query Execute done.",
+		zap.Int64("collection", t.GetCollectionID()),
+		zap.Int64s("partitionIDs", t.GetPartitionIDs()),
+		zap.String("requestType", "query"))
 	return nil
 }
 

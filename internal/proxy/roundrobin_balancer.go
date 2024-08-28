@@ -28,6 +28,8 @@ import (
 type RoundRobinBalancer struct {
 	// request num send to each node
 	nodeWorkload *typeutil.ConcurrentMap[int64, *atomic.Int64]
+
+	idx atomic.Int64
 }
 
 func NewRoundRobinBalancer() *RoundRobinBalancer {
@@ -41,32 +43,35 @@ func (b *RoundRobinBalancer) SelectNode(ctx context.Context, availableNodes []in
 		return -1, merr.ErrNodeNotAvailable
 	}
 
-	targetNode := int64(-1)
-	var targetNodeWorkload *atomic.Int64
-	for _, node := range availableNodes {
-		workload, ok := b.nodeWorkload.Get(node)
+	idx := b.idx.Inc()
+	return availableNodes[int(idx)%len(availableNodes)], nil
 
-		if !ok {
-			workload = atomic.NewInt64(0)
-			b.nodeWorkload.Insert(node, workload)
-		}
+	// targetNode := int64(-1)
+	// var targetNodeWorkload *atomic.Int64
+	// for _, node := range availableNodes {
+	// 	workload, ok := b.nodeWorkload.Get(node)
 
-		if targetNodeWorkload == nil || workload.Load() < targetNodeWorkload.Load() {
-			targetNode = node
-			targetNodeWorkload = workload
-		}
-	}
+	// 	if !ok {
+	// 		workload = atomic.NewInt64(0)
+	// 		b.nodeWorkload.Insert(node, workload)
+	// 	}
 
-	targetNodeWorkload.Add(cost)
-	return targetNode, nil
+	// 	if targetNodeWorkload == nil || workload.Load() < targetNodeWorkload.Load() {
+	// 		targetNode = node
+	// 		targetNodeWorkload = workload
+	// 	}
+	// }
+
+	// targetNodeWorkload.Add(cost)
+	// return targetNode, nil
 }
 
 func (b *RoundRobinBalancer) CancelWorkload(node int64, nq int64) {
-	load, ok := b.nodeWorkload.Get(node)
+	// load, ok := b.nodeWorkload.Get(node)
 
-	if ok {
-		load.Sub(nq)
-	}
+	// if ok {
+	// 	load.Sub(nq)
+	// }
 }
 
 func (b *RoundRobinBalancer) UpdateCostMetrics(node int64, cost *internalpb.CostAggregation) {}
