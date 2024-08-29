@@ -626,6 +626,123 @@ func (s *LoadTestSuite) TestDynamicUpdateLoadConfigsWithoutRG() {
 	s.releaseCollection(dbName, collectionName)
 }
 
+func (s *LoadTestSuite) TestAssignReplicaToProxy() {
+	ctx := context.Background()
+
+	// prepare 4 qn to load 4 replicas
+	for i := 1; i < 4; i++ {
+		s.Cluster.AddQueryNode()
+	}
+
+	s.CreateCollectionWithConfiguration(ctx, &integration.CreateCollectionConfig{
+		DBName:           dbName,
+		Dim:              dim,
+		CollectionName:   collectionName,
+		ChannelNum:       1,
+		SegmentNum:       3,
+		RowNumPerSegment: 2000,
+	})
+
+	// load collection without specified replica and rgs
+	s.loadCollection(collectionName, dbName, 4, nil)
+	resp2, err := s.Cluster.Proxy.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
+		DbName:         dbName,
+		CollectionName: collectionName,
+	})
+	s.NoError(err)
+	s.True(merr.Ok(resp2.Status))
+	s.Len(resp2.GetReplicas(), 4)
+	collectionID := resp2.GetReplicas()[0].CollectionID
+
+	// mock 1 proxy without assign replica
+	resp3, err := s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 4)
+
+	paramtable.Get().Save(paramtable.Get().QueryCoordCfg.EnableAssignReplicaToProxy.Key, "true")
+	defer paramtable.Get().Reset(paramtable.Get().QueryCoordCfg.EnableAssignReplicaToProxy.Key)
+	resp3, err = s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 4)
+
+	// mock 2 proxy without assign replica
+	proxy2 := s.Cluster.AddProxy()
+	defer proxy2.Stop()
+	resp3, err = s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 2)
+
+	// mock 3 proxy without assign replica
+	proxy3 := s.Cluster.AddProxy()
+	resp3, err = s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 4)
+
+	// mock 4 proxy without assign replica
+	proxy4 := s.Cluster.AddProxy()
+	resp3, err = s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 1)
+
+	// reduce proxy num to 3
+	proxy4.Stop()
+	resp3, err = s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.NoError(err)
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 4)
+
+	// reduce proxy num to 2
+	proxy3.Stop()
+	resp3, err = s.Cluster.QueryCoord.GetShardLeaders(ctx, &querypb.GetShardLeadersRequest{
+		Base: &commonpb.MsgBase{
+			SourceID: 1,
+		},
+
+		CollectionID: collectionID,
+	})
+	s.NoError(err)
+	s.Len(resp3.GetShards(), 1)
+	s.Len(resp3.GetShards()[0].NodeIds, 2)
+
+	s.releaseCollection(dbName, collectionName)
+}
+
 func TestReplicas(t *testing.T) {
 	suite.Run(t, new(LoadTestSuite))
 }
