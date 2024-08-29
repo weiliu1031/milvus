@@ -77,6 +77,19 @@ type MiniClusterSuite struct {
 
 func (s *MiniClusterSuite) SetupSuite() {
 	s.Require().NoError(s.SetupEmbedEtcd())
+
+	// setup mini cluster to use embed etcd
+	endpoints := etcd.GetEmbedEtcdEndpoints(s.EtcdServer)
+	val := strings.Join(endpoints, ",")
+	// setup env value to init etcd source
+	s.T().Setenv("etcd.endpoints", val)
+
+	for k, v := range DefaultParams() {
+		if len(k) == 0 {
+			continue
+		}
+		s.T().Setenv(k, v)
+	}
 }
 
 func (s *MiniClusterSuite) TearDownSuite() {
@@ -84,23 +97,15 @@ func (s *MiniClusterSuite) TearDownSuite() {
 }
 
 func (s *MiniClusterSuite) SetupTest() {
-	log.SetLevel(zapcore.InfoLevel)
+	log.SetLevel(zapcore.DebugLevel)
 	s.T().Log("Setup test...")
-	// setup mini cluster to use embed etcd
-	endpoints := etcd.GetEmbedEtcdEndpoints(s.EtcdServer)
-	val := strings.Join(endpoints, ",")
-	// setup env value to init etcd source
-	s.T().Setenv("etcd.endpoints", val)
 
 	params = paramtable.Get()
 
 	s.T().Log("Setup case timeout", caseTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), caseTimeout)
 	s.cancelFunc = cancel
-	c, err := StartMiniClusterV2(ctx, func(c *MiniClusterV2) {
-		// change config etcd endpoints
-		c.params[params.EtcdCfg.Endpoints.Key] = val
-	})
+	c, err := StartMiniClusterV2(ctx)
 	s.Require().NoError(err)
 	s.Cluster = c
 
