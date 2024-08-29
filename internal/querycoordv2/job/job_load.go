@@ -91,6 +91,10 @@ func (job *LoadCollectionJob) PreExecute() error {
 		req.ReplicaNumber = 1
 	}
 
+	if len(req.GetResourceGroups()) == 0 {
+		req.ResourceGroups = []string{meta.DefaultResourceGroupName}
+	}
+
 	collection := job.meta.GetCollection(req.GetCollectionID())
 	if collection == nil {
 		return nil
@@ -102,6 +106,15 @@ func (job *LoadCollectionJob) PreExecute() error {
 		)
 		log.Warn(msg)
 		return merr.WrapErrParameterInvalid(collection.GetReplicaNumber(), req.GetReplicaNumber(), "can't change the replica number for loaded collection")
+	}
+
+	collectionUsedRG := job.meta.ReplicaManager.GetResourceGroupByCollection(collection.GetCollectionID()).Collect()
+	left, right := lo.Difference(collectionUsedRG, req.GetResourceGroups())
+	if len(left) > 0 || len(right) > 0 {
+		msg := fmt.Sprintf("collection with different resource groups %v existed, release this collection first before changing its resource groups",
+			collectionUsedRG)
+		log.Warn(msg)
+		return merr.WrapErrParameterInvalid(collectionUsedRG, req.GetResourceGroups(), "can't change the resource groups for loaded partitions")
 	}
 
 	return nil
@@ -278,6 +291,10 @@ func (job *LoadPartitionJob) PreExecute() error {
 		req.ReplicaNumber = 1
 	}
 
+	if len(req.GetResourceGroups()) == 0 {
+		req.ResourceGroups = []string{meta.DefaultResourceGroupName}
+	}
+
 	collection := job.meta.GetCollection(req.GetCollectionID())
 	if collection == nil {
 		return nil
@@ -287,6 +304,15 @@ func (job *LoadPartitionJob) PreExecute() error {
 		msg := "collection with different replica number existed, release this collection first before changing its replica number"
 		log.Warn(msg)
 		return merr.WrapErrParameterInvalid(collection.GetReplicaNumber(), req.GetReplicaNumber(), "can't change the replica number for loaded partitions")
+	}
+
+	collectionUsedRG := job.meta.ReplicaManager.GetResourceGroupByCollection(collection.GetCollectionID()).Collect()
+	left, right := lo.Difference(collectionUsedRG, req.GetResourceGroups())
+	if len(left) > 0 || len(right) > 0 {
+		msg := fmt.Sprintf("collection with different resource groups %v existed, release this collection first before changing its resource groups",
+			collectionUsedRG)
+		log.Warn(msg)
+		return merr.WrapErrParameterInvalid(collectionUsedRG, req.GetResourceGroups(), "can't change the resource groups for loaded partitions")
 	}
 
 	return nil

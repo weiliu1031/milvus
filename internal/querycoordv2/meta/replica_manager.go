@@ -98,9 +98,6 @@ func (m *ReplicaManager) Get(id typeutil.UniqueID) *Replica {
 func (m *ReplicaManager) Spawn(collection int64, replicaNumInRG map[string]int, channels []string) ([]*Replica, error) {
 	m.rwmutex.Lock()
 	defer m.rwmutex.Unlock()
-	if m.collIDToReplicaIDs[collection] != nil {
-		return nil, fmt.Errorf("replicas of collection %d is already spawned", collection)
-	}
 
 	balancePolicy := paramtable.Get().QueryCoordCfg.Balancer.GetValue()
 	enableChannelExclusiveMode := balancePolicy == ChannelLevelScoreBalancerName
@@ -202,6 +199,34 @@ func (m *ReplicaManager) TransferReplica(collectionID typeutil.UniqueID, srcRGNa
 	return m.put(replicas...)
 }
 
+func (m *ReplicaManager) BatchTransferReplica(collectionID typeutil.UniqueID, srcRGName string, dstRGName string, replicaNum int) error {
+	if srcRGName == dstRGName {
+		return merr.WrapErrParameterInvalidMsg("source resource group and target resource group should not be the same, resource group: %s", srcRGName)
+	}
+	if replicaNum <= 0 {
+		return merr.WrapErrParameterInvalid("NumReplica > 0", fmt.Sprintf("invalid NumReplica %d", replicaNum))
+	}
+
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	// Check if replica can be transfer.
+	srcReplicas, err := m.getSrcReplicasAndCheckIfTransferable(collectionID, srcRGName, replicaNum)
+	if err != nil {
+		return err
+	}
+
+	// Transfer N replicas from srcRGName to dstRGName.
+	// Node Change will be executed by replica_observer in background.
+	replicas := make([]*Replica, 0, replicaNum)
+	for i := 0; i < replicaNum; i++ {
+		mutableReplica := srcReplicas[i].CopyForWrite()
+		mutableReplica.SetResourceGroup(dstRGName)
+		replicas = append(replicas, mutableReplica.IntoReplica())
+	}
+	return m.put(replicas...)
+}
+
 // getSrcReplicasAndCheckIfTransferable checks if the collection can be transfer from srcRGName to dstRGName.
 func (m *ReplicaManager) getSrcReplicasAndCheckIfTransferable(collectionID typeutil.UniqueID, srcRGName string, replicaNum int) ([]*Replica, error) {
 	// Check if collection is loaded.
@@ -244,10 +269,38 @@ func (m *ReplicaManager) RemoveCollection(collectionID typeutil.UniqueID) error 
 	return nil
 }
 
+func (m *ReplicaManager) RemoveReplicas(collectionID typeutil.UniqueID, replicas ...typeutil.UniqueID) error {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	return m.removeReplicas(collectionID, replicas...)
+}
+
+func (m *ReplicaManager) removeReplicas(collectionID typeutil.UniqueID, replicas ...typeutil.UniqueID) error {
+	err := m.catalog.ReleaseReplica(collectionID, replicas...)
+	if err != nil {
+		return err
+	}
+
+	for _, replica := range replicas {
+		delete(m.replicas, replica)
+	}
+
+	m.collIDToReplicaIDs[collectionID].Remove(replicas...)
+	if m.collIDToReplicaIDs[collectionID].Len() == 0 {
+		delete(m.collIDToReplicaIDs, collectionID)
+	}
+
+	return nil
+}
+
 func (m *ReplicaManager) GetByCollection(collectionID typeutil.UniqueID) []*Replica {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
+	return m.getByCollection(collectionID)
+}
 
+func (m *ReplicaManager) getByCollection(collectionID typeutil.UniqueID) []*Replica {
 	replicas := make([]*Replica, 0)
 	if m.collIDToReplicaIDs[collectionID] != nil {
 		for replicaID := range m.collIDToReplicaIDs[collectionID] {
