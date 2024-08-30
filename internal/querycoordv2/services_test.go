@@ -2010,9 +2010,10 @@ func (suite *ServiceSuite) updateChannelDistWithoutSegment(collection int64) {
 				ChannelName:  channels[i],
 			}))
 			suite.dist.LeaderViewManager.Update(node, &meta.LeaderView{
-				ID:           node,
-				CollectionID: collection,
-				Channel:      channels[i],
+				ID:                 node,
+				CollectionID:       collection,
+				Channel:            channels[i],
+				UnServiceableError: merr.ErrSegmentLack,
 			})
 			i++
 			if i >= len(channels) {
