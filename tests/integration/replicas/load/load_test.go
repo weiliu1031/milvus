@@ -539,14 +539,26 @@ func (s *LoadTestSuite) TestDynamicUpdateLoadConfigs() {
 	}, 30*time.Second, time.Second)
 
 	// load collection
-	s.loadCollection(collectionName, dbName, 3, rgs[:3])
+	s.loadCollection(collectionName, dbName, 5, rgs)
 	resp2, err := s.Cluster.Proxy.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
 		DbName:         dbName,
 		CollectionName: collectionName,
 	})
 	s.NoError(err)
 	s.True(merr.Ok(resp2.Status))
-	s.Len(resp2.GetReplicas(), 3)
+	s.Len(resp2.GetReplicas(), 5)
+
+	// test load collection with dynamic update
+	s.loadCollection(collectionName, dbName, 3, rgs[:3])
+	s.Eventually(func() bool {
+		resp3, err := s.Cluster.Proxy.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
+			DbName:         dbName,
+			CollectionName: collectionName,
+		})
+		s.NoError(err)
+		s.True(merr.Ok(resp3.Status))
+		return len(resp3.GetReplicas()) == 3
+	}, 30*time.Second, 1*time.Second)
 
 	// test load collection with dynamic update
 	s.loadCollection(collectionName, dbName, 5, rgs)
@@ -560,8 +572,37 @@ func (s *LoadTestSuite) TestDynamicUpdateLoadConfigs() {
 		return len(resp3.GetReplicas()) == 5
 	}, 30*time.Second, 1*time.Second)
 
+	s.releaseCollection(dbName, collectionName)
+}
+
+func (s *LoadTestSuite) TestDynamicUpdateLoadConfigsWithoutRG() {
+	ctx := context.Background()
+	s.CreateCollectionWithConfiguration(ctx, &integration.CreateCollectionConfig{
+		DBName:           dbName,
+		Dim:              dim,
+		CollectionName:   collectionName,
+		ChannelNum:       1,
+		SegmentNum:       3,
+		RowNumPerSegment: 2000,
+	})
+
+	// prepare resource groups
+	for i := 1; i < 5; i++ {
+		s.Cluster.AddQueryNode()
+	}
+
+	// load collection
+	s.loadCollection(collectionName, dbName, 5, nil)
+	resp2, err := s.Cluster.Proxy.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
+		DbName:         dbName,
+		CollectionName: collectionName,
+	})
+	s.NoError(err)
+	s.True(merr.Ok(resp2.Status))
+	s.Len(resp2.GetReplicas(), 5)
+
 	// test load collection with dynamic update
-	s.loadCollection(collectionName, dbName, 2, rgs[:2])
+	s.loadCollection(collectionName, dbName, 3, nil)
 	s.Eventually(func() bool {
 		resp3, err := s.Cluster.Proxy.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
 			DbName:         dbName,
@@ -569,7 +610,19 @@ func (s *LoadTestSuite) TestDynamicUpdateLoadConfigs() {
 		})
 		s.NoError(err)
 		s.True(merr.Ok(resp3.Status))
-		return len(resp3.GetReplicas()) == 2
+		return len(resp3.GetReplicas()) == 3
+	}, 30*time.Second, 1*time.Second)
+
+	// test load collection with dynamic update
+	s.loadCollection(collectionName, dbName, 5, nil)
+	s.Eventually(func() bool {
+		resp3, err := s.Cluster.Proxy.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
+			DbName:         dbName,
+			CollectionName: collectionName,
+		})
+		s.NoError(err)
+		s.True(merr.Ok(resp3.Status))
+		return len(resp3.GetReplicas()) == 5
 	}, 30*time.Second, 1*time.Second)
 
 	s.releaseCollection(dbName, collectionName)

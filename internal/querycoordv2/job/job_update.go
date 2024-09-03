@@ -78,6 +78,10 @@ func (job *UpdateLoadConfigJob) Execute() error {
 		return err
 	}
 
+	if len(job.newResourceGroups) == 0 {
+		job.newResourceGroups = []string{meta.DefaultResourceGroupName}
+	}
+
 	var err error
 	// 2. reassign
 	toSpawn, toTransfer, toRelease, err := utils.ReassignReplicaToRG(job.meta, job.collectionID, job.newReplicaNumber, job.newResourceGroups)
