@@ -29,7 +29,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/pkg/util/merr"
-	. "github.com/milvus-io/milvus/pkg/util/typeutil"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type (
@@ -69,10 +69,14 @@ type Source fmt.Stringer
 type Task interface {
 	Context() context.Context
 	Source() Source
-	ID() UniqueID
-	CollectionID() UniqueID
-	ReplicaID() UniqueID
-	SetID(id UniqueID)
+	ID() typeutil.UniqueID
+	CollectionID() typeutil.UniqueID
+	// Return 0 if the task is a reduce task without given replica.
+	ReplicaID() typeutil.UniqueID
+	// Return "" if the task is a reduce task without given replica.
+	ResourceGroup() string
+	Shard() string
+	SetID(id typeutil.UniqueID)
 	Status() Status
 	SetStatus(status Status)
 	Err() error
@@ -92,6 +96,9 @@ type Task interface {
 	IsFinished(dist *meta.DistributionManager) bool
 	SetReason(reason string)
 	String() string
+
+	RecordStartTs()
+	GetTaskLatency() int64
 }
 
 type baseTask struct {
@@ -100,9 +107,9 @@ type baseTask struct {
 	doneCh   chan struct{}
 	canceled *atomic.Bool
 
-	id           UniqueID // Set by scheduler
-	collectionID UniqueID
-	replicaID    UniqueID
+	id           typeutil.UniqueID // Set by scheduler
+	collectionID typeutil.UniqueID
+	replica      *meta.Replica
 	shard        string
 	loadType     querypb.LoadType
 
@@ -116,16 +123,19 @@ type baseTask struct {
 
 	// span for tracing
 	span trace.Span
+
+	// startTs
+	startTs time.Time
 }
 
-func newBaseTask(ctx context.Context, source Source, collectionID, replicaID UniqueID, shard string) *baseTask {
+func newBaseTask(ctx context.Context, source Source, collectionID typeutil.UniqueID, replica *meta.Replica, shard string, taskTag string) *baseTask {
 	ctx, cancel := context.WithCancel(ctx)
-	ctx, span := otel.Tracer("QueryCoord").Start(ctx, "QueryCoord-BaseTask")
+	ctx, span := otel.Tracer(typeutil.QueryCoordRole).Start(ctx, taskTag)
 
 	return &baseTask{
 		source:       source,
 		collectionID: collectionID,
-		replicaID:    replicaID,
+		replica:      replica,
 		shard:        shard,
 
 		status:   atomic.NewString(TaskStatusStarted),
@@ -135,6 +145,7 @@ func newBaseTask(ctx context.Context, source Source, collectionID, replicaID Uni
 		doneCh:   make(chan struct{}),
 		canceled: atomic.NewBool(false),
 		span:     span,
+		startTs:  time.Now(),
 	}
 }
 
@@ -146,20 +157,30 @@ func (task *baseTask) Source() Source {
 	return task.source
 }
 
-func (task *baseTask) ID() UniqueID {
+func (task *baseTask) ID() typeutil.UniqueID {
 	return task.id
 }
 
-func (task *baseTask) SetID(id UniqueID) {
+func (task *baseTask) SetID(id typeutil.UniqueID) {
 	task.id = id
 }
 
-func (task *baseTask) CollectionID() UniqueID {
+func (task *baseTask) CollectionID() typeutil.UniqueID {
 	return task.collectionID
 }
 
-func (task *baseTask) ReplicaID() UniqueID {
-	return task.replicaID
+func (task *baseTask) ReplicaID() typeutil.UniqueID {
+	// replica may be nil, 0 will be generated.
+	return task.replica.GetID()
+}
+
+func (task *baseTask) ResourceGroup() string {
+	// replica may be nil, empty string will be generated.
+	return task.replica.GetResourceGroup()
+}
+
+func (task *baseTask) Shard() string {
+	return task.shard
 }
 
 func (task *baseTask) LoadType() querypb.LoadType {
@@ -183,7 +204,15 @@ func (task *baseTask) SetPriority(priority Priority) {
 }
 
 func (task *baseTask) Index() string {
-	return fmt.Sprintf("[replica=%d]", task.replicaID)
+	return fmt.Sprintf("[replica=%d]", task.ReplicaID())
+}
+
+func (task *baseTask) RecordStartTs() {
+	task.startTs = time.Now()
+}
+
+func (task *baseTask) GetTaskLatency() int64 {
+	return time.Since(task.startTs).Milliseconds()
 }
 
 func (task *baseTask) Err() error {
@@ -251,24 +280,18 @@ func (task *baseTask) SetReason(reason string) {
 
 func (task *baseTask) String() string {
 	var actionsStr string
-	for i, action := range task.actions {
-		if realAction, ok := action.(*SegmentAction); ok {
-			actionsStr += fmt.Sprintf(`{[type=%v][node=%d][streaming=%v]}`, action.Type(), action.Node(), realAction.Scope() == querypb.DataScope_Streaming)
-		} else {
-			actionsStr += fmt.Sprintf(`{[type=%v][node=%d]}`, action.Type(), action.Node())
-		}
-		if i != len(task.actions)-1 {
-			actionsStr += ", "
-		}
+	for _, action := range task.actions {
+		actionsStr += action.String() + ","
 	}
 	return fmt.Sprintf(
-		"[id=%d] [type=%s] [source=%s] [reason=%s] [collectionID=%d] [replicaID=%d] [priority=%s] [actionsCount=%d] [actions=%s]",
+		"[id=%d] [type=%s] [source=%s] [reason=%s] [collectionID=%d] [replicaID=%d] [resourceGroup=%s] [priority=%s] [actionsCount=%d] [actions=%s]",
 		task.id,
 		GetTaskType(task).String(),
 		task.source.String(),
 		task.reason,
 		task.collectionID,
-		task.replicaID,
+		task.ReplicaID(),
+		task.ResourceGroup(),
 		task.priority.String(),
 		len(task.actions),
 		actionsStr,
@@ -278,7 +301,7 @@ func (task *baseTask) String() string {
 type SegmentTask struct {
 	*baseTask
 
-	segmentID UniqueID
+	segmentID typeutil.UniqueID
 }
 
 // NewSegmentTask creates a SegmentTask with actions,
@@ -287,8 +310,8 @@ type SegmentTask struct {
 func NewSegmentTask(ctx context.Context,
 	timeout time.Duration,
 	source Source,
-	collectionID,
-	replicaID UniqueID,
+	collectionID typeutil.UniqueID,
+	replica *meta.Replica,
 	actions ...Action,
 ) (*SegmentTask, error) {
 	if len(actions) == 0 {
@@ -310,7 +333,7 @@ func NewSegmentTask(ctx context.Context,
 		}
 	}
 
-	base := newBaseTask(ctx, source, collectionID, replicaID, shard)
+	base := newBaseTask(ctx, source, collectionID, replica, shard, fmt.Sprintf("SegmentTask-%s-%d", actions[0].Type().String(), segmentID))
 	base.actions = actions
 	return &SegmentTask{
 		baseTask:  base,
@@ -318,11 +341,7 @@ func NewSegmentTask(ctx context.Context,
 	}, nil
 }
 
-func (task *SegmentTask) Shard() string {
-	return task.shard
-}
-
-func (task *SegmentTask) SegmentID() UniqueID {
+func (task *SegmentTask) SegmentID() typeutil.UniqueID {
 	return task.segmentID
 }
 
@@ -344,8 +363,8 @@ type ChannelTask struct {
 func NewChannelTask(ctx context.Context,
 	timeout time.Duration,
 	source Source,
-	collectionID,
-	replicaID UniqueID,
+	collectionID typeutil.UniqueID,
+	replica *meta.Replica,
 	actions ...Action,
 ) (*ChannelTask, error) {
 	if len(actions) == 0 {
@@ -365,7 +384,7 @@ func NewChannelTask(ctx context.Context,
 		}
 	}
 
-	base := newBaseTask(ctx, source, collectionID, replicaID, channel)
+	base := newBaseTask(ctx, source, collectionID, replica, channel, fmt.Sprintf("ChannelTask-%s-%s", actions[0].Type().String(), channel))
 	base.actions = actions
 	return &ChannelTask{
 		baseTask: base,
@@ -382,4 +401,55 @@ func (task *ChannelTask) Index() string {
 
 func (task *ChannelTask) String() string {
 	return fmt.Sprintf("%s [channel=%s]", task.baseTask.String(), task.Channel())
+}
+
+type LeaderTask struct {
+	*baseTask
+
+	segmentID typeutil.UniqueID
+	leaderID  int64
+}
+
+func NewLeaderSegmentTask(ctx context.Context,
+	source Source,
+	collectionID typeutil.UniqueID,
+	replica *meta.Replica,
+	leaderID int64,
+	action *LeaderAction,
+) *LeaderTask {
+	segmentID := action.SegmentID()
+	base := newBaseTask(ctx, source, collectionID, replica, action.Shard(), fmt.Sprintf("LeaderSegmentTask-%s-%d", action.Type().String(), segmentID))
+	base.actions = []Action{action}
+	return &LeaderTask{
+		baseTask:  base,
+		segmentID: segmentID,
+		leaderID:  leaderID,
+	}
+}
+
+func NewLeaderPartStatsTask(ctx context.Context,
+	source Source,
+	collectionID typeutil.UniqueID,
+	replica *meta.Replica,
+	leaderID int64,
+	action *LeaderAction,
+) *LeaderTask {
+	base := newBaseTask(ctx, source, collectionID, replica, action.Shard(), fmt.Sprintf("LeaderPartitionStatsTask-%s", action.Type().String()))
+	base.actions = []Action{action}
+	return &LeaderTask{
+		baseTask: base,
+		leaderID: leaderID,
+	}
+}
+
+func (task *LeaderTask) SegmentID() typeutil.UniqueID {
+	return task.segmentID
+}
+
+func (task *LeaderTask) Index() string {
+	return fmt.Sprintf("%s[segment=%d][growing=false]", task.baseTask.Index(), task.segmentID)
+}
+
+func (task *LeaderTask) String() string {
+	return fmt.Sprintf("%s [segmentID=%d][leader=%d]", task.baseTask.String(), task.segmentID, task.leaderID)
 }

@@ -54,7 +54,19 @@ var (
 			Help:      "byte size of data flushed to storage",
 		}, []string{
 			nodeIDLabelName,
-			msgTypeLabelName,
+			dataSourceLabelName,
+			segmentLevelLabelName,
+		})
+
+	DataNodeFlushedRows = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataNodeRole,
+			Name:      "flushed_data_rows",
+			Help:      "num of rows flushed to storage",
+		}, []string{
+			nodeIDLabelName,
+			dataSourceLabelName,
 		})
 
 	DataNodeNumProducers = prometheus.NewGaugeVec(
@@ -112,6 +124,7 @@ var (
 			Buckets:   buckets,
 		}, []string{
 			nodeIDLabelName,
+			segmentLevelLabelName,
 		})
 
 	DataNodeSave2StorageLatency = prometheus.NewHistogramVec(
@@ -135,6 +148,7 @@ var (
 		}, []string{
 			nodeIDLabelName,
 			statusLabelName,
+			segmentLevelLabelName,
 		})
 
 	DataNodeAutoFlushBufferCount = prometheus.NewCounterVec( // TODO: arguably
@@ -146,6 +160,7 @@ var (
 		}, []string{
 			nodeIDLabelName,
 			statusLabelName,
+			segmentLevelLabelName,
 		})
 
 	DataNodeCompactionLatency = prometheus.NewHistogramVec(
@@ -157,6 +172,7 @@ var (
 			Buckets:   longTaskBuckets,
 		}, []string{
 			nodeIDLabelName,
+			compactionTypeLabelName,
 		})
 
 	DataNodeCompactionLatencyInQueue = prometheus.NewHistogramVec(
@@ -187,7 +203,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: milvusNamespace,
 			Subsystem: typeutil.DataNodeRole,
-			Name:      "consume_counter",
+			Name:      "consume_bytes_count",
 			Help:      "",
 		}, []string{nodeIDLabelName, msgTypeLabelName})
 
@@ -226,23 +242,29 @@ var (
 // RegisterDataNode registers DataNode metrics
 func RegisterDataNode(registry *prometheus.Registry) {
 	registry.MustRegister(DataNodeNumFlowGraphs)
+	// input related
 	registry.MustRegister(DataNodeConsumeMsgRowsCount)
-	registry.MustRegister(DataNodeFlushedSize)
-	registry.MustRegister(DataNodeNumProducers)
 	registry.MustRegister(DataNodeConsumeTimeTickLag)
+	registry.MustRegister(DataNodeMsgDispatcherTtLag)
+	registry.MustRegister(DataNodeConsumeMsgCount)
+	registry.MustRegister(DataNodeConsumeBytesCount)
+	// in memory
+	registry.MustRegister(DataNodeFlowGraphBufferDataSize)
+	// output related
+	registry.MustRegister(DataNodeAutoFlushBufferCount)
 	registry.MustRegister(DataNodeEncodeBufferLatency)
 	registry.MustRegister(DataNodeSave2StorageLatency)
 	registry.MustRegister(DataNodeFlushBufferCount)
-	registry.MustRegister(DataNodeAutoFlushBufferCount)
-	registry.MustRegister(DataNodeCompactionLatency)
 	registry.MustRegister(DataNodeFlushReqCounter)
-	registry.MustRegister(DataNodeConsumeMsgCount)
-	registry.MustRegister(DataNodeProduceTimeTickLag)
-	registry.MustRegister(DataNodeConsumeBytesCount)
-	registry.MustRegister(DataNodeForwardDeleteMsgTimeTaken)
-	registry.MustRegister(DataNodeMsgDispatcherTtLag)
+	registry.MustRegister(DataNodeFlushedSize)
+	registry.MustRegister(DataNodeFlushedRows)
+	// compaction related
+	registry.MustRegister(DataNodeCompactionLatency)
 	registry.MustRegister(DataNodeCompactionLatencyInQueue)
-	registry.MustRegister(DataNodeFlowGraphBufferDataSize)
+	// deprecated metrics
+	registry.MustRegister(DataNodeForwardDeleteMsgTimeTaken)
+	registry.MustRegister(DataNodeNumProducers)
+	registry.MustRegister(DataNodeProduceTimeTickLag)
 }
 
 func CleanupDataNodeCollectionMetrics(nodeID int64, collectionID int64, channel string) {

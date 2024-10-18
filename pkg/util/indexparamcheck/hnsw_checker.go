@@ -4,10 +4,12 @@ import (
 	"fmt"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type hnswChecker struct {
-	floatVectorBaseChecker
+	baseChecker
 }
 
 func (c hnswChecker) StaticCheck(params map[string]string) error {
@@ -18,7 +20,7 @@ func (c hnswChecker) StaticCheck(params map[string]string) error {
 		return errOutOfRange(HNSWM, HNSWMinM, HNSWMaxM)
 	}
 	if !CheckStrByValues(params, Metric, HnswMetrics) {
-		return fmt.Errorf("metric type not found or not supported, supported: %v", HnswMetrics)
+		return fmt.Errorf("metric type %s not found or not supported, supported: %v", params[Metric], HnswMetrics)
 	}
 	return nil
 }
@@ -30,11 +32,21 @@ func (c hnswChecker) CheckTrain(params map[string]string) error {
 	return c.baseChecker.CheckTrain(params)
 }
 
-func (c hnswChecker) CheckValidDataType(dType schemapb.DataType) error {
-	if dType != schemapb.DataType_FloatVector && dType != schemapb.DataType_BinaryVector && dType != schemapb.DataType_Float16Vector {
-		return fmt.Errorf("only support float vector or binary vector")
+func (c hnswChecker) CheckValidDataType(field *schemapb.FieldSchema) error {
+	if !typeutil.IsVectorType(field.GetDataType()) {
+		return fmt.Errorf("can't build hnsw in not vector type")
 	}
 	return nil
+}
+
+func (c hnswChecker) SetDefaultMetricTypeIfNotExist(params map[string]string, dType schemapb.DataType) {
+	if typeutil.IsDenseFloatVectorType(dType) {
+		setDefaultIfNotExist(params, common.MetricTypeKey, FloatVectorDefaultMetricType)
+	} else if typeutil.IsSparseFloatVectorType(dType) {
+		setDefaultIfNotExist(params, common.MetricTypeKey, SparseFloatVectorDefaultMetricType)
+	} else if typeutil.IsBinaryVectorType(dType) {
+		setDefaultIfNotExist(params, common.MetricTypeKey, BinaryVectorDefaultMetricType)
+	}
 }
 
 func newHnswChecker() IndexChecker {

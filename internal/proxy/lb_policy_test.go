@@ -21,10 +21,10 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/atomic"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -67,6 +67,7 @@ func (s *LBPolicySuite) SetupTest() {
 	successStatus := commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 	qc := mocks.NewMockQueryCoordClient(s.T())
 	qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(&successStatus, nil)
+	qc.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{}, nil).Maybe()
 
 	qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
 		Status: &successStatus,
@@ -100,7 +101,9 @@ func (s *LBPolicySuite) SetupTest() {
 	s.lbBalancer.EXPECT().Start(context.Background()).Maybe()
 	s.lbPolicy = NewLBPolicyImpl(s.mgr)
 	s.lbPolicy.Start(context.Background())
-	s.lbPolicy.balancer = s.lbBalancer
+	s.lbPolicy.getBalancer = func() LBBalancer {
+		return s.lbBalancer
+	}
 
 	err := InitMetaCache(context.Background(), s.rc, s.qc, s.mgr)
 	s.NoError(err)
@@ -162,7 +165,7 @@ func (s *LBPolicySuite) loadCollection() {
 func (s *LBPolicySuite) TestSelectNode() {
 	ctx := context.Background()
 	s.lbBalancer.EXPECT().SelectNode(mock.Anything, mock.Anything, mock.Anything).Return(5, nil)
-	targetNode, err := s.lbPolicy.selectNode(ctx, ChannelWorkload{
+	targetNode, err := s.lbPolicy.selectNode(ctx, s.lbBalancer, ChannelWorkload{
 		db:             dbName,
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
@@ -177,7 +180,7 @@ func (s *LBPolicySuite) TestSelectNode() {
 	s.lbBalancer.ExpectedCalls = nil
 	s.lbBalancer.EXPECT().SelectNode(mock.Anything, mock.Anything, mock.Anything).Return(-1, errors.New("fake err")).Times(1)
 	s.lbBalancer.EXPECT().SelectNode(mock.Anything, mock.Anything, mock.Anything).Return(3, nil)
-	targetNode, err = s.lbPolicy.selectNode(ctx, ChannelWorkload{
+	targetNode, err = s.lbPolicy.selectNode(ctx, s.lbBalancer, ChannelWorkload{
 		db:             dbName,
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
@@ -191,7 +194,7 @@ func (s *LBPolicySuite) TestSelectNode() {
 	// test select node always fails, expected failure
 	s.lbBalancer.ExpectedCalls = nil
 	s.lbBalancer.EXPECT().SelectNode(mock.Anything, mock.Anything, mock.Anything).Return(-1, merr.ErrNodeNotAvailable)
-	targetNode, err = s.lbPolicy.selectNode(ctx, ChannelWorkload{
+	targetNode, err = s.lbPolicy.selectNode(ctx, s.lbBalancer, ChannelWorkload{
 		db:             dbName,
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
@@ -205,7 +208,7 @@ func (s *LBPolicySuite) TestSelectNode() {
 	// test all nodes has been excluded, expected failure
 	s.lbBalancer.ExpectedCalls = nil
 	s.lbBalancer.EXPECT().SelectNode(mock.Anything, mock.Anything, mock.Anything).Return(-1, merr.ErrNodeNotAvailable)
-	targetNode, err = s.lbPolicy.selectNode(ctx, ChannelWorkload{
+	targetNode, err = s.lbPolicy.selectNode(ctx, s.lbBalancer, ChannelWorkload{
 		db:             dbName,
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
@@ -221,7 +224,7 @@ func (s *LBPolicySuite) TestSelectNode() {
 	s.lbBalancer.EXPECT().SelectNode(mock.Anything, mock.Anything, mock.Anything).Return(-1, merr.ErrNodeNotAvailable)
 	s.qc.ExpectedCalls = nil
 	s.qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(nil, merr.ErrServiceUnavailable)
-	targetNode, err = s.lbPolicy.selectNode(ctx, ChannelWorkload{
+	targetNode, err = s.lbPolicy.selectNode(ctx, s.lbBalancer, ChannelWorkload{
 		db:             dbName,
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
@@ -248,7 +251,7 @@ func (s *LBPolicySuite) TestExecuteWithRetry() {
 		channel:        s.channels[0],
 		shardLeaders:   s.nodes,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			return nil
 		},
 		retryTimes: 1,
@@ -265,7 +268,7 @@ func (s *LBPolicySuite) TestExecuteWithRetry() {
 		channel:        s.channels[0],
 		shardLeaders:   s.nodes,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			return nil
 		},
 		retryTimes: 1,
@@ -285,7 +288,7 @@ func (s *LBPolicySuite) TestExecuteWithRetry() {
 		channel:        s.channels[0],
 		shardLeaders:   s.nodes,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			return nil
 		},
 		retryTimes: 1,
@@ -303,7 +306,7 @@ func (s *LBPolicySuite) TestExecuteWithRetry() {
 		channel:        s.channels[0],
 		shardLeaders:   s.nodes,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			return nil
 		},
 		retryTimes: 2,
@@ -324,7 +327,7 @@ func (s *LBPolicySuite) TestExecuteWithRetry() {
 		channel:        s.channels[0],
 		shardLeaders:   s.nodes,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			counter++
 			if counter == 1 {
 				return errors.New("fake error")
@@ -349,7 +352,7 @@ func (s *LBPolicySuite) TestExecuteWithRetry() {
 		channel:        s.channels[0],
 		shardLeaders:   s.nodes,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			_, err := qn.Search(ctx, nil)
 			return err
 		},
@@ -370,7 +373,7 @@ func (s *LBPolicySuite) TestExecute() {
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			return nil
 		},
 	})
@@ -383,7 +386,7 @@ func (s *LBPolicySuite) TestExecute() {
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			// succeed in first execute
 			if counter.Add(1) == 1 {
 				return nil
@@ -404,7 +407,7 @@ func (s *LBPolicySuite) TestExecute() {
 		collectionName: s.collectionName,
 		collectionID:   s.collectionID,
 		nq:             1,
-		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, s ...string) error {
+		exec: func(ctx context.Context, ui UniqueID, qn types.QueryNodeClient, channel string) error {
 			return nil
 		},
 	})
@@ -418,17 +421,17 @@ func (s *LBPolicySuite) TestUpdateCostMetrics() {
 
 func (s *LBPolicySuite) TestNewLBPolicy() {
 	policy := NewLBPolicyImpl(s.mgr)
-	s.Equal(reflect.TypeOf(policy.balancer).String(), "*proxy.LookAsideBalancer")
+	s.Equal(reflect.TypeOf(policy.getBalancer()).String(), "*proxy.LookAsideBalancer")
 	policy.Close()
 
 	Params.Save(Params.ProxyCfg.ReplicaSelectionPolicy.Key, "round_robin")
 	policy = NewLBPolicyImpl(s.mgr)
-	s.Equal(reflect.TypeOf(policy.balancer).String(), "*proxy.RoundRobinBalancer")
+	s.Equal(reflect.TypeOf(policy.getBalancer()).String(), "*proxy.RoundRobinBalancer")
 	policy.Close()
 
 	Params.Save(Params.ProxyCfg.ReplicaSelectionPolicy.Key, "look_aside")
 	policy = NewLBPolicyImpl(s.mgr)
-	s.Equal(reflect.TypeOf(policy.balancer).String(), "*proxy.LookAsideBalancer")
+	s.Equal(reflect.TypeOf(policy.getBalancer()).String(), "*proxy.LookAsideBalancer")
 	policy.Close()
 }
 

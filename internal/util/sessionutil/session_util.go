@@ -151,6 +151,8 @@ type Session struct {
 	sessionTTL        int64
 	sessionRetryTimes int64
 	reuseNodeID       bool
+
+	isStopped atomic.Bool // set to true if stop method is invoked
 }
 
 type SessionOption func(session *Session)
@@ -239,6 +241,7 @@ func NewSessionWithEtcd(ctx context.Context, metaRoot string, client *clientv3.C
 		sessionTTL:        paramtable.Get().CommonCfg.SessionTTL.GetAsInt64(),
 		sessionRetryTimes: paramtable.Get().CommonCfg.SessionRetryTimes.GetAsInt64(),
 		reuseNodeID:       true,
+		isStopped:         *atomic.NewBool(false),
 	}
 
 	// integration test create cluster with different nodeId in one process
@@ -485,15 +488,16 @@ func (s *Session) registerService() (<-chan *clientv3.LeaseKeepAliveResponse, er
 // If we find previous session have same address as current , simply purge the old one so the recovery can be much faster
 func (s *Session) handleRestart(key string) {
 	resp, err := s.etcdCli.Get(s.ctx, key)
+	log := log.With(zap.String("key", key))
 	if err != nil {
-		log.Warn("failed to read old session from etcd, ignore", zap.Any("key", key), zap.Error(err))
+		log.Warn("failed to read old session from etcd, ignore", zap.Error(err))
 		return
 	}
 	for _, kv := range resp.Kvs {
 		session := &Session{}
 		err = json.Unmarshal(kv.Value, session)
 		if err != nil {
-			log.Warn("failed to unmarshal old session from etcd, ignore", zap.Any("key", key), zap.Error(err))
+			log.Warn("failed to unmarshal old session from etcd, ignore", zap.Error(err))
 			return
 		}
 
@@ -502,7 +506,7 @@ func (s *Session) handleRestart(key string) {
 				zap.String("address", session.Address))
 			_, err := s.etcdCli.Delete(s.ctx, key)
 			if err != nil {
-				log.Warn("failed to unmarshal old session from etcd, ignore", zap.Any("key", key), zap.Error(err))
+				log.Warn("failed to unmarshal old session from etcd, ignore", zap.Error(err))
 				return
 			}
 		}
@@ -860,7 +864,8 @@ func (s *Session) LivenessCheck(ctx context.Context, callback func()) {
 		if callback != nil {
 			// before exit liveness check, callback to exit the session owner
 			defer func() {
-				if ctx.Err() == nil {
+				// the callback method will not be invoked if session is stopped.
+				if ctx.Err() == nil && !s.isStopped.Load() {
 					go callback()
 				}
 			}()
@@ -926,6 +931,7 @@ func (s *Session) cancelKeepAlive() {
 }
 
 func (s *Session) Stop() {
+	s.isStopped.Store(true)
 	s.Revoke(time.Second)
 	s.cancelKeepAlive()
 	s.wg.Wait()
@@ -936,17 +942,28 @@ func (s *Session) Revoke(timeout time.Duration) {
 	if s == nil {
 		return
 	}
+	log.Info("start to revoke session", zap.String("sessionKey", s.activeKey))
 	if s.etcdCli == nil || s.LeaseID == nil {
+		log.Warn("skip remove session",
+			zap.String("sessionKey", s.activeKey),
+			zap.Bool("etcdCliIsNil", s.etcdCli == nil),
+			zap.Bool("LeaseIDIsNil", s.LeaseID == nil),
+		)
 		return
 	}
 	if s.Disconnected() {
+		log.Warn("skip remove session, connection is disconnected", zap.String("sessionKey", s.activeKey))
 		return
 	}
 	// can NOT use s.ctx, it may be Done here
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	// ignores resp & error, just do best effort to revoke
-	_, _ = s.etcdCli.Revoke(ctx, *s.LeaseID)
+	_, err := s.etcdCli.Revoke(ctx, *s.LeaseID)
+	if err != nil {
+		log.Warn("failed to revoke session", zap.String("sessionKey", s.activeKey), zap.Error(err))
+	}
+	log.Info("revoke session successfully", zap.String("sessionKey", s.activeKey))
 }
 
 // UpdateRegistered update the state of registered.
@@ -1134,7 +1151,7 @@ func (s *Session) ForceActiveStandby(activateFunc func() error) error {
 				0)).
 			Then(clientv3.OpPut(s.activeKey, string(sessionJSON), clientv3.WithLease(*s.LeaseID))).Commit()
 
-		if !resp.Succeeded {
+		if err != nil || !resp.Succeeded {
 			msg := fmt.Sprintf("failed to force register ACTIVE %s", s.ServerName)
 			log.Error(msg, zap.Error(err), zap.Any("resp", resp))
 			return errors.New(msg)
@@ -1219,4 +1236,9 @@ func saveServerInfoInternal(role string, serverID int64, pid int) {
 
 func SaveServerInfo(role string, serverID int64) {
 	saveServerInfoInternal(role, serverID, os.Getpid())
+}
+
+// GetSessionPrefixByRole get session prefix by role
+func GetSessionPrefixByRole(role string) string {
+	return path.Join(paramtable.Get().EtcdCfg.MetaRootPath.GetValue(), DefaultServiceRoot, role)
 }

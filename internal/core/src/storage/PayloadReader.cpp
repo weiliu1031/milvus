@@ -14,26 +14,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "storage/PayloadReader.h"
-#include "common/EasyAssert.h"
-#include "storage/Util.h"
-#include "parquet/column_reader.h"
 #include "arrow/io/api.h"
 #include "arrow/status.h"
+#include "common/EasyAssert.h"
+#include "common/Types.h"
 #include "parquet/arrow/reader.h"
+#include "parquet/column_reader.h"
+#include "storage/PayloadReader.h"
+#include "storage/Util.h"
 
 namespace milvus::storage {
 
 PayloadReader::PayloadReader(const uint8_t* data,
                              int length,
-                             DataType data_type)
-    : column_type_(data_type) {
+                             DataType data_type,
+                             bool nullable,
+                             bool is_field_data)
+    : column_type_(data_type), nullable_(nullable) {
     auto input = std::make_shared<arrow::io::BufferReader>(data, length);
-    init(input);
+    init(input, is_field_data);
 }
 
 void
-PayloadReader::init(std::shared_ptr<arrow::io::BufferReader> input) {
+PayloadReader::init(std::shared_ptr<arrow::io::BufferReader> input,
+                    bool is_field_data) {
     arrow::MemoryPool* pool = arrow::default_memory_pool();
 
     // Configure general Parquet reader settings
@@ -58,12 +62,10 @@ PayloadReader::init(std::shared_ptr<arrow::io::BufferReader> input) {
 
     int64_t column_index = 0;
     auto file_meta = arrow_reader->parquet_reader()->metadata();
-    // LOG_SEGCORE_INFO_ << "serialized parquet metadata, num row group  " <<
-    // std::to_string(file_meta->num_row_groups())
-    //                   << ", num column " << std::to_string(file_meta->num_columns()) << ", num rows "
-    //                   << std::to_string(file_meta->num_rows()) << ", type width "
-    //                   << std::to_string(file_meta->schema()->Column(column_index)->type_length());
-    dim_ = datatype_is_vector(column_type_)
+
+    // dim is unused for sparse float vector
+    dim_ = (IsVectorDataType(column_type_) &&
+            !IsSparseFloatVectorDataType(column_type_))
                ? GetDimensionFromFileMetaData(
                      file_meta->schema()->Column(column_index), column_type_)
                : 1;
@@ -73,15 +75,21 @@ PayloadReader::init(std::shared_ptr<arrow::io::BufferReader> input) {
     st = arrow_reader->GetRecordBatchReader(&rb_reader);
     AssertInfo(st.ok(), "get record batch reader");
 
-    field_data_ = CreateFieldData(column_type_, dim_, total_num_rows);
-    for (arrow::Result<std::shared_ptr<arrow::RecordBatch>> maybe_batch :
-         *rb_reader) {
-        AssertInfo(maybe_batch.ok(), "get batch record success");
-        auto array = maybe_batch.ValueOrDie()->column(column_index);
-        field_data_->FillFieldData(array);
+    if (is_field_data) {
+        field_data_ =
+            CreateFieldData(column_type_, nullable_, dim_, total_num_rows);
+        for (arrow::Result<std::shared_ptr<arrow::RecordBatch>> maybe_batch :
+             *rb_reader) {
+            AssertInfo(maybe_batch.ok(), "get batch record success");
+            auto array = maybe_batch.ValueOrDie()->column(column_index);
+            // to read
+            field_data_->FillFieldData(array);
+        }
+        AssertInfo(field_data_->IsFull(), "field data hasn't been filled done");
+    } else {
+        arrow_reader_ = std::move(arrow_reader);
+        record_batch_reader_ = std::move(rb_reader);
     }
-    AssertInfo(field_data_->IsFull(), "field data hasn't been filled done");
-    // LOG_SEGCORE_INFO_ << "Peak arrow memory pool size " << pool->max_memory();
 }
 
 }  // namespace milvus::storage

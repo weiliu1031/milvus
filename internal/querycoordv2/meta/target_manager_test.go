@@ -27,13 +27,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -44,17 +45,19 @@ type TargetManagerSuite struct {
 	suite.Suite
 
 	// Data
-	collections []int64
-	partitions  map[int64][]int64
-	channels    map[int64][]string
-	segments    map[int64]map[int64][]int64 // CollectionID, PartitionID -> Segments
+	collections    []int64
+	partitions     map[int64][]int64
+	channels       map[int64][]string
+	segments       map[int64]map[int64][]int64 // CollectionID, PartitionID -> Segments
+	level0Segments []int64
 	// Derived data
 	allChannels []string
 	allSegments []int64
 
-	kv     kv.MetaKv
-	meta   *Meta
-	broker *MockBroker
+	kv      kv.MetaKv
+	catalog metastore.QueryCoordCatalog
+	meta    *Meta
+	broker  *MockBroker
 	// Test object
 	mgr *TargetManager
 }
@@ -80,6 +83,7 @@ func (suite *TargetManagerSuite) SetupSuite() {
 			103: {7, 8},
 		},
 	}
+	suite.level0Segments = []int64{10000, 10001}
 
 	suite.allChannels = make([]string, 0)
 	suite.allSegments = make([]int64, 0)
@@ -108,9 +112,9 @@ func (suite *TargetManagerSuite) SetupTest() {
 	suite.kv = etcdkv.NewEtcdKV(cli, config.MetaRootPath.GetValue())
 
 	// meta
-	store := querycoord.NewCatalog(suite.kv)
+	suite.catalog = querycoord.NewCatalog(suite.kv)
 	idAllocator := RandomIncrementIDAllocator()
-	suite.meta = NewMeta(idAllocator, store, session.NewNodeManager())
+	suite.meta = NewMeta(idAllocator, suite.catalog, session.NewNodeManager())
 	suite.broker = NewMockBroker(suite.T())
 	suite.mgr = NewTargetManager(suite.broker, suite.meta)
 
@@ -118,8 +122,9 @@ func (suite *TargetManagerSuite) SetupTest() {
 		dmChannels := make([]*datapb.VchannelInfo, 0)
 		for _, channel := range suite.channels[collection] {
 			dmChannels = append(dmChannels, &datapb.VchannelInfo{
-				CollectionID: collection,
-				ChannelName:  channel,
+				CollectionID:        collection,
+				ChannelName:         channel,
+				LevelZeroSegmentIds: suite.level0Segments,
 			})
 		}
 
@@ -265,7 +270,7 @@ func (suite *TargetManagerSuite) TestRemovePartition() {
 	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
 
 	suite.mgr.RemovePartition(collectionID, 100)
-	suite.assertSegments([]int64{3, 4}, suite.mgr.GetSealedSegmentsByCollection(collectionID, NextTarget))
+	suite.assertSegments(append([]int64{3, 4}, suite.level0Segments...), suite.mgr.GetSealedSegmentsByCollection(collectionID, NextTarget))
 	suite.assertChannels(suite.channels[collectionID], suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
 	suite.assertSegments([]int64{}, suite.mgr.GetSealedSegmentsByCollection(collectionID, CurrentTarget))
 	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
@@ -310,7 +315,7 @@ func (suite *TargetManagerSuite) getAllSegment(collectionID int64, partitionIDs 
 		}
 	}
 
-	return allSegments
+	return append(allSegments, suite.level0Segments...)
 }
 
 func (suite *TargetManagerSuite) assertChannels(expected []string, actual map[string]*DmChannel) bool {
@@ -341,7 +346,7 @@ func (suite *TargetManagerSuite) assertSegments(expected []int64, actual map[int
 
 func (suite *TargetManagerSuite) TestGetCollectionTargetVersion() {
 	t1 := time.Now().UnixNano()
-	target := NewCollectionTarget(nil, nil)
+	target := NewCollectionTarget(nil, nil, nil)
 	t2 := time.Now().UnixNano()
 
 	version := target.GetTargetVersion()
@@ -413,6 +418,211 @@ func (suite *TargetManagerSuite) TestGetSegmentByChannel() {
 	suite.Len(suite.mgr.GetGrowingSegmentsByChannel(collectionID, "channel-1", NextTarget), 4)
 	suite.Len(suite.mgr.GetGrowingSegmentsByChannel(collectionID, "channel-2", NextTarget), 1)
 	suite.Len(suite.mgr.GetDroppedSegmentsByChannel(collectionID, "channel-1", NextTarget), 3)
+	suite.Len(suite.mgr.GetGrowingSegmentsByCollection(collectionID, NextTarget), 5)
+	suite.Len(suite.mgr.GetSealedSegmentsByPartition(collectionID, 1, NextTarget), 2)
+	suite.NotNil(suite.mgr.GetSealedSegment(collectionID, 11, NextTarget))
+	suite.NotNil(suite.mgr.GetDmChannel(collectionID, "channel-1", NextTarget))
+}
+
+func (suite *TargetManagerSuite) TestGetTarget() {
+	type testCase struct {
+		tag          string
+		mgr          *TargetManager
+		scope        TargetScope
+		expectTarget int
+	}
+
+	current := &CollectionTarget{}
+	next := &CollectionTarget{}
+
+	bothMgr := &TargetManager{
+		current: &target{
+			collectionTargetMap: map[int64]*CollectionTarget{
+				1000: current,
+			},
+		},
+		next: &target{
+			collectionTargetMap: map[int64]*CollectionTarget{
+				1000: next,
+			},
+		},
+	}
+	currentMgr := &TargetManager{
+		current: &target{
+			collectionTargetMap: map[int64]*CollectionTarget{
+				1000: current,
+			},
+		},
+		next: &target{},
+	}
+	nextMgr := &TargetManager{
+		next: &target{
+			collectionTargetMap: map[int64]*CollectionTarget{
+				1000: current,
+			},
+		},
+		current: &target{},
+	}
+
+	cases := []testCase{
+		{
+			tag:   "both_scope_unknown",
+			mgr:   bothMgr,
+			scope: -1,
+
+			expectTarget: 0,
+		},
+		{
+			tag:          "both_scope_current",
+			mgr:          bothMgr,
+			scope:        CurrentTarget,
+			expectTarget: 1,
+		},
+		{
+			tag:          "both_scope_next",
+			mgr:          bothMgr,
+			scope:        NextTarget,
+			expectTarget: 1,
+		},
+		{
+			tag:          "both_scope_current_first",
+			mgr:          bothMgr,
+			scope:        CurrentTargetFirst,
+			expectTarget: 2,
+		},
+		{
+			tag:          "both_scope_next_first",
+			mgr:          bothMgr,
+			scope:        NextTargetFirst,
+			expectTarget: 2,
+		},
+		{
+			tag:          "next_scope_current",
+			mgr:          nextMgr,
+			scope:        CurrentTarget,
+			expectTarget: 0,
+		},
+		{
+			tag:          "next_scope_next",
+			mgr:          nextMgr,
+			scope:        NextTarget,
+			expectTarget: 1,
+		},
+		{
+			tag:          "next_scope_current_first",
+			mgr:          nextMgr,
+			scope:        CurrentTargetFirst,
+			expectTarget: 1,
+		},
+		{
+			tag:          "next_scope_next_first",
+			mgr:          nextMgr,
+			scope:        NextTargetFirst,
+			expectTarget: 1,
+		},
+		{
+			tag:          "current_scope_current",
+			mgr:          currentMgr,
+			scope:        CurrentTarget,
+			expectTarget: 1,
+		},
+		{
+			tag:          "current_scope_next",
+			mgr:          currentMgr,
+			scope:        NextTarget,
+			expectTarget: 0,
+		},
+		{
+			tag:          "current_scope_current_first",
+			mgr:          currentMgr,
+			scope:        CurrentTargetFirst,
+			expectTarget: 1,
+		},
+		{
+			tag:          "current_scope_next_first",
+			mgr:          currentMgr,
+			scope:        NextTargetFirst,
+			expectTarget: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		suite.Run(tc.tag, func() {
+			targets := tc.mgr.getCollectionTarget(tc.scope, 1000)
+			suite.Equal(tc.expectTarget, len(targets))
+		})
+	}
+}
+
+func (suite *TargetManagerSuite) TestRecover() {
+	collectionID := int64(1003)
+	suite.assertSegments([]int64{}, suite.mgr.GetSealedSegmentsByCollection(collectionID, NextTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, NextTarget))
+	suite.assertSegments([]int64{}, suite.mgr.GetSealedSegmentsByCollection(collectionID, CurrentTarget))
+	suite.assertChannels([]string{}, suite.mgr.GetDmChannelsByCollection(collectionID, CurrentTarget))
+
+	suite.meta.PutCollection(&Collection{
+		CollectionLoadInfo: &querypb.CollectionLoadInfo{
+			CollectionID:  collectionID,
+			ReplicaNumber: 1,
+		},
+	})
+	suite.meta.PutPartition(&Partition{
+		PartitionLoadInfo: &querypb.PartitionLoadInfo{
+			CollectionID: collectionID,
+			PartitionID:  1,
+		},
+	})
+
+	nextTargetChannels := []*datapb.VchannelInfo{
+		{
+			CollectionID:        collectionID,
+			ChannelName:         "channel-1",
+			UnflushedSegmentIds: []int64{1, 2, 3, 4},
+			DroppedSegmentIds:   []int64{11, 22, 33},
+		},
+		{
+			CollectionID:        collectionID,
+			ChannelName:         "channel-2",
+			UnflushedSegmentIds: []int64{5},
+		},
+	}
+
+	nextTargetSegments := []*datapb.SegmentInfo{
+		{
+			ID:            11,
+			PartitionID:   1,
+			InsertChannel: "channel-1",
+		},
+		{
+			ID:            12,
+			PartitionID:   1,
+			InsertChannel: "channel-2",
+		},
+	}
+
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collectionID).Return(nextTargetChannels, nextTargetSegments, nil)
+	suite.mgr.UpdateCollectionNextTarget(collectionID)
+	suite.mgr.UpdateCollectionCurrentTarget(collectionID)
+
+	suite.mgr.SaveCurrentTarget(suite.catalog)
+
+	// clear target in memory
+	version := suite.mgr.current.getCollectionTarget(collectionID).GetTargetVersion()
+	suite.mgr.current.removeCollectionTarget(collectionID)
+	// try to recover
+	suite.mgr.Recover(suite.catalog)
+
+	target := suite.mgr.current.getCollectionTarget(collectionID)
+	suite.NotNil(target)
+	suite.Len(target.GetAllDmChannelNames(), 2)
+	suite.Len(target.GetAllSegmentIDs(), 2)
+	suite.Equal(target.GetTargetVersion(), version)
+
+	// after recover, target info should be cleaned up
+	targets, err := suite.catalog.GetCollectionTargets()
+	suite.NoError(err)
+	suite.Len(targets, 0)
 }
 
 func TestTargetManager(t *testing.T) {

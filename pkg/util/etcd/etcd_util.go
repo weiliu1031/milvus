@@ -28,13 +28,13 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus/pkg/log"
 )
 
-var maxTxnNum = 128
-
 // GetEtcdClient returns etcd client
+// should only used for test
 func GetEtcdClient(
 	useEmbedEtcd bool,
 	useSSL bool,
@@ -63,11 +63,30 @@ func GetRemoteEtcdClient(endpoints []string) (*clientv3.Client, error) {
 	return clientv3.New(clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: 5 * time.Second,
+		DialOptions: []grpc.DialOption{
+			grpc.WithBlock(),
+		},
+	})
+}
+
+func GetRemoteEtcdClientWithAuth(endpoints []string, userName, password string) (*clientv3.Client, error) {
+	return clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: 5 * time.Second,
+		Username:    userName,
+		Password:    password,
+		DialOptions: []grpc.DialOption{
+			grpc.WithBlock(),
+		},
 	})
 }
 
 func GetRemoteEtcdSSLClient(endpoints []string, certFile string, keyFile string, caCertFile string, minVersion string) (*clientv3.Client, error) {
 	var cfg clientv3.Config
+	return GetRemoteEtcdSSLClientWithCfg(endpoints, certFile, keyFile, caCertFile, minVersion, cfg)
+}
+
+func GetRemoteEtcdSSLClientWithCfg(endpoints []string, certFile string, keyFile string, caCertFile string, minVersion string, cfg clientv3.Config) (*clientv3.Client, error) {
 	cfg.Endpoints = endpoints
 	cfg.DialTimeout = 5 * time.Second
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -105,7 +124,34 @@ func GetRemoteEtcdSSLClient(endpoints []string, certFile string, keyFile string,
 		return nil, errors.Errorf("unknown TLS version,%s", minVersion)
 	}
 
+	cfg.DialOptions = append(cfg.DialOptions, grpc.WithBlock())
+
 	return clientv3.New(cfg)
+}
+
+func CreateEtcdClient(
+	useEmbedEtcd bool,
+	enableAuth bool,
+	userName,
+	password string,
+	useSSL bool,
+	endpoints []string,
+	certFile string,
+	keyFile string,
+	caCertFile string,
+	minVersion string,
+) (*clientv3.Client, error) {
+	if !enableAuth || useEmbedEtcd {
+		return GetEtcdClient(useEmbedEtcd, useSSL, endpoints, certFile, keyFile, caCertFile, minVersion)
+	}
+	log.Info("create etcd client(enable auth)",
+		zap.Bool("useSSL", useSSL),
+		zap.Any("endpoints", endpoints),
+		zap.String("minVersion", minVersion))
+	if useSSL {
+		return GetRemoteEtcdSSLClientWithCfg(endpoints, certFile, keyFile, caCertFile, minVersion, clientv3.Config{Username: userName, Password: password})
+	}
+	return GetRemoteEtcdClientWithAuth(endpoints, userName, password)
 }
 
 func min(a, b int) int {
@@ -143,18 +189,13 @@ func SaveByBatchWithLimit(kvs map[string]string, limit int, op func(partialKvs m
 	return nil
 }
 
-// SaveByBatch there will not guarantee atomicity.
-func SaveByBatch(kvs map[string]string, op func(partialKvs map[string]string) error) error {
-	return SaveByBatchWithLimit(kvs, maxTxnNum, op)
-}
-
-func RemoveByBatch(removals []string, op func(partialKeys []string) error) error {
+func RemoveByBatchWithLimit(removals []string, limit int, op func(partialKeys []string) error) error {
 	if len(removals) == 0 {
 		return nil
 	}
 
-	for i := 0; i < len(removals); i = i + maxTxnNum {
-		end := min(i+maxTxnNum, len(removals))
+	for i := 0; i < len(removals); i = i + limit {
+		end := min(i+limit, len(removals))
 		batch := removals[i:end]
 		if err := op(batch); err != nil {
 			return err

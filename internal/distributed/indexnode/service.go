@@ -18,15 +18,12 @@ package grpcindexnode
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"strconv"
 	"sync"
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -36,8 +33,8 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/distributed/utils"
 	"github.com/milvus-io/milvus/internal/indexnode"
-	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/workerpb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	_ "github.com/milvus-io/milvus/internal/util/grpcclient"
@@ -47,6 +44,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
+	"github.com/milvus-io/milvus/pkg/util/netutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -55,15 +53,33 @@ type Server struct {
 	indexnode types.IndexNodeComponent
 
 	grpcServer  *grpc.Server
+	listener    *netutil.NetListener
 	grpcErrChan chan error
 
 	serverID atomic.Int64
 
 	loopCtx    context.Context
 	loopCancel func()
-	loopWg     sync.WaitGroup
+	grpcWG     sync.WaitGroup
 
 	etcdCli *clientv3.Client
+}
+
+func (s *Server) Prepare() error {
+	listener, err := netutil.NewListener(
+		netutil.OptIP(paramtable.Get().IndexNodeGrpcServerCfg.IP),
+		netutil.OptHighPriorityToUsePort(paramtable.Get().IndexNodeGrpcServerCfg.Port.GetAsInt()),
+	)
+	if err != nil {
+		log.Warn("IndexNode fail to create net listener", zap.Error(err))
+		return err
+	}
+	s.listener = listener
+	log.Info("IndexNode listen on", zap.String("address", listener.Addr().String()), zap.Int("port", listener.Port()))
+	paramtable.Get().Save(
+		paramtable.Get().IndexNodeGrpcServerCfg.Port.Key,
+		strconv.FormatInt(int64(listener.Port()), 10))
+	return nil
 }
 
 // Run initializes and starts IndexNode's grpc service.
@@ -80,17 +96,10 @@ func (s *Server) Run() error {
 }
 
 // startGrpcLoop starts the grep loop of IndexNode component.
-func (s *Server) startGrpcLoop(grpcPort int) {
-	defer s.loopWg.Done()
+func (s *Server) startGrpcLoop() {
+	defer s.grpcWG.Done()
 
 	Params := &paramtable.Get().IndexNodeGrpcServerCfg
-	log.Debug("IndexNode", zap.String("network address", Params.GetAddress()), zap.Int("network port: ", grpcPort))
-	lis, err := net.Listen("tcp", ":"+strconv.Itoa(grpcPort))
-	if err != nil {
-		log.Warn("IndexNode", zap.Error(err))
-		s.grpcErrChan <- err
-		return
-	}
 
 	ctx, cancel := context.WithCancel(s.loopCtx)
 	defer cancel()
@@ -105,14 +114,12 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
 
-	opts := tracer.GetInterceptorOpts()
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
 		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize.GetAsInt()),
 		grpc.MaxSendMsgSize(Params.ServerMaxSendSize.GetAsInt()),
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-			otelgrpc.UnaryServerInterceptor(opts...),
 			logutil.UnaryTraceLoggerInterceptor,
 			interceptor.ClusterValidationUnaryServerInterceptor(),
 			interceptor.ServerIDValidationUnaryServerInterceptor(func() int64 {
@@ -123,7 +130,6 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 			}),
 		)),
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-			otelgrpc.StreamServerInterceptor(opts...),
 			logutil.StreamTraceLoggerInterceptor,
 			interceptor.ClusterValidationStreamServerInterceptor(),
 			interceptor.ServerIDValidationStreamServerInterceptor(func() int64 {
@@ -132,10 +138,11 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 				}
 				return s.serverID.Load()
 			}),
-		)))
-	indexpb.RegisterIndexNodeServer(s.grpcServer, s)
+		)),
+		grpc.StatsHandler(tracer.GetDynamicOtelGrpcServerStatsHandler()))
+	workerpb.RegisterIndexNodeServer(s.grpcServer, s)
 	go funcutil.CheckGrpcReady(ctx, s.grpcErrChan)
-	if err := s.grpcServer.Serve(lis); err != nil {
+	if err := s.grpcServer.Serve(s.listener); err != nil {
 		s.grpcErrChan <- err
 	}
 }
@@ -143,12 +150,7 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 // init initializes IndexNode's grpc service.
 func (s *Server) init() error {
 	etcdConfig := &paramtable.Get().EtcdCfg
-	Params := &paramtable.Get().IndexNodeGrpcServerCfg
 	var err error
-	if !funcutil.CheckPortAvailable(Params.Port.GetAsInt()) {
-		paramtable.Get().Save(Params.Port.Key, fmt.Sprintf("%d", funcutil.GetAvailablePort()))
-		log.Warn("IndexNode get available port when init", zap.Int("Port", Params.Port.GetAsInt()))
-	}
 
 	defer func() {
 		if err != nil {
@@ -159,17 +161,21 @@ func (s *Server) init() error {
 		}
 	}()
 
-	s.loopWg.Add(1)
-	go s.startGrpcLoop(Params.Port.GetAsInt())
+	s.grpcWG.Add(1)
+	go s.startGrpcLoop()
 	// wait for grpc server loop start
 	err = <-s.grpcErrChan
 	if err != nil {
-		log.Error("IndexNode", zap.Any("grpc error", err))
+		log.Error("IndexNode", zap.Error(err))
 		return err
 	}
 
-	etcdCli, err := etcd.GetEtcdClient(
+	var etcdCli *clientv3.Client
+	etcdCli, err = etcd.CreateEtcdClient(
 		etcdConfig.UseEmbedEtcd.GetAsBool(),
+		etcdConfig.EtcdEnableAuth.GetAsBool(),
+		etcdConfig.EtcdAuthUserName.GetValue(),
+		etcdConfig.EtcdAuthPassword.GetValue(),
 		etcdConfig.EtcdUseSSL.GetAsBool(),
 		etcdConfig.Endpoints.GetAsStrings(),
 		etcdConfig.EtcdTLSCert.GetValue(),
@@ -182,7 +188,7 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.indexnode.SetEtcdClient(etcdCli)
-	s.indexnode.SetAddress(Params.GetAddress())
+	s.indexnode.SetAddress(s.listener.Address())
 	err = s.indexnode.Init()
 	if err != nil {
 		log.Error("IndexNode Init failed", zap.Error(err))
@@ -208,21 +214,35 @@ func (s *Server) start() error {
 }
 
 // Stop stops IndexNode's grpc service.
-func (s *Server) Stop() error {
-	Params := &paramtable.Get().IndexNodeGrpcServerCfg
-	log.Debug("IndexNode stop", zap.String("Address", Params.GetAddress()))
-	if s.indexnode != nil {
-		s.indexnode.Stop()
+func (s *Server) Stop() (err error) {
+	logger := log.With()
+	if s.listener != nil {
+		logger = log.With(zap.String("address", s.listener.Address()))
 	}
-	s.loopCancel()
+	logger.Info("IndexNode stopping")
+	defer func() {
+		logger.Info("IndexNode stopped", zap.Error(err))
+	}()
+
+	if s.indexnode != nil {
+		err := s.indexnode.Stop()
+		if err != nil {
+			log.Error("failed to close indexnode", zap.Error(err))
+			return err
+		}
+	}
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
 	}
 	if s.grpcServer != nil {
 		utils.GracefulStopGRPCServer(s.grpcServer)
 	}
-	s.loopWg.Wait()
+	s.grpcWG.Wait()
 
+	s.loopCancel()
+	if s.listener != nil {
+		s.listener.Close()
+	}
 	return nil
 }
 
@@ -248,22 +268,22 @@ func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetSt
 }
 
 // CreateJob sends the create index request to IndexNode.
-func (s *Server) CreateJob(ctx context.Context, req *indexpb.CreateJobRequest) (*commonpb.Status, error) {
+func (s *Server) CreateJob(ctx context.Context, req *workerpb.CreateJobRequest) (*commonpb.Status, error) {
 	return s.indexnode.CreateJob(ctx, req)
 }
 
 // QueryJobs querys index jobs statues
-func (s *Server) QueryJobs(ctx context.Context, req *indexpb.QueryJobsRequest) (*indexpb.QueryJobsResponse, error) {
+func (s *Server) QueryJobs(ctx context.Context, req *workerpb.QueryJobsRequest) (*workerpb.QueryJobsResponse, error) {
 	return s.indexnode.QueryJobs(ctx, req)
 }
 
 // DropJobs drops index build jobs
-func (s *Server) DropJobs(ctx context.Context, req *indexpb.DropJobsRequest) (*commonpb.Status, error) {
+func (s *Server) DropJobs(ctx context.Context, req *workerpb.DropJobsRequest) (*commonpb.Status, error) {
 	return s.indexnode.DropJobs(ctx, req)
 }
 
 // GetJobNum gets indexnode's job statisctics
-func (s *Server) GetJobStats(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
+func (s *Server) GetJobStats(ctx context.Context, req *workerpb.GetJobStatsRequest) (*workerpb.GetJobStatsResponse, error) {
 	return s.indexnode.GetJobStats(ctx, req)
 }
 
@@ -275,6 +295,18 @@ func (s *Server) ShowConfigurations(ctx context.Context, req *internalpb.ShowCon
 // GetMetrics gets the metrics info of IndexNode.
 func (s *Server) GetMetrics(ctx context.Context, request *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return s.indexnode.GetMetrics(ctx, request)
+}
+
+func (s *Server) CreateJobV2(ctx context.Context, request *workerpb.CreateJobV2Request) (*commonpb.Status, error) {
+	return s.indexnode.CreateJobV2(ctx, request)
+}
+
+func (s *Server) QueryJobsV2(ctx context.Context, request *workerpb.QueryJobsV2Request) (*workerpb.QueryJobsV2Response, error) {
+	return s.indexnode.QueryJobsV2(ctx, request)
+}
+
+func (s *Server) DropJobsV2(ctx context.Context, request *workerpb.DropJobsV2Request) (*commonpb.Status, error) {
+	return s.indexnode.DropJobsV2(ctx, request)
 }
 
 // NewServer create a new IndexNode grpc server.

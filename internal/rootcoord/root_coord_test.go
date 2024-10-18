@@ -21,23 +21,18 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
-	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-	memkv "github.com/milvus-io/milvus/internal/kv/mem"
-	"github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
-	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
@@ -45,15 +40,16 @@ import (
 	mockrootcoord "github.com/milvus-io/milvus/internal/rootcoord/mocks"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	kvfactory "github.com/milvus-io/milvus/internal/util/dependency/kv"
-	"github.com/milvus-io/milvus/internal/util/importutil"
+	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
-	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/tikv"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -183,6 +179,45 @@ func TestRootCoord_ListDatabases(t *testing.T) {
 		resp, err := c.ListDatabases(ctx, &milvuspb.ListDatabasesRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+}
+
+func TestRootCoord_AlterDatabase(t *testing.T) {
+	t.Run("not healthy", func(t *testing.T) {
+		c := newTestCore(withAbnormalCode())
+		ctx := context.Background()
+		resp, err := c.AlterDatabase(ctx, &rootcoordpb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_NotReadyServe, resp.GetErrorCode())
+	})
+
+	t.Run("failed to add task", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withInvalidScheduler())
+
+		ctx := context.Background()
+		resp, err := c.AlterDatabase(ctx, &rootcoordpb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
+	})
+
+	t.Run("failed to execute", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withTaskFailScheduler())
+
+		ctx := context.Background()
+		resp, err := c.AlterDatabase(ctx, &rootcoordpb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
+	})
+
+	t.Run("ok", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withValidScheduler())
+		ctx := context.Background()
+		resp, err := c.AlterDatabase(ctx, &rootcoordpb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
 	})
 }
 
@@ -457,6 +492,109 @@ func TestRootCoord_AlterAlias(t *testing.T) {
 		resp, err := c.AlterAlias(ctx, &milvuspb.AlterAliasRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
+	})
+}
+
+func TestRootCoord_DescribeAlias(t *testing.T) {
+	t.Run("not healthy", func(t *testing.T) {
+		c := newTestCore(withAbnormalCode())
+		ctx := context.Background()
+		resp, err := c.DescribeAlias(ctx, &milvuspb.DescribeAliasRequest{Alias: "test"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("failed to add task", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withInvalidScheduler(),
+			withInvalidMeta())
+		ctx := context.Background()
+		resp, err := c.DescribeAlias(ctx, &milvuspb.DescribeAliasRequest{Alias: "test"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("failed to execute", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withTaskFailScheduler(),
+			withInvalidMeta())
+		ctx := context.Background()
+		resp, err := c.DescribeAlias(ctx, &milvuspb.DescribeAliasRequest{Alias: "test"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("input alias is empty", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withValidScheduler())
+		meta := newMockMetaTable()
+		meta.DescribeAliasFunc = func(ctx context.Context, dbName, alias string, ts Timestamp) (string, error) {
+			return "", nil
+		}
+		c.meta = meta
+		ctx := context.Background()
+		resp, err := c.DescribeAlias(ctx, &milvuspb.DescribeAliasRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
+		assert.Equal(t, int32(1101), resp.GetStatus().GetCode())
+	})
+
+	t.Run("normal case, everything is ok", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withValidScheduler())
+		meta := newMockMetaTable()
+		meta.DescribeAliasFunc = func(ctx context.Context, dbName, alias string, ts Timestamp) (string, error) {
+			return "", nil
+		}
+		c.meta = meta
+		ctx := context.Background()
+		resp, err := c.DescribeAlias(ctx, &milvuspb.DescribeAliasRequest{Alias: "test"})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+}
+
+func TestRootCoord_ListAliases(t *testing.T) {
+	t.Run("not healthy", func(t *testing.T) {
+		c := newTestCore(withAbnormalCode())
+		ctx := context.Background()
+		resp, err := c.ListAliases(ctx, &milvuspb.ListAliasesRequest{})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("failed to add task", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withInvalidScheduler(),
+			withInvalidMeta())
+		ctx := context.Background()
+		resp, err := c.ListAliases(ctx, &milvuspb.ListAliasesRequest{})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("failed to execute", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withTaskFailScheduler(),
+			withInvalidMeta())
+		ctx := context.Background()
+		resp, err := c.ListAliases(ctx, &milvuspb.ListAliasesRequest{})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("normal case, everything is ok", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(),
+			withValidScheduler())
+		meta := newMockMetaTable()
+		meta.ListAliasesFunc = func(ctx context.Context, dbName, collectionName string, ts Timestamp) ([]string, error) {
+			return nil, nil
+		}
+		c.meta = meta
+		ctx := context.Background()
+		resp, err := c.ListAliases(ctx, &milvuspb.ListAliasesRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 }
 
@@ -1007,544 +1145,6 @@ func TestRootCoord_GetMetrics(t *testing.T) {
 	})
 }
 
-func TestCore_Import(t *testing.T) {
-	meta := newMockMetaTable()
-	meta.AddCollectionFunc = func(ctx context.Context, coll *model.Collection) error {
-		return nil
-	}
-	meta.ChangeCollectionStateFunc = func(ctx context.Context, collectionID UniqueID, state etcdpb.CollectionState, ts Timestamp) error {
-		return nil
-	}
-
-	t.Run("not healthy", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withAbnormalCode())
-		resp, err := c.Import(ctx, &milvuspb.ImportRequest{})
-		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-	})
-
-	t.Run("bad collection name", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-		meta.GetCollectionIDByNameFunc = func(name string) (UniqueID, error) {
-			return 0, errors.New("error mock GetCollectionIDByName")
-		}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return nil, errors.New("collection name not found")
-		}
-		_, err := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-bad-name",
-		})
-		assert.Error(t, err)
-	})
-
-	t.Run("bad partition name", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-		coll := &model.Collection{Name: "a-good-name"}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return coll, nil
-		}
-		meta.GetCollectionVirtualChannelsFunc = func(colID int64) []string {
-			return []string{"ch-1", "ch-2"}
-		}
-		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
-			return 0, errors.New("mock GetPartitionByNameFunc error")
-		}
-		resp, err := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-		})
-		assert.NoError(t, err)
-		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrPartitionNotFound)
-	})
-
-	t.Run("normal case", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-		meta.GetCollectionIDByNameFunc = func(name string) (UniqueID, error) {
-			return 100, nil
-		}
-		meta.GetCollectionVirtualChannelsFunc = func(colID int64) []string {
-			return []string{"ch-1", "ch-2"}
-		}
-		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
-			return 101, nil
-		}
-		coll := &model.Collection{Name: "a-good-name"}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return coll.Clone(), nil
-		}
-		_, err := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-		})
-		assert.NoError(t, err)
-	})
-
-	t.Run("backup without partition name", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-
-		coll := &model.Collection{
-			Name: "a-good-name",
-		}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return coll.Clone(), nil
-		}
-		resp, _ := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-			Options: []*commonpb.KeyValuePair{
-				{Key: importutil.BackupFlag, Value: "true"},
-			},
-		})
-		assert.NotNil(t, resp)
-		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrParameterInvalid)
-	})
-
-	// Remove the following case after bulkinsert can support partition key
-	t.Run("unsupport partition key", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-
-		coll := &model.Collection{
-			Name: "a-good-name",
-			Fields: []*model.Field{
-				{IsPartitionKey: true},
-			},
-		}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return coll.Clone(), nil
-		}
-		resp, _ := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-		})
-		assert.NotNil(t, resp)
-	})
-
-	t.Run("not allow partiton name with partition key", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-		meta.GetCollectionIDByNameFunc = func(name string) (UniqueID, error) {
-			return 100, nil
-		}
-		meta.GetCollectionVirtualChannelsFunc = func(colID int64) []string {
-			return []string{"ch-1", "ch-2"}
-		}
-		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
-			return 101, nil
-		}
-		coll := &model.Collection{
-			CollectionID: 100,
-			Name:         "a-good-name",
-			Fields: []*model.Field{
-				{
-					FieldID:        101,
-					Name:           "test_field_name_1",
-					IsPrimaryKey:   false,
-					IsPartitionKey: true,
-					DataType:       schemapb.DataType_Int64,
-				},
-			},
-		}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return coll.Clone(), nil
-		}
-		resp, err := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-			PartitionName:  "p1",
-		})
-		assert.NoError(t, err)
-		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrParameterInvalid)
-	})
-
-	t.Run("backup should set partition name", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(),
-			withMeta(meta))
-		meta.GetCollectionIDByNameFunc = func(name string) (UniqueID, error) {
-			return 100, nil
-		}
-		meta.GetCollectionVirtualChannelsFunc = func(colID int64) []string {
-			return []string{"ch-1", "ch-2"}
-		}
-		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
-			return 101, nil
-		}
-		coll := &model.Collection{
-			CollectionID: 100,
-			Name:         "a-good-name",
-			Fields: []*model.Field{
-				{
-					FieldID:        101,
-					Name:           "test_field_name_1",
-					IsPrimaryKey:   false,
-					IsPartitionKey: true,
-					DataType:       schemapb.DataType_Int64,
-				},
-			},
-		}
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			return coll.Clone(), nil
-		}
-		resp1, err := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-			Options: []*commonpb.KeyValuePair{
-				{
-					Key:   importutil.BackupFlag,
-					Value: "true",
-				},
-			},
-		})
-		assert.NoError(t, err)
-		assert.ErrorIs(t, merr.Error(resp1.GetStatus()), merr.ErrParameterInvalid)
-
-		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
-			return common.InvalidPartitionID, fmt.Errorf("partition ID not found for partition name '%s'", partitionName)
-		}
-		resp2, _ := c.Import(ctx, &milvuspb.ImportRequest{
-			CollectionName: "a-good-name",
-			PartitionName:  "a-bad-name",
-			Options: []*commonpb.KeyValuePair{
-				{
-					Key:   importutil.BackupFlag,
-					Value: "true",
-				},
-			},
-		})
-		assert.NoError(t, err)
-		assert.ErrorIs(t, merr.Error(resp2.GetStatus()), merr.ErrPartitionNotFound)
-	})
-}
-
-func TestCore_GetImportState(t *testing.T) {
-	mockKv := memkv.NewMemoryKV()
-	ti1 := &datapb.ImportTaskInfo{
-		Id: 100,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPending,
-		},
-		CreateTs: time.Now().Unix() - 100,
-	}
-	ti2 := &datapb.ImportTaskInfo{
-		Id: 200,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPersisted,
-		},
-		CreateTs: time.Now().Unix() - 100,
-	}
-	taskInfo1, err := proto.Marshal(ti1)
-	assert.NoError(t, err)
-	taskInfo2, err := proto.Marshal(ti2)
-	assert.NoError(t, err)
-	mockKv.Save(BuildImportTaskKey(1), "value")
-	mockKv.Save(BuildImportTaskKey(100), string(taskInfo1))
-	mockKv.Save(BuildImportTaskKey(200), string(taskInfo2))
-
-	t.Run("not healthy", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withAbnormalCode())
-		resp, err := c.GetImportState(ctx, &milvuspb.GetImportStateRequest{
-			Task: 100,
-		})
-		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-	})
-
-	t.Run("normal case", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode())
-		c.importManager = newImportManager(ctx, mockKv, nil, nil, nil, nil, nil)
-		resp, err := c.GetImportState(ctx, &milvuspb.GetImportStateRequest{
-			Task: 100,
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, int64(100), resp.GetId())
-		assert.NotEqual(t, 0, resp.GetCreateTs())
-		assert.Equal(t, commonpb.ImportState_ImportPending, resp.GetState())
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-	})
-}
-
-func TestCore_ListImportTasks(t *testing.T) {
-	mockKv := memkv.NewMemoryKV()
-	ti1 := &datapb.ImportTaskInfo{
-		Id:             100,
-		CollectionName: "collection-A",
-		CollectionId:   1,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPending,
-		},
-		CreateTs: time.Now().Unix() - 300,
-	}
-	ti2 := &datapb.ImportTaskInfo{
-		Id:             200,
-		CollectionName: "collection-A",
-		CollectionId:   1,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPersisted,
-		},
-		CreateTs: time.Now().Unix() - 200,
-	}
-	ti3 := &datapb.ImportTaskInfo{
-		Id:             300,
-		CollectionName: "collection-B",
-		CollectionId:   2,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPersisted,
-		},
-		CreateTs: time.Now().Unix() - 100,
-	}
-	taskInfo1, err := proto.Marshal(ti1)
-	assert.NoError(t, err)
-	taskInfo2, err := proto.Marshal(ti2)
-	assert.NoError(t, err)
-	taskInfo3, err := proto.Marshal(ti3)
-	assert.NoError(t, err)
-	mockKv.Save(BuildImportTaskKey(1), "value") // this item will trigger an error log in importManager.loadFromTaskStore()
-	mockKv.Save(BuildImportTaskKey(100), string(taskInfo1))
-	mockKv.Save(BuildImportTaskKey(200), string(taskInfo2))
-	mockKv.Save(BuildImportTaskKey(300), string(taskInfo3))
-
-	t.Run("not healthy", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withAbnormalCode())
-		resp, err := c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{})
-		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-	})
-
-	verifyTaskFunc := func(task *milvuspb.GetImportStateResponse, taskID int64, colID int64, state commonpb.ImportState) {
-		assert.Equal(t, commonpb.ErrorCode_Success, task.GetStatus().ErrorCode)
-		assert.Equal(t, taskID, task.GetId())
-		assert.Equal(t, state, task.GetState())
-		assert.Equal(t, colID, task.GetCollectionId())
-	}
-
-	t.Run("normal case", func(t *testing.T) {
-		meta := newMockMetaTable()
-		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-			if collectionName == ti1.CollectionName {
-				return &model.Collection{
-					CollectionID: ti1.CollectionId,
-				}, nil
-			} else if collectionName == ti3.CollectionName {
-				return &model.Collection{
-					CollectionID: ti3.CollectionId,
-				}, nil
-			}
-			return nil, merr.WrapErrCollectionNotFound(collectionName)
-		}
-
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode(), withMeta(meta))
-		c.importManager = newImportManager(ctx, mockKv, nil, nil, nil, nil, nil)
-
-		// list all tasks
-		resp, err := c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{})
-		assert.NoError(t, err)
-		assert.Equal(t, 3, len(resp.GetTasks()))
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-		verifyTaskFunc(resp.GetTasks()[0], 100, 1, commonpb.ImportState_ImportPending)
-		verifyTaskFunc(resp.GetTasks()[1], 200, 1, commonpb.ImportState_ImportPersisted)
-		verifyTaskFunc(resp.GetTasks()[2], 300, 2, commonpb.ImportState_ImportPersisted)
-
-		// list tasks of collection-A
-		resp, err = c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{
-			CollectionName: "collection-A",
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, 2, len(resp.GetTasks()))
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-
-		// list tasks of collection-B
-		resp, err = c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{
-			CollectionName: "collection-B",
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, 1, len(resp.GetTasks()))
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-
-		// invalid collection name
-		resp, err = c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{
-			CollectionName: "dummy",
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, 0, len(resp.GetTasks()))
-		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrCollectionNotFound)
-
-		// list the latest 2 tasks
-		resp, err = c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{
-			Limit: 2,
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, 2, len(resp.GetTasks()))
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-		verifyTaskFunc(resp.GetTasks()[0], 200, 1, commonpb.ImportState_ImportPersisted)
-		verifyTaskFunc(resp.GetTasks()[1], 300, 2, commonpb.ImportState_ImportPersisted)
-
-		// failed to load tasks from store
-		mockTxnKV := &mocks.TxnKV{}
-		mockTxnKV.EXPECT().LoadWithPrefix(mock.Anything).Return(nil, nil, errors.New("mock error"))
-		c.importManager.taskStore = mockTxnKV
-		resp, err = c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{})
-		assert.NoError(t, err)
-		assert.Equal(t, 0, len(resp.GetTasks()))
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
-	})
-}
-
-func TestCore_ReportImport(t *testing.T) {
-	paramtable.Get().Save(Params.RootCoordCfg.ImportTaskSubPath.Key, "importtask")
-	var countLock sync.RWMutex
-	globalCount := typeutil.UniqueID(0)
-	idAlloc := func(count uint32) (typeutil.UniqueID, typeutil.UniqueID, error) {
-		countLock.Lock()
-		defer countLock.Unlock()
-		globalCount++
-		return globalCount, 0, nil
-	}
-	mockKv := memkv.NewMemoryKV()
-	ti1 := &datapb.ImportTaskInfo{
-		Id: 100,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPending,
-		},
-		CreateTs: time.Now().Unix() - 100,
-	}
-	ti2 := &datapb.ImportTaskInfo{
-		Id: 200,
-		State: &datapb.ImportTaskState{
-			StateCode: commonpb.ImportState_ImportPersisted,
-		},
-		CreateTs: time.Now().Unix() - 100,
-	}
-	taskInfo1, err := proto.Marshal(ti1)
-	assert.NoError(t, err)
-	taskInfo2, err := proto.Marshal(ti2)
-	assert.NoError(t, err)
-	mockKv.Save(BuildImportTaskKey(1), "value")
-	mockKv.Save(BuildImportTaskKey(100), string(taskInfo1))
-	mockKv.Save(BuildImportTaskKey(200), string(taskInfo2))
-
-	ticker := newRocksMqTtSynchronizer()
-	meta := newMockMetaTable()
-	meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-		return nil, errors.New("error mock GetCollectionByName")
-	}
-	meta.AddCollectionFunc = func(ctx context.Context, coll *model.Collection) error {
-		return nil
-	}
-	meta.ChangeCollectionStateFunc = func(ctx context.Context, collectionID UniqueID, state etcdpb.CollectionState, ts Timestamp) error {
-		return nil
-	}
-
-	dc := newMockDataCoord()
-	dc.GetComponentStatesFunc = func(ctx context.Context) (*milvuspb.ComponentStates, error) {
-		return &milvuspb.ComponentStates{
-			State: &milvuspb.ComponentInfo{
-				NodeID:    TestRootCoordID,
-				StateCode: commonpb.StateCode_Healthy,
-			},
-			SubcomponentStates: nil,
-			Status:             merr.Success(),
-		}, nil
-	}
-	dc.WatchChannelsFunc = func(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
-		return &datapb.WatchChannelsResponse{Status: merr.Success()}, nil
-	}
-	dc.FlushFunc = func(ctx context.Context, req *datapb.FlushRequest) (*datapb.FlushResponse, error) {
-		return &datapb.FlushResponse{Status: merr.Success()}, nil
-	}
-
-	mockCallImportServiceErr := false
-	callImportServiceFn := func(ctx context.Context, req *datapb.ImportTaskRequest) (*datapb.ImportTaskResponse, error) {
-		if mockCallImportServiceErr {
-			return &datapb.ImportTaskResponse{
-				Status: merr.Success(),
-			}, errors.New("mock err")
-		}
-		return &datapb.ImportTaskResponse{
-			Status: merr.Success(),
-		}, nil
-	}
-
-	callGetSegmentStates := func(ctx context.Context, req *datapb.GetSegmentStatesRequest) (*datapb.GetSegmentStatesResponse, error) {
-		return &datapb.GetSegmentStatesResponse{
-			Status: merr.Success(),
-		}, nil
-	}
-
-	callUnsetIsImportingState := func(context.Context, *datapb.UnsetIsImportingStateRequest) (*commonpb.Status, error) {
-		return merr.Success(), nil
-	}
-
-	t.Run("not healthy", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withAbnormalCode())
-		resp, err := c.ReportImport(ctx, &rootcoordpb.ImportResult{})
-		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-	})
-
-	t.Run("report complete import with task not found", func(t *testing.T) {
-		ctx := context.Background()
-		c := newTestCore(withHealthyCode())
-		c.importManager = newImportManager(ctx, mockKv, idAlloc, callImportServiceFn, callGetSegmentStates, nil, nil)
-		resp, err := c.ReportImport(ctx, &rootcoordpb.ImportResult{
-			TaskId: 101,
-			State:  commonpb.ImportState_ImportCompleted,
-		})
-		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-	})
-
-	testFunc := func(state commonpb.ImportState) {
-		ctx := context.Background()
-		c := newTestCore(
-			withHealthyCode(),
-			withValidIDAllocator(),
-			withMeta(meta),
-			withTtSynchronizer(ticker),
-			withDataCoord(dc))
-		c.broker = newServerBroker(c)
-		c.importManager = newImportManager(ctx, mockKv, idAlloc, callImportServiceFn, callGetSegmentStates, nil, callUnsetIsImportingState)
-		c.importManager.loadFromTaskStore(true)
-		c.importManager.sendOutTasks(ctx)
-
-		resp, err := c.ReportImport(ctx, &rootcoordpb.ImportResult{
-			TaskId: 100,
-			State:  state,
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-		// Change the state back.
-		err = c.importManager.setImportTaskState(100, commonpb.ImportState_ImportPending)
-		assert.NoError(t, err)
-	}
-
-	t.Run("report import started state", func(t *testing.T) {
-		testFunc(commonpb.ImportState_ImportStarted)
-	})
-
-	t.Run("report import persisted state", func(t *testing.T) {
-		testFunc(commonpb.ImportState_ImportPersisted)
-	})
-
-	t.Run("report import completed state", func(t *testing.T) {
-		testFunc(commonpb.ImportState_ImportCompleted)
-	})
-
-	t.Run("report import failed state", func(t *testing.T) {
-		testFunc(commonpb.ImportState_ImportFailed)
-	})
-}
-
 func TestCore_Rbac(t *testing.T) {
 	ctx := context.Background()
 	c := &Core{
@@ -1706,9 +1306,13 @@ func TestRootcoord_EnableActiveStandby(t *testing.T) {
 	// Need to reset global etcd to follow new path
 	kvfactory.CloseEtcdClient()
 	paramtable.Get().Save(Params.RootCoordCfg.EnableActiveStandby.Key, "true")
+	defer paramtable.Get().Reset(Params.RootCoordCfg.EnableActiveStandby.Key)
 	paramtable.Get().Save(Params.CommonCfg.RootCoordTimeTick.Key, fmt.Sprintf("rootcoord-time-tick-%d", randVal))
+	defer paramtable.Get().Reset(Params.CommonCfg.RootCoordTimeTick.Key)
 	paramtable.Get().Save(Params.CommonCfg.RootCoordStatistics.Key, fmt.Sprintf("rootcoord-statistics-%d", randVal))
+	defer paramtable.Get().Reset(Params.CommonCfg.RootCoordStatistics.Key)
 	paramtable.Get().Save(Params.CommonCfg.RootCoordDml.Key, fmt.Sprintf("rootcoord-dml-test-%d", randVal))
+	defer paramtable.Get().Reset(Params.CommonCfg.RootCoordDml.Key)
 
 	ctx := context.Background()
 	coreFactory := dependency.NewDefaultFactory(true)
@@ -1730,12 +1334,15 @@ func TestRootcoord_EnableActiveStandby(t *testing.T) {
 	err = core.Init()
 	assert.NoError(t, err)
 	assert.Equal(t, commonpb.StateCode_StandBy, core.GetStateCode())
-	err = core.Start()
-	assert.NoError(t, err)
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.NoError(t, err)
-	assert.Equal(t, commonpb.StateCode_Healthy, core.GetStateCode())
+	err = core.Start()
+	assert.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		return core.GetStateCode() == commonpb.StateCode_Healthy
+	}, time.Second*5, time.Millisecond*200)
 	resp, err := core.DescribeCollection(ctx, &milvuspb.DescribeCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_DescribeCollection,
@@ -1846,6 +1453,65 @@ func TestRootCoord_AlterCollection(t *testing.T) {
 }
 
 func TestRootCoord_CheckHealth(t *testing.T) {
+	getQueryCoordMetricsFunc := func(tt typeutil.Timestamp) (*milvuspb.GetMetricsResponse, error) {
+		clusterTopology := metricsinfo.QueryClusterTopology{
+			ConnectedNodes: []metricsinfo.QueryNodeInfos{
+				{
+					QuotaMetrics: &metricsinfo.QueryNodeQuotaMetrics{
+						Fgm: metricsinfo.FlowGraphMetric{
+							MinFlowGraphChannel: "ch1",
+							MinFlowGraphTt:      tt,
+							NumFlowGraph:        1,
+						},
+					},
+				},
+			},
+		}
+
+		resp, _ := metricsinfo.MarshalTopology(metricsinfo.QueryCoordTopology{Cluster: clusterTopology})
+		return &milvuspb.GetMetricsResponse{
+			Status:        merr.Success(),
+			Response:      resp,
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, 0),
+		}, nil
+	}
+
+	getDataCoordMetricsFunc := func(tt typeutil.Timestamp) (*milvuspb.GetMetricsResponse, error) {
+		clusterTopology := metricsinfo.DataClusterTopology{
+			ConnectedDataNodes: []metricsinfo.DataNodeInfos{
+				{
+					QuotaMetrics: &metricsinfo.DataNodeQuotaMetrics{
+						Fgm: metricsinfo.FlowGraphMetric{
+							MinFlowGraphChannel: "ch1",
+							MinFlowGraphTt:      tt,
+							NumFlowGraph:        1,
+						},
+					},
+				},
+			},
+		}
+
+		resp, _ := metricsinfo.MarshalTopology(metricsinfo.DataCoordTopology{Cluster: clusterTopology})
+		return &milvuspb.GetMetricsResponse{
+			Status:        merr.Success(),
+			Response:      resp,
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.DataCoordRole, 0),
+		}, nil
+	}
+
+	querynodeTT := tsoutil.ComposeTSByTime(time.Now().Add(-1*time.Minute), 0)
+	datanodeTT := tsoutil.ComposeTSByTime(time.Now().Add(-2*time.Minute), 0)
+
+	dcClient := mocks.NewMockDataCoordClient(t)
+	dcClient.EXPECT().GetMetrics(mock.Anything, mock.Anything).Return(getDataCoordMetricsFunc(datanodeTT))
+	qcClient := mocks.NewMockQueryCoordClient(t)
+	qcClient.EXPECT().GetMetrics(mock.Anything, mock.Anything).Return(getQueryCoordMetricsFunc(querynodeTT))
+
+	errDataCoordClient := mocks.NewMockDataCoordClient(t)
+	errDataCoordClient.EXPECT().GetMetrics(mock.Anything, mock.Anything).Return(nil, errors.New("error"))
+	errQueryCoordClient := mocks.NewMockQueryCoordClient(t)
+	errQueryCoordClient.EXPECT().GetMetrics(mock.Anything, mock.Anything).Return(nil, errors.New("error"))
+
 	t.Run("not healthy", func(t *testing.T) {
 		ctx := context.Background()
 		c := newTestCore(withAbnormalCode())
@@ -1855,10 +1521,12 @@ func TestRootCoord_CheckHealth(t *testing.T) {
 		assert.NotEmpty(t, resp.Reasons)
 	})
 
-	t.Run("proxy health check is ok", func(t *testing.T) {
-		c := newTestCore(withHealthyCode(),
-			withValidProxyManager())
+	t.Run("ok with disabled tt lag configuration", func(t *testing.T) {
+		v := Params.QuotaConfig.MaxTimeTickDelay.GetValue()
+		Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, "-1")
+		defer Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, v)
 
+		c := newTestCore(withHealthyCode(), withValidProxyManager())
 		ctx := context.Background()
 		resp, err := c.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
@@ -1866,15 +1534,111 @@ func TestRootCoord_CheckHealth(t *testing.T) {
 		assert.Empty(t, resp.Reasons)
 	})
 
-	t.Run("proxy health check is fail", func(t *testing.T) {
-		c := newTestCore(withHealthyCode(),
-			withInvalidProxyManager())
+	t.Run("proxy health check fail with invalid proxy", func(t *testing.T) {
+		v := Params.QuotaConfig.MaxTimeTickDelay.GetValue()
+		Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, "6000")
+		defer Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, v)
+
+		c := newTestCore(withHealthyCode(), withInvalidProxyManager(), withDataCoord(dcClient), withQueryCoord(qcClient))
 
 		ctx := context.Background()
 		resp, err := c.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, false, resp.IsHealthy)
 		assert.NotEmpty(t, resp.Reasons)
+	})
+
+	t.Run("proxy health check fail with get metrics error", func(t *testing.T) {
+		v := Params.QuotaConfig.MaxTimeTickDelay.GetValue()
+		Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, "6000")
+		defer Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, v)
+
+		{
+			c := newTestCore(withHealthyCode(),
+				withValidProxyManager(), withDataCoord(dcClient), withQueryCoord(errQueryCoordClient))
+
+			ctx := context.Background()
+			resp, err := c.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
+			assert.NoError(t, err)
+			assert.Equal(t, false, resp.IsHealthy)
+			assert.NotEmpty(t, resp.Reasons)
+		}
+
+		{
+			c := newTestCore(withHealthyCode(),
+				withValidProxyManager(), withDataCoord(errDataCoordClient), withQueryCoord(qcClient))
+
+			ctx := context.Background()
+			resp, err := c.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
+			assert.NoError(t, err)
+			assert.Equal(t, false, resp.IsHealthy)
+			assert.NotEmpty(t, resp.Reasons)
+		}
+	})
+
+	t.Run("ok with tt lag exceeded", func(t *testing.T) {
+		v := Params.QuotaConfig.MaxTimeTickDelay.GetValue()
+		Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, "90")
+		defer Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, v)
+
+		c := newTestCore(withHealthyCode(),
+			withValidProxyManager(), withDataCoord(dcClient), withQueryCoord(qcClient))
+		ctx := context.Background()
+		resp, err := c.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, false, resp.IsHealthy)
+		assert.NotEmpty(t, resp.Reasons)
+	})
+
+	t.Run("ok with tt lag checking", func(t *testing.T) {
+		v := Params.QuotaConfig.MaxTimeTickDelay.GetValue()
+		Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, "600")
+		defer Params.Save(Params.QuotaConfig.MaxTimeTickDelay.Key, v)
+
+		c := newTestCore(withHealthyCode(),
+			withValidProxyManager(), withDataCoord(dcClient), withQueryCoord(qcClient))
+		ctx := context.Background()
+		resp, err := c.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, true, resp.IsHealthy)
+		assert.Empty(t, resp.Reasons)
+	})
+}
+
+func TestRootCoord_DescribeDatabase(t *testing.T) {
+	t.Run("not healthy", func(t *testing.T) {
+		ctx := context.Background()
+		c := newTestCore(withAbnormalCode())
+		resp, err := c.DescribeDatabase(ctx, &rootcoordpb.DescribeDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Error(t, merr.CheckRPCCall(resp.GetStatus(), nil))
+	})
+
+	t.Run("add task failed", func(t *testing.T) {
+		ctx := context.Background()
+		c := newTestCore(withHealthyCode(),
+			withInvalidScheduler())
+		resp, err := c.DescribeDatabase(ctx, &rootcoordpb.DescribeDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Error(t, merr.CheckRPCCall(resp.GetStatus(), nil))
+	})
+
+	t.Run("execute task failed", func(t *testing.T) {
+		ctx := context.Background()
+		c := newTestCore(withHealthyCode(),
+			withTaskFailScheduler())
+		resp, err := c.DescribeDatabase(ctx, &rootcoordpb.DescribeDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Error(t, merr.CheckRPCCall(resp.GetStatus(), nil))
+	})
+
+	t.Run("run ok", func(t *testing.T) {
+		ctx := context.Background()
+		c := newTestCore(withHealthyCode(),
+			withValidScheduler())
+		resp, err := c.DescribeDatabase(ctx, &rootcoordpb.DescribeDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.NoError(t, merr.CheckRPCCall(resp.GetStatus(), nil))
 	})
 }
 
@@ -2050,6 +1814,39 @@ func TestRootCoord_RBACError(t *testing.T) {
 		}
 	})
 
+	t.Run("select grant success", func(t *testing.T) {
+		mockMeta := c.meta.(*mockMetaTable)
+		mockMeta.SelectRoleFunc = func(tenant string, entity *milvuspb.RoleEntity, includeUserInfo bool) ([]*milvuspb.RoleResult, error) {
+			return []*milvuspb.RoleResult{
+				{
+					Role: &milvuspb.RoleEntity{Name: "foo"},
+				},
+			}, nil
+		}
+		mockMeta.SelectGrantFunc = func(tenant string, entity *milvuspb.GrantEntity) ([]*milvuspb.GrantEntity, error) {
+			return []*milvuspb.GrantEntity{
+				{
+					Role: &milvuspb.RoleEntity{Name: "foo"},
+				},
+			}, merr.ErrIoKeyNotFound
+		}
+
+		{
+			resp, err := c.SelectGrant(ctx, &milvuspb.SelectGrantRequest{Entity: &milvuspb.GrantEntity{Role: &milvuspb.RoleEntity{Name: "foo"}, Object: &milvuspb.ObjectEntity{Name: "Collection"}, ObjectName: "fir"}})
+			assert.NoError(t, err)
+			assert.Equal(t, 1, len(resp.GetEntities()))
+			assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+		}
+
+		mockMeta.SelectRoleFunc = func(tenant string, entity *milvuspb.RoleEntity, includeUserInfo bool) ([]*milvuspb.RoleResult, error) {
+			return nil, errors.New("mock error")
+		}
+
+		mockMeta.SelectGrantFunc = func(tenant string, entity *milvuspb.GrantEntity) ([]*milvuspb.GrantEntity, error) {
+			return nil, errors.New("mock error")
+		}
+	})
+
 	t.Run("list policy failed", func(t *testing.T) {
 		resp, err := c.ListPolicy(ctx, &internalpb.ListPolicyRequest{})
 		assert.NoError(t, err)
@@ -2065,6 +1862,51 @@ func TestRootCoord_RBACError(t *testing.T) {
 		mockMeta.ListPolicyFunc = func(tenant string) ([]string, error) {
 			return []string{}, errors.New("mock error")
 		}
+	})
+}
+
+func TestRootCoord_BuiltinRoles(t *testing.T) {
+	roleDbAdmin := "db_admin"
+	paramtable.Init()
+	paramtable.Get().Save(paramtable.Get().RoleCfg.Enabled.Key, "true")
+	paramtable.Get().Save(paramtable.Get().RoleCfg.Roles.Key, `{"`+roleDbAdmin+`": {"privileges": [{"object_type": "Global", "object_name": "*", "privilege": "CreateCollection", "db_name": "*"}]}}`)
+	t.Run("init builtin roles success", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(), withInvalidMeta())
+		mockMeta := c.meta.(*mockMetaTable)
+		mockMeta.CreateRoleFunc = func(tenant string, entity *milvuspb.RoleEntity) error {
+			return nil
+		}
+		mockMeta.OperatePrivilegeFunc = func(tenant string, entity *milvuspb.GrantEntity, operateType milvuspb.OperatePrivilegeType) error {
+			return nil
+		}
+		err := c.initBuiltinRoles()
+		assert.Equal(t, nil, err)
+		assert.True(t, util.IsBuiltinRole(roleDbAdmin))
+		assert.False(t, util.IsBuiltinRole(util.RoleAdmin))
+		resp, err := c.DropRole(context.Background(), &milvuspb.DropRoleRequest{RoleName: roleDbAdmin})
+		assert.Equal(t, nil, err)
+		assert.Equal(t, int32(1401), resp.Code) // merr.ErrPrivilegeNotPermitted
+	})
+	t.Run("init builtin roles fail to create role", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(), withInvalidMeta())
+		mockMeta := c.meta.(*mockMetaTable)
+		mockMeta.CreateRoleFunc = func(tenant string, entity *milvuspb.RoleEntity) error {
+			return merr.ErrPrivilegeNotPermitted
+		}
+		err := c.initBuiltinRoles()
+		assert.Error(t, err)
+	})
+	t.Run("init builtin roles fail to operate privileg", func(t *testing.T) {
+		c := newTestCore(withHealthyCode(), withInvalidMeta())
+		mockMeta := c.meta.(*mockMetaTable)
+		mockMeta.CreateRoleFunc = func(tenant string, entity *milvuspb.RoleEntity) error {
+			return nil
+		}
+		mockMeta.OperatePrivilegeFunc = func(tenant string, entity *milvuspb.GrantEntity, operateType milvuspb.OperatePrivilegeType) error {
+			return merr.ErrPrivilegeNotPermitted
+		}
+		err := c.initBuiltinRoles()
+		assert.Error(t, err)
 	})
 }
 
@@ -2088,6 +1930,83 @@ func TestCore_Stop(t *testing.T) {
 	})
 }
 
+func TestCore_InitRBAC(t *testing.T) {
+	paramtable.Init()
+	t.Run("init default role and public role privilege", func(t *testing.T) {
+		meta := mockrootcoord.NewIMetaTable(t)
+		c := newTestCore(withHealthyCode(), withMeta(meta))
+		meta.EXPECT().CreateRole(mock.Anything, mock.Anything).Return(nil).Twice()
+		meta.EXPECT().OperatePrivilege(mock.Anything, mock.Anything, mock.Anything).Return(nil).Twice()
+
+		Params.Save(Params.RoleCfg.Enabled.Key, "false")
+		Params.Save(Params.ProxyCfg.EnablePublicPrivilege.Key, "true")
+
+		defer func() {
+			Params.Reset(Params.RoleCfg.Enabled.Key)
+			Params.Reset(Params.ProxyCfg.EnablePublicPrivilege.Key)
+		}()
+
+		err := c.initRbac()
+		assert.NoError(t, err)
+	})
+
+	t.Run("not init public role privilege and init default privilege", func(t *testing.T) {
+		builtinRoles := `{"db_admin": {"privileges": [{"object_type": "Global", "object_name": "*", "privilege": "CreateCollection", "db_name": "*"}]}}`
+		meta := mockrootcoord.NewIMetaTable(t)
+		c := newTestCore(withHealthyCode(), withMeta(meta))
+		meta.EXPECT().CreateRole(mock.Anything, mock.Anything).Return(nil).Times(3)
+		meta.EXPECT().OperatePrivilege(mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+
+		Params.Save(Params.RoleCfg.Enabled.Key, "true")
+		Params.Save(Params.RoleCfg.Roles.Key, builtinRoles)
+		Params.Save(Params.ProxyCfg.EnablePublicPrivilege.Key, "false")
+
+		defer func() {
+			Params.Reset(Params.RoleCfg.Enabled.Key)
+			Params.Reset(Params.RoleCfg.Roles.Key)
+			Params.Reset(Params.ProxyCfg.EnablePublicPrivilege.Key)
+		}()
+
+		err := c.initRbac()
+		assert.NoError(t, err)
+	})
+}
+
+func TestCore_BackupRBAC(t *testing.T) {
+	meta := mockrootcoord.NewIMetaTable(t)
+	c := newTestCore(withHealthyCode(), withMeta(meta))
+
+	meta.EXPECT().BackupRBAC(mock.Anything, mock.Anything).Return(&milvuspb.RBACMeta{}, nil)
+	resp, err := c.BackupRBAC(context.Background(), &milvuspb.BackupRBACMetaRequest{})
+	assert.NoError(t, err)
+	assert.True(t, merr.Ok(resp.GetStatus()))
+
+	meta.ExpectedCalls = nil
+	meta.EXPECT().BackupRBAC(mock.Anything, mock.Anything).Return(nil, errors.New("mock error"))
+	resp, err = c.BackupRBAC(context.Background(), &milvuspb.BackupRBACMetaRequest{})
+	assert.NoError(t, err)
+	assert.False(t, merr.Ok(resp.GetStatus()))
+}
+
+func TestCore_RestoreRBAC(t *testing.T) {
+	meta := mockrootcoord.NewIMetaTable(t)
+	c := newTestCore(withHealthyCode(), withMeta(meta))
+	mockProxyClientManager := proxyutil.NewMockProxyClientManager(t)
+	mockProxyClientManager.EXPECT().RefreshPolicyInfoCache(mock.Anything, mock.Anything).Return(nil)
+	c.proxyClientManager = mockProxyClientManager
+
+	meta.EXPECT().RestoreRBAC(mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	resp, err := c.RestoreRBAC(context.Background(), &milvuspb.RestoreRBACMetaRequest{})
+	assert.NoError(t, err)
+	assert.True(t, merr.Ok(resp))
+
+	meta.ExpectedCalls = nil
+	meta.EXPECT().RestoreRBAC(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("mock error"))
+	resp, err = c.RestoreRBAC(context.Background(), &milvuspb.RestoreRBACMetaRequest{})
+	assert.NoError(t, err)
+	assert.False(t, merr.Ok(resp))
+}
+
 type RootCoordSuite struct {
 	suite.Suite
 }
@@ -2097,7 +2016,7 @@ func (s *RootCoordSuite) TestRestore() {
 	gc := mockrootcoord.NewGarbageCollector(s.T())
 
 	finishCh := make(chan struct{}, 4)
-	gc.EXPECT().ReDropPartition(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Once().
+	gc.EXPECT().ReDropPartition(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Once().
 		Run(func(args mock.Arguments) {
 			finishCh <- struct{}{}
 		})

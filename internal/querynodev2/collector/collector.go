@@ -32,34 +32,14 @@ var Counter *counter
 
 func RateMetrics() []string {
 	return []string{
-		metricsinfo.NQPerSecond,
-		metricsinfo.SearchThroughput,
 		metricsinfo.InsertConsumeThroughput,
 		metricsinfo.DeleteConsumeThroughput,
 	}
 }
 
-func AverageMetrics() []string {
-	return []string{
-		metricsinfo.QueryQueueMetric,
-		metricsinfo.SearchQueueMetric,
-	}
-}
-
-func ConstructLabel(subs ...string) string {
-	label := ""
-	for id, sub := range subs {
-		label += sub
-		if id != len(subs)-1 {
-			label += "-"
-		}
-	}
-	return label
-}
-
 func init() {
 	var err error
-	Rate, err = ratelimitutil.NewRateCollector(ratelimitutil.DefaultWindow, ratelimitutil.DefaultGranularity)
+	Rate, err = ratelimitutil.NewRateCollector(ratelimitutil.DefaultWindow, ratelimitutil.DefaultGranularity, false)
 	if err != nil {
 		log.Fatal("failed to initialize querynode rate collector", zap.Error(err))
 	}
@@ -69,10 +49,5 @@ func init() {
 	// init rate Metric
 	for _, label := range RateMetrics() {
 		Rate.Register(label)
-	}
-	// init average metric
-
-	for _, label := range AverageMetrics() {
-		Average.Register(label)
 	}
 }

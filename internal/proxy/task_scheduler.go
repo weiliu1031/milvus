@@ -19,6 +19,7 @@ package proxy
 import (
 	"container/list"
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,10 +27,12 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/conc"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -170,15 +173,26 @@ func (queue *baseTaskQueue) Enqueue(t task) error {
 		return err
 	}
 
-	ts, err := queue.tsoAllocatorIns.AllocOne(t.TraceCtx())
-	if err != nil {
-		return err
+	var ts Timestamp
+	var id UniqueID
+	if t.CanSkipAllocTimestamp() {
+		ts = tsoutil.ComposeTS(time.Now().UnixMilli(), 0)
+		id, err = globalMetaCache.AllocID(t.TraceCtx())
+		if err != nil {
+			return err
+		}
+	} else {
+		ts, err = queue.tsoAllocatorIns.AllocOne(t.TraceCtx())
+		if err != nil {
+			return err
+		}
+		// we always use same msg id and ts for now.
+		id = UniqueID(ts)
 	}
 	t.SetTs(ts)
+	t.SetID(id)
 
-	// we always use same msg id and ts for now.
-	t.SetID(UniqueID(ts))
-
+	t.SetOnEnqueueTime()
 	return queue.addUnissuedTask(t)
 }
 
@@ -208,6 +222,7 @@ func newBaseTaskQueue(tsoAllocatorIns tsoAllocator) *baseTaskQueue {
 	}
 }
 
+// ddTaskQueue represents queue for DDL task such as createCollection/createPartition/dropCollection/dropPartition/hasCollection/hasPartition
 type ddTaskQueue struct {
 	*baseTaskQueue
 	lock sync.Mutex
@@ -218,6 +233,7 @@ type pChanStatInfo struct {
 	tsSet map[Timestamp]struct{}
 }
 
+// dmTaskQueue represents queue for DML task such as insert/delete/upsert
 type dmTaskQueue struct {
 	*baseTaskQueue
 
@@ -263,10 +279,10 @@ func (queue *dmTaskQueue) PopActiveTask(taskID UniqueID) task {
 		defer queue.statsLock.Unlock()
 
 		delete(queue.activeTasks, taskID)
-		log.Debug("Proxy dmTaskQueue popPChanStats", zap.Any("taskID", t.ID()))
+		log.Debug("Proxy dmTaskQueue popPChanStats", zap.Int64("taskID", t.ID()))
 		queue.popPChanStats(t)
 	} else {
-		log.Warn("Proxy task not in active task list!", zap.Any("taskID", taskID))
+		log.Warn("Proxy task not in active task list!", zap.Int64("taskID", taskID))
 	}
 	return t
 }
@@ -340,6 +356,7 @@ func (queue *dmTaskQueue) getPChanStatsInfo() (map[pChan]*pChanStatistics, error
 	return ret, nil
 }
 
+// dqTaskQueue represents queue for DQL task such as search/query
 type dqTaskQueue struct {
 	*baseTaskQueue
 }
@@ -440,6 +457,11 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 	}()
 	span.AddEvent("scheduler process PreExecute")
 
+	waitDuration := t.GetDurationInQueue()
+	metrics.ProxyReqInQueueLatency.
+		WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), t.Type().String()).
+		Observe(float64(waitDuration.Milliseconds()))
+
 	err := t.PreExecute(ctx)
 
 	defer func() {
@@ -461,7 +483,6 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 
 	span.AddEvent("scheduler process PostExecute")
 	err = t.PostExecute(ctx)
-
 	if err != nil {
 		span.RecordError(err)
 		log.Ctx(ctx).Warn("Failed to post-execute task: ", zap.Error(err))
@@ -503,7 +524,7 @@ func (sched *taskScheduler) controlLoop() {
 
 func (sched *taskScheduler) manipulationLoop() {
 	defer sched.wg.Done()
-
+	pool := conc.NewPool[struct{}](paramtable.Get().ProxyCfg.MaxTaskNum.GetAsInt())
 	for {
 		select {
 		case <-sched.ctx.Done():
@@ -511,7 +532,10 @@ func (sched *taskScheduler) manipulationLoop() {
 		case <-sched.dmQueue.utChan():
 			if !sched.dmQueue.utEmpty() {
 				t := sched.scheduleDmTask()
-				go sched.processTask(t, sched.dmQueue)
+				pool.Submit(func() (struct{}, error) {
+					sched.processTask(t, sched.dmQueue)
+					return struct{}{}, nil
+				})
 			}
 		}
 	}

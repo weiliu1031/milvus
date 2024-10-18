@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -19,10 +19,13 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/exprutil"
+	"github.com/milvus-io/milvus/internal/util/reduce"
 	typeutil2 "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -42,6 +45,7 @@ const (
 )
 
 type queryTask struct {
+	baseTask
 	Condition
 	*internalpb.RetrieveRequest
 
@@ -52,21 +56,30 @@ type queryTask struct {
 	ids            *schemapb.IDs
 	collectionName string
 	queryParams    *queryParams
-	schema         *schemapb.CollectionSchema
+	schema         *schemaInfo
 
-	userOutputFields []string
+	userOutputFields  []string
+	userDynamicFields []string
 
 	resultBuf *typeutil.ConcurrentSet[*internalpb.RetrieveResults]
 
 	plan             *planpb.PlanNode
 	partitionKeyMode bool
 	lb               LBPolicy
+	channelsMvcc     map[string]Timestamp
+	fastSkip         bool
+
+	reQuery              bool
+	allQueryCnt          int64
+	totalRelatedDataSize int64
+	mustUsePartitionKey  bool
 }
 
 type queryParams struct {
-	limit             int64
-	offset            int64
-	reduceStopForBest bool
+	limit      int64
+	offset     int64
+	reduceType reduce.IReduceType
+	isIterator bool
 }
 
 // translateToOutputFieldIDs translates output fields name to output fields id.
@@ -74,7 +87,7 @@ func translateToOutputFieldIDs(outputFields []string, schema *schemapb.Collectio
 	outputFieldIDs := make([]UniqueID, 0, len(outputFields)+1)
 	if len(outputFields) == 0 {
 		for _, field := range schema.Fields {
-			if field.FieldID >= common.StartOfUserFieldID && field.DataType != schemapb.DataType_FloatVector && field.DataType != schemapb.DataType_BinaryVector && field.DataType != schemapb.DataType_Float16Vector {
+			if field.FieldID >= common.StartOfUserFieldID && !typeutil.IsVectorType(field.DataType) {
 				outputFieldIDs = append(outputFieldIDs, field.FieldID)
 			}
 		}
@@ -131,6 +144,7 @@ func parseQueryParams(queryParamsPair []*commonpb.KeyValuePair) (*queryParams, e
 		limit             int64
 		offset            int64
 		reduceStopForBest bool
+		isIterator        bool
 		err               error
 	)
 	reduceStopForBestStr, err := funcutil.GetAttrByKeyFromRepeatedKV(ReduceStopForBestKey, queryParamsPair)
@@ -143,10 +157,29 @@ func parseQueryParams(queryParamsPair []*commonpb.KeyValuePair) (*queryParams, e
 		}
 	}
 
+	isIteratorStr, err := funcutil.GetAttrByKeyFromRepeatedKV(IteratorField, queryParamsPair)
+	// if reduce_stop_for_best is provided
+	if err == nil {
+		isIterator, err = strconv.ParseBool(isIteratorStr)
+		if err != nil {
+			return nil, merr.WrapErrParameterInvalid("true or false", isIteratorStr,
+				"value for iterator field is invalid")
+		}
+	}
+
+	reduceType := reduce.IReduceNoOrder
+	if isIterator {
+		if reduceStopForBest {
+			reduceType = reduce.IReduceInOrderForBest
+		} else {
+			reduceType = reduce.IReduceInOrder
+		}
+	}
+
 	limitStr, err := funcutil.GetAttrByKeyFromRepeatedKV(LimitKey, queryParamsPair)
 	// if limit is not provided
 	if err != nil {
-		return &queryParams{limit: typeutil.Unlimited, reduceStopForBest: reduceStopForBest}, nil
+		return &queryParams{limit: typeutil.Unlimited, reduceType: reduceType, isIterator: isIterator}, nil
 	}
 	limit, err = strconv.ParseInt(limitStr, 0, 64)
 	if err != nil {
@@ -168,9 +201,10 @@ func parseQueryParams(queryParamsPair []*commonpb.KeyValuePair) (*queryParams, e
 	}
 
 	return &queryParams{
-		limit:             limit,
-		offset:            offset,
-		reduceStopForBest: reduceStopForBest,
+		limit:      limit,
+		offset:     offset,
+		reduceType: reduceType,
+		isIterator: isIterator,
 	}, nil
 }
 
@@ -178,7 +212,7 @@ func matchCountRule(outputs []string) bool {
 	return len(outputs) == 1 && strings.ToLower(strings.TrimSpace(outputs[0])) == "count(*)"
 }
 
-func createCntPlan(expr string, schema *schemapb.CollectionSchema) (*planpb.PlanNode, error) {
+func createCntPlan(expr string, schemaHelper *typeutil.SchemaHelper) (*planpb.PlanNode, error) {
 	if expr == "" {
 		return &planpb.PlanNode{
 			Node: &planpb.PlanNode_Query{
@@ -190,9 +224,9 @@ func createCntPlan(expr string, schema *schemapb.CollectionSchema) (*planpb.Plan
 		}, nil
 	}
 
-	plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+	plan, err := planparserv2.CreateRetrievePlan(schemaHelper, expr)
 	if err != nil {
-		return nil, err
+		return nil, merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("failed to create query plan: %v", err))
 	}
 
 	plan.Node.(*planpb.PlanNode_Query).Query.IsCount = true
@@ -206,36 +240,66 @@ func (t *queryTask) createPlan(ctx context.Context) error {
 	cntMatch := matchCountRule(t.request.GetOutputFields())
 	if cntMatch {
 		var err error
-		t.plan, err = createCntPlan(t.request.GetExpr(), schema)
+		t.plan, err = createCntPlan(t.request.GetExpr(), schema.schemaHelper)
 		t.userOutputFields = []string{"count(*)"}
 		return err
 	}
 
 	var err error
 	if t.plan == nil {
-		t.plan, err = planparserv2.CreateRetrievePlan(schema, t.request.Expr)
+		t.plan, err = planparserv2.CreateRetrievePlan(schema.schemaHelper, t.request.Expr)
 		if err != nil {
-			return err
+			return merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("failed to create query plan: %v", err))
 		}
 	}
 
-	t.request.OutputFields, t.userOutputFields, err = translateOutputFields(t.request.OutputFields, schema, true)
+	t.request.OutputFields, t.userOutputFields, t.userDynamicFields, err = translateOutputFields(t.request.OutputFields, t.schema, true)
 	if err != nil {
 		return err
 	}
 
-	outputFieldIDs, err := translateToOutputFieldIDs(t.request.GetOutputFields(), schema)
+	outputFieldIDs, err := translateToOutputFieldIDs(t.request.GetOutputFields(), schema.CollectionSchema)
 	if err != nil {
 		return err
 	}
 	outputFieldIDs = append(outputFieldIDs, common.TimeStampField)
 	t.RetrieveRequest.OutputFieldsId = outputFieldIDs
 	t.plan.OutputFieldIds = outputFieldIDs
+	t.plan.DynamicFields = t.userDynamicFields
 	log.Ctx(ctx).Debug("translate output fields to field ids",
 		zap.Int64s("OutputFieldsID", t.OutputFieldsId),
 		zap.String("requestType", "query"))
 
 	return nil
+}
+
+func (t *queryTask) CanSkipAllocTimestamp() bool {
+	var consistencyLevel commonpb.ConsistencyLevel
+	useDefaultConsistency := t.request.GetUseDefaultConsistency()
+	if !useDefaultConsistency {
+		// legacy SDK & resultful behavior
+		if t.request.GetConsistencyLevel() == commonpb.ConsistencyLevel_Strong && t.request.GetGuaranteeTimestamp() > 0 {
+			return true
+		}
+		consistencyLevel = t.request.GetConsistencyLevel()
+	} else {
+		collID, err := globalMetaCache.GetCollectionID(context.Background(), t.request.GetDbName(), t.request.GetCollectionName())
+		if err != nil { // err is not nil if collection not exists
+			log.Warn("query task get collectionID failed, can't skip alloc timestamp",
+				zap.String("collectionName", t.request.GetCollectionName()), zap.Error(err))
+			return false
+		}
+
+		collectionInfo, err2 := globalMetaCache.GetCollectionInfo(context.Background(), t.request.GetDbName(), t.request.GetCollectionName(), collID)
+		if err2 != nil {
+			log.Warn("query task get collection info failed, can't skip alloc timestamp",
+				zap.String("collectionName", t.request.GetCollectionName()), zap.Error(err))
+			return false
+		}
+		consistencyLevel = collectionInfo.consistencyLevel
+	}
+
+	return consistencyLevel != commonpb.ConsistencyLevel_Strong
 }
 
 func (t *queryTask) PreExecute(ctx context.Context) error {
@@ -258,7 +322,7 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 	collID, err := globalMetaCache.GetCollectionID(ctx, t.request.GetDbName(), collectionName)
 	if err != nil {
 		log.Warn("Failed to get collection id.", zap.String("collectionName", collectionName), zap.Error(err))
-		return err
+		return merr.WrapErrAsInputErrorWhen(err, merr.ErrCollectionNotFound, merr.ErrDatabaseNotFound)
 	}
 	t.CollectionID = collID
 	log.Debug("Get collection ID by name", zap.Int64("collectionID", t.CollectionID))
@@ -269,7 +333,11 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 		return err
 	}
 	if t.partitionKeyMode && len(t.request.GetPartitionNames()) != 0 {
-		return errors.New("not support manually specifying the partition names if partition key mode is used")
+		return merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("not support manually specifying the partition names if partition key mode is used"))
+	}
+	if t.mustUsePartitionKey && !t.partitionKeyMode {
+		return merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("must use partition key in the query request " +
+			"because the mustUsePartitionKey config is true"))
 	}
 
 	for _, tag := range t.request.PartitionNames {
@@ -298,12 +366,19 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	t.RetrieveRequest.ReduceStopForBest = queryParams.reduceStopForBest
+	if queryParams.reduceType == reduce.IReduceInOrderForBest {
+		t.RetrieveRequest.ReduceStopForBest = true
+	}
+	t.RetrieveRequest.ReduceType = int32(queryParams.reduceType)
 
 	t.queryParams = queryParams
 	t.RetrieveRequest.Limit = queryParams.limit + queryParams.offset
 
-	schema, _ := globalMetaCache.GetCollectionSchema(ctx, t.request.GetDbName(), t.collectionName)
+	schema, err := globalMetaCache.GetCollectionSchema(ctx, t.request.GetDbName(), t.collectionName)
+	if err != nil {
+		log.Warn("get collection schema failed", zap.Error(err))
+		return err
+	}
 	t.schema = schema
 
 	if t.ids != nil {
@@ -322,31 +397,34 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 	t.plan.Node.(*planpb.PlanNode_Query).Query.Limit = t.RetrieveRequest.Limit
 
 	if planparserv2.IsAlwaysTruePlan(t.plan) && t.RetrieveRequest.Limit == typeutil.Unlimited {
-		return fmt.Errorf("empty expression should be used with limit")
+		return merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("empty expression should be used with limit"))
 	}
 
-	partitionNames := t.request.GetPartitionNames()
-	if t.partitionKeyMode {
-		expr, err := ParseExprFromPlan(t.plan)
+	// convert partition names only when requery is false
+	if !t.reQuery {
+		partitionNames := t.request.GetPartitionNames()
+		if t.partitionKeyMode {
+			expr, err := exprutil.ParseExprFromPlan(t.plan)
+			if err != nil {
+				return err
+			}
+			partitionKeys := exprutil.ParseKeys(expr, exprutil.PartitionKey)
+			hashedPartitionNames, err := assignPartitionKeys(ctx, t.request.GetDbName(), t.request.CollectionName, partitionKeys)
+			if err != nil {
+				return err
+			}
+
+			partitionNames = append(partitionNames, hashedPartitionNames...)
+		}
+		t.RetrieveRequest.PartitionIDs, err = getPartitionIDs(ctx, t.request.GetDbName(), t.request.CollectionName, partitionNames)
 		if err != nil {
 			return err
 		}
-		partitionKeys := ParsePartitionKeys(expr)
-		hashedPartitionNames, err := assignPartitionKeys(ctx, t.request.GetDbName(), t.request.CollectionName, partitionKeys)
-		if err != nil {
-			return err
-		}
-
-		partitionNames = append(partitionNames, hashedPartitionNames...)
-	}
-	t.RetrieveRequest.PartitionIDs, err = getPartitionIDs(ctx, t.request.GetDbName(), t.request.CollectionName, partitionNames)
-	if err != nil {
-		return err
 	}
 
 	// count with pagination
 	if t.plan.GetQuery().GetIsCount() && t.queryParams.limit != typeutil.Unlimited {
-		return fmt.Errorf("count entities with pagination is not allowed")
+		return merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("count entities with pagination is not allowed"))
 	}
 
 	t.RetrieveRequest.IsCount = t.plan.GetQuery().GetIsCount()
@@ -360,7 +438,6 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 		t.RetrieveRequest.Username = username
 	}
 
-	t.MvccTimestamp = t.BeginTs()
 	collectionInfo, err2 := globalMetaCache.GetCollectionInfo(ctx, t.request.GetDbName(), collectionName, t.CollectionID)
 	if err2 != nil {
 		log.Warn("Proxy::queryTask::PreExecute failed to GetCollectionInfo from cache",
@@ -386,6 +463,11 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 		}
 	}
 	t.GuaranteeTimestamp = guaranteeTs
+	// need modify mvccTs and guaranteeTs for iterator specially
+	if t.queryParams.isIterator && t.request.GetGuaranteeTimestamp() > 0 {
+		t.MvccTimestamp = t.request.GetGuaranteeTimestamp()
+		t.GuaranteeTimestamp = t.request.GetGuaranteeTimestamp()
+	}
 
 	deadline, ok := t.TraceCtx().Deadline()
 	if ok {
@@ -437,6 +519,8 @@ func (t *queryTask) PostExecute(ctx context.Context) error {
 	var err error
 
 	toReduceResults := make([]*internalpb.RetrieveResults, 0)
+	t.allQueryCnt = 0
+	t.totalRelatedDataSize = 0
 	select {
 	case <-t.TraceCtx().Done():
 		log.Warn("proxy", zap.Int64("Query: wait to finish failed, timeout!, msgID:", t.ID()))
@@ -445,6 +529,8 @@ func (t *queryTask) PostExecute(ctx context.Context) error {
 		log.Debug("all queries are finished or canceled")
 		t.resultBuf.Range(func(res *internalpb.RetrieveResults) bool {
 			toReduceResults = append(toReduceResults, res)
+			t.allQueryCnt += res.GetAllRetrieveCount()
+			t.totalRelatedDataSize += res.GetCostAggregation().GetTotalRelatedDataSize()
 			log.Debug("proxy receives one query result", zap.Int64("sourceID", res.GetBase().GetSourceID()))
 			return true
 		})
@@ -453,7 +539,7 @@ func (t *queryTask) PostExecute(ctx context.Context) error {
 	metrics.ProxyDecodeResultLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel).Observe(0.0)
 	tr.CtxRecord(ctx, "reduceResultStart")
 
-	reducer := createMilvusReducer(ctx, t.queryParams, t.RetrieveRequest, t.schema, t.plan, t.collectionName)
+	reducer := createMilvusReducer(ctx, t.queryParams, t.RetrieveRequest, t.schema.CollectionSchema, t.plan, t.collectionName)
 
 	t.result, err = reducer.Reduce(toReduceResults)
 	if err != nil {
@@ -463,23 +549,41 @@ func (t *queryTask) PostExecute(ctx context.Context) error {
 	t.result.OutputFields = t.userOutputFields
 	metrics.ProxyReduceResultLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel).Observe(float64(tr.RecordSpan().Milliseconds()))
 
+	if t.queryParams.isIterator && t.request.GetGuaranteeTimestamp() == 0 {
+		// first page for iteration, need to set up sessionTs for iterator
+		t.result.SessionTs = t.BeginTs()
+	}
 	log.Debug("Query PostExecute done")
 	return nil
 }
 
-func (t *queryTask) queryShard(ctx context.Context, nodeID int64, qn types.QueryNodeClient, channelIDs ...string) error {
+func (t *queryTask) queryShard(ctx context.Context, nodeID int64, qn types.QueryNodeClient, channel string) error {
+	needOverrideMvcc := false
+	mvccTs := t.MvccTimestamp
+	if len(t.channelsMvcc) > 0 {
+		mvccTs, needOverrideMvcc = t.channelsMvcc[channel]
+		// In fast mode, if there is no corresponding channel in channelsMvcc, quickly skip this query.
+		if !needOverrideMvcc && t.fastSkip {
+			return nil
+		}
+	}
+
 	retrieveReq := typeutil.Clone(t.RetrieveRequest)
 	retrieveReq.GetBase().TargetID = nodeID
+	if needOverrideMvcc && mvccTs > 0 {
+		retrieveReq.MvccTimestamp = mvccTs
+	}
+
 	req := &querypb.QueryRequest{
 		Req:         retrieveReq,
-		DmlChannels: channelIDs,
+		DmlChannels: []string{channel},
 		Scope:       querypb.DataScope_All,
 	}
 
 	log := log.Ctx(ctx).With(zap.Int64("collection", t.GetCollectionID()),
 		zap.Int64s("partitionIDs", t.GetPartitionIDs()),
 		zap.Int64("nodeID", nodeID),
-		zap.Strings("channels", channelIDs))
+		zap.String("channel", channel))
 
 	result, err := qn.Query(ctx, req)
 	if err != nil {
@@ -522,10 +626,8 @@ func IDs2Expr(fieldName string, ids *schemapb.IDs) string {
 func reduceRetrieveResults(ctx context.Context, retrieveResults []*internalpb.RetrieveResults, queryParams *queryParams) (*milvuspb.QueryResults, error) {
 	log.Ctx(ctx).Debug("reduceInternalRetrieveResults", zap.Int("len(retrieveResults)", len(retrieveResults)))
 	var (
-		ret = &milvuspb.QueryResults{}
-
-		skipDupCnt int64
-		loopEnd    int
+		ret     = &milvuspb.QueryResults{}
+		loopEnd int
 	)
 
 	validRetrieveResults := []*internalpb.RetrieveResults{}
@@ -542,47 +644,37 @@ func reduceRetrieveResults(ctx context.Context, retrieveResults []*internalpb.Re
 		return ret, nil
 	}
 
-	ret.FieldsData = make([]*schemapb.FieldData, len(validRetrieveResults[0].GetFieldsData()))
-	idSet := make(map[interface{}]struct{})
 	cursors := make([]int64, len(validRetrieveResults))
 
-	realLimit := typeutil.Unlimited
 	if queryParams != nil && queryParams.limit != typeutil.Unlimited {
-		realLimit = queryParams.limit
-		if !queryParams.reduceStopForBest {
+		// IReduceInOrderForBest will try to get as many results as possible
+		// so loopEnd in this case will be set to the sum of all results' size
+		// to get as many qualified results as possible
+		if reduce.ShouldUseInputLimit(queryParams.reduceType) {
 			loopEnd = int(queryParams.limit)
 		}
-		if queryParams.offset > 0 {
-			for i := int64(0); i < queryParams.offset; i++ {
-				sel := typeutil.SelectMinPK(validRetrieveResults, cursors, queryParams.reduceStopForBest, realLimit)
-				if sel == -1 {
-					return ret, nil
-				}
-				cursors[sel]++
-			}
-		}
-	}
-	reduceStopForBest := false
-	if queryParams != nil {
-		reduceStopForBest = queryParams.reduceStopForBest
 	}
 
+	// handle offset
+	if queryParams != nil && queryParams.offset > 0 {
+		for i := int64(0); i < queryParams.offset; i++ {
+			sel, drainOneResult := typeutil.SelectMinPK(validRetrieveResults, cursors)
+			if sel == -1 || (reduce.ShouldStopWhenDrained(queryParams.reduceType) && drainOneResult) {
+				return ret, nil
+			}
+			cursors[sel]++
+		}
+	}
+
+	ret.FieldsData = typeutil.PrepareResultFieldData(validRetrieveResults[0].GetFieldsData(), int64(loopEnd))
 	var retSize int64
 	maxOutputSize := paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64()
 	for j := 0; j < loopEnd; j++ {
-		sel := typeutil.SelectMinPK(validRetrieveResults, cursors, reduceStopForBest, realLimit)
-		if sel == -1 {
+		sel, drainOneResult := typeutil.SelectMinPK(validRetrieveResults, cursors)
+		if sel == -1 || (reduce.ShouldStopWhenDrained(queryParams.reduceType) && drainOneResult) {
 			break
 		}
-
-		pk := typeutil.GetPK(validRetrieveResults[sel].GetIds(), cursors[sel])
-		if _, ok := idSet[pk]; !ok {
-			retSize += typeutil.AppendFieldData(ret.FieldsData, validRetrieveResults[sel].GetFieldsData(), cursors[sel])
-			idSet[pk] = struct{}{}
-		} else {
-			// primary keys duplicate
-			skipDupCnt++
-		}
+		retSize += typeutil.AppendFieldData(ret.FieldsData, validRetrieveResults[sel].GetFieldsData(), cursors[sel])
 
 		// limit retrieve result to avoid oom
 		if retSize > maxOutputSize {
@@ -590,10 +682,6 @@ func reduceRetrieveResults(ctx context.Context, retrieveResults []*internalpb.Re
 		}
 
 		cursors[sel]++
-	}
-
-	if skipDupCnt > 0 {
-		log.Ctx(ctx).Debug("skip duplicated query result while reducing QueryResults", zap.Int64("count", skipDupCnt))
 	}
 
 	return ret, nil
@@ -643,10 +731,17 @@ func (t *queryTask) EndTs() Timestamp {
 }
 
 func (t *queryTask) SetTs(ts Timestamp) {
+	if t.reQuery && t.Base.Timestamp != 0 {
+		return
+	}
 	t.Base.Timestamp = ts
 }
 
 func (t *queryTask) OnEnqueue() error {
+	if t.Base == nil {
+		t.Base = commonpbutil.NewMsgBase()
+	}
 	t.Base.MsgType = commonpb.MsgType_Retrieve
+	t.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }

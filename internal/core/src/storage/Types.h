@@ -64,6 +64,7 @@ struct FieldDataMeta {
     int64_t partition_id;
     int64_t segment_id;
     int64_t field_id;
+    proto::schema::FieldSchema field_schema;
 };
 
 enum CodecType {
@@ -96,9 +97,12 @@ struct StorageConfig {
     std::string log_level = "warn";
     std::string region = "";
     bool useSSL = false;
+    std::string sslCACert = "";
     bool useIAM = false;
     bool useVirtualHost = false;
     int64_t requestTimeoutMs = 3000;
+    bool gcp_native_without_auth = false;
+    std::string gcp_credential_json = "";
 
     std::string
     ToString() const {
@@ -108,10 +112,54 @@ struct StorageConfig {
            << ", cloud_provider=" << cloud_provider
            << ", iam_endpoint=" << iam_endpoint << ", log_level=" << log_level
            << ", region=" << region << ", useSSL=" << std::boolalpha << useSSL
+           << ", sslCACert=" << sslCACert.size()  // only print cert length
            << ", useIAM=" << std::boolalpha << useIAM
            << ", useVirtualHost=" << std::boolalpha << useVirtualHost
-           << ", requestTimeoutMs=" << requestTimeoutMs << "]";
+           << ", requestTimeoutMs=" << requestTimeoutMs
+           << ", gcp_native_without_auth=" << std::boolalpha
+           << gcp_native_without_auth << "]";
 
+        return ss.str();
+    }
+};
+
+struct MmapConfig {
+    std::string cache_read_ahead_policy;
+    std::string mmap_path;
+    uint64_t disk_limit;
+    uint64_t fix_file_size;
+    bool growing_enable_mmap;
+    bool scalar_index_enable_mmap;
+    bool
+    GetEnableGrowingMmap() const {
+        return growing_enable_mmap;
+    }
+    void
+    SetEnableGrowingMmap(bool flag) {
+        this->growing_enable_mmap = flag;
+    }
+    bool
+    GetScalarIndexEnableMmap() const {
+        return scalar_index_enable_mmap;
+    }
+    void
+    SetScalarIndexEnableMmap(bool flag) {
+        this->scalar_index_enable_mmap = flag;
+    }
+    std::string
+    GetMmapPath() {
+        return mmap_path;
+    }
+    std::string
+    ToString() const {
+        std::stringstream ss;
+        ss << "[cache_read_ahead_policy=" << cache_read_ahead_policy
+           << ", mmap_path=" << mmap_path
+           << ", disk_limit=" << disk_limit / (1024 * 1024) << "MB"
+           << ", fix_file_size=" << fix_file_size / (1024 * 1024) << "MB"
+           << ", growing_enable_mmap=" << std::boolalpha << growing_enable_mmap
+           << ", scalar_index_enable_mmap=" << std::boolalpha
+           << scalar_index_enable_mmap << "]";
         return ss.str();
     }
 };

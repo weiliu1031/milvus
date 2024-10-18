@@ -25,17 +25,21 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/parser/planparserv2"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/hookutil"
 	typeutil2 "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -44,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/contextutil"
 	"github.com/milvus-io/milvus/pkg/util/crypto"
+	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metric"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -56,17 +61,22 @@ const (
 	boundedTS = 2
 
 	// enableMultipleVectorFields indicates whether to enable multiple vector fields.
-	enableMultipleVectorFields = false
+	enableMultipleVectorFields = true
 
 	defaultMaxVarCharLength = 65535
 
 	defaultMaxArrayCapacity = 4096
 
+	defaultMaxSearchRequest = 1024
+
 	// DefaultArithmeticIndexType name of default index type for scalar field
-	DefaultArithmeticIndexType = "STL_SORT"
+	DefaultArithmeticIndexType = indexparamcheck.IndexINVERTED
 
 	// DefaultStringIndexType name of default index type for varChar/string field
-	DefaultStringIndexType = "Trie"
+	DefaultStringIndexType = indexparamcheck.IndexINVERTED
+
+	defaultRRFParamsValue = 60
+	maxRRFParamsValue     = 16384
 )
 
 var logger = log.L().WithOptions(zap.Fields(zap.String("role", typeutil.ProxyRole)))
@@ -87,12 +97,6 @@ func isNumber(c uint8) bool {
 	return true
 }
 
-func isVectorType(dataType schemapb.DataType) bool {
-	return dataType == schemapb.DataType_FloatVector ||
-		dataType == schemapb.DataType_BinaryVector ||
-		dataType == schemapb.DataType_Float16Vector
-}
-
 func validateMaxQueryResultWindow(offset int64, limit int64) error {
 	if offset < 0 {
 		return fmt.Errorf("%s [%d] is invalid, should be gte than 0", OffsetKey, offset)
@@ -109,10 +113,10 @@ func validateMaxQueryResultWindow(offset int64, limit int64) error {
 	return nil
 }
 
-func validateTopKLimit(topK int64) error {
+func validateLimit(limit int64) error {
 	topKLimit := Params.QuotaConfig.TopKLimit.GetAsInt64()
-	if topK <= 0 || topK > topKLimit {
-		return fmt.Errorf("top k should be in range [1, %d], but got %d", topKLimit, topK)
+	if limit <= 0 || limit > topKLimit {
+		return fmt.Errorf("it should be in range [1, %d], but got %d", topKLimit, limit)
 	}
 	return nil
 }
@@ -220,7 +224,6 @@ func validatePartitionTag(partitionTag string, strictCheck bool) error {
 		msg := invalidMsg + "Partition name should not be empty."
 		return errors.New(msg)
 	}
-
 	if len(partitionTag) > Params.ProxyCfg.MaxNameLength.GetAsInt() {
 		msg := invalidMsg + "The length of a partition name must be less than " + Params.ProxyCfg.MaxNameLength.GetValue() + " characters."
 		return errors.New(msg)
@@ -246,16 +249,6 @@ func validatePartitionTag(partitionTag string, strictCheck bool) error {
 	return nil
 }
 
-func validateStringIndexType(indexType string) bool {
-	// compatible with the index type marisa-trie of attu versions prior to 2.3.0
-	return indexType == DefaultStringIndexType || indexType == "marisa-trie"
-}
-
-func validateArithmeticIndexType(indexType string) bool {
-	// compatible with the index type Asceneding of attu versions prior to 2.3.0
-	return indexType == DefaultArithmeticIndexType || indexType == "Asceneding"
-}
-
 func validateFieldName(fieldName string) error {
 	fieldName = strings.TrimSpace(fieldName)
 
@@ -279,9 +272,13 @@ func validateFieldName(fieldName string) error {
 	for i := 1; i < fieldNameSize; i++ {
 		c := fieldName[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
-			msg := invalidMsg + "Field name cannot only contain numbers, letters, and underscores."
+			msg := invalidMsg + "Field name can only contain numbers, letters, and underscores."
 			return merr.WrapErrFieldNameInvalid(fieldName, msg)
 		}
+	}
+	if _, ok := common.FieldNameKeywords[fieldName]; ok {
+		msg := invalidMsg + fmt.Sprintf("%s is keyword in milvus.", fieldName)
+		return merr.WrapErrFieldNameInvalid(fieldName, msg)
 	}
 	return nil
 }
@@ -300,15 +297,31 @@ func validateDimension(field *schemapb.FieldSchema) error {
 			break
 		}
 	}
+	if typeutil.IsSparseFloatVectorType(field.DataType) {
+		if exist {
+			return fmt.Errorf("dim should not be specified for sparse vector field %s(%d)", field.Name, field.FieldID)
+		}
+		return nil
+	}
 	if !exist {
 		return errors.New("dimension is not defined in field type params, check type param `dim` for vector field")
 	}
 
-	if dim <= 0 || dim > Params.ProxyCfg.MaxDimension.GetAsInt64() {
-		return fmt.Errorf("invalid dimension: %d. should be in range 1 ~ %d", dim, Params.ProxyCfg.MaxDimension.GetAsInt())
+	if dim <= 1 {
+		return fmt.Errorf("invalid dimension: %d. should be in range 2 ~ %d", dim, Params.ProxyCfg.MaxDimension.GetAsInt())
 	}
-	if field.DataType == schemapb.DataType_BinaryVector && dim%8 != 0 {
-		return fmt.Errorf("invalid dimension: %d. should be multiple of 8. ", dim)
+
+	if typeutil.IsFloatVectorType(field.DataType) {
+		if dim > Params.ProxyCfg.MaxDimension.GetAsInt64() {
+			return fmt.Errorf("invalid dimension: %d. float vector dimension should be in range 2 ~ %d", dim, Params.ProxyCfg.MaxDimension.GetAsInt())
+		}
+	} else {
+		if dim%8 != 0 {
+			return fmt.Errorf("invalid dimension: %d. binary vector dimension should be multiple of 8. ", dim)
+		}
+		if dim > Params.ProxyCfg.MaxDimension.GetAsInt64()*8 {
+			return fmt.Errorf("invalid dimension: %d. binary vector dimension should be in range 2 ~ %d", dim, Params.ProxyCfg.MaxDimension.GetAsInt()*8)
+		}
 	}
 	return nil
 }
@@ -362,7 +375,7 @@ func validateMaxCapacityPerRow(collectionName string, field *schemapb.FieldSchem
 }
 
 func validateVectorFieldMetricType(field *schemapb.FieldSchema) error {
-	if !isVectorType(field.DataType) {
+	if !typeutil.IsVectorType(field.DataType) {
 		return nil
 	}
 	for _, params := range field.IndexParams {
@@ -492,7 +505,7 @@ func isVector(dataType schemapb.DataType) (bool, error) {
 		schemapb.DataType_Float, schemapb.DataType_Double:
 		return false, nil
 
-	case schemapb.DataType_FloatVector, schemapb.DataType_BinaryVector, schemapb.DataType_Float16Vector:
+	case schemapb.DataType_FloatVector, schemapb.DataType_BinaryVector, schemapb.DataType_Float16Vector, schemapb.DataType_BFloat16Vector, schemapb.DataType_SparseFloatVector:
 		return true, nil
 	}
 
@@ -503,7 +516,7 @@ func validateMetricType(dataType schemapb.DataType, metricTypeStrRaw string) err
 	metricTypeStr := strings.ToUpper(metricTypeStrRaw)
 	switch metricTypeStr {
 	case metric.L2, metric.IP, metric.COSINE:
-		if dataType == schemapb.DataType_FloatVector || dataType == schemapb.DataType_Float16Vector {
+		if typeutil.IsFloatVectorType(dataType) {
 			return nil
 		}
 	case metric.JACCARD, metric.HAMMING, metric.SUBSTRUCTURE, metric.SUPERSTRUCTURE:
@@ -564,13 +577,15 @@ func validateSchema(coll *schemapb.CollectionSchema) error {
 			if err2 != nil {
 				return err2
 			}
-			dimStr, ok := typeKv[common.DimKey]
-			if !ok {
-				return fmt.Errorf("dim not found in type_params for vector field %s(%d)", field.Name, field.FieldID)
-			}
-			dim, err := strconv.Atoi(dimStr)
-			if err != nil || dim < 0 {
-				return fmt.Errorf("invalid dim; %s", dimStr)
+			if !typeutil.IsSparseFloatVectorType(field.DataType) {
+				dimStr, ok := typeKv[common.DimKey]
+				if !ok {
+					return fmt.Errorf("dim not found in type_params for vector field %s(%d)", field.Name, field.FieldID)
+				}
+				dim, err := strconv.Atoi(dimStr)
+				if err != nil || dim < 0 {
+					return fmt.Errorf("invalid dim; %s", dimStr)
+				}
 			}
 
 			metricTypeStr, ok := indexKv[common.MetricTypeKey]
@@ -599,6 +614,148 @@ func validateSchema(coll *schemapb.CollectionSchema) error {
 	return nil
 }
 
+func validateFunction(coll *schemapb.CollectionSchema) error {
+	nameMap := lo.SliceToMap(coll.GetFields(), func(field *schemapb.FieldSchema) (string, *schemapb.FieldSchema) {
+		return field.GetName(), field
+	})
+	usedOutputField := typeutil.NewSet[string]()
+	usedFunctionName := typeutil.NewSet[string]()
+
+	for _, function := range coll.GetFunctions() {
+		if err := checkFunctionBasicParams(function); err != nil {
+			return err
+		}
+
+		if usedFunctionName.Contain(function.GetName()) {
+			return fmt.Errorf("duplicate function name: %s", function.GetName())
+		}
+
+		usedFunctionName.Insert(function.GetName())
+		inputFields := []*schemapb.FieldSchema{}
+		for _, name := range function.GetInputFieldNames() {
+			inputField, ok := nameMap[name]
+			if !ok {
+				return fmt.Errorf("function input field not found: %s", name)
+			}
+			if inputField.GetNullable() {
+				return fmt.Errorf("function input field cannot be nullable: function %s, field %s", function.GetName(), inputField.GetName())
+			}
+			inputFields = append(inputFields, inputField)
+		}
+
+		if err := checkFunctionInputField(function, inputFields); err != nil {
+			return err
+		}
+
+		outputFields := make([]*schemapb.FieldSchema, len(function.GetOutputFieldNames()))
+		for i, name := range function.GetOutputFieldNames() {
+			outputField, ok := nameMap[name]
+			if !ok {
+				return fmt.Errorf("function output field not found: %s", name)
+			}
+
+			if outputField.GetIsPrimaryKey() {
+				return fmt.Errorf("function output field cannot be primary key: function %s, field %s", function.GetName(), outputField.GetName())
+			}
+
+			if outputField.GetIsPartitionKey() || outputField.GetIsClusteringKey() {
+				return fmt.Errorf("function output field cannot be partition key or clustering key: function %s, field %s", function.GetName(), outputField.GetName())
+			}
+
+			if outputField.GetNullable() {
+				return fmt.Errorf("function output field cannot be nullable: function %s, field %s", function.GetName(), outputField.GetName())
+			}
+
+			outputField.IsFunctionOutput = true
+			outputFields[i] = outputField
+			if usedOutputField.Contain(name) {
+				return fmt.Errorf("duplicate function output field: function %s, field %s", function.GetName(), name)
+			}
+			usedOutputField.Insert(name)
+		}
+
+		if err := checkFunctionOutputField(function, outputFields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkFunctionOutputField(function *schemapb.FunctionSchema, fields []*schemapb.FieldSchema) error {
+	switch function.GetType() {
+	case schemapb.FunctionType_BM25:
+		if len(fields) != 1 {
+			return fmt.Errorf("BM25 function only need 1 output field, but got %d", len(fields))
+		}
+
+		if !typeutil.IsSparseFloatVectorType(fields[0].GetDataType()) {
+			return fmt.Errorf("BM25 function output field must be a SparseFloatVector field, but got %s", fields[0].DataType.String())
+		}
+	default:
+		return fmt.Errorf("check output field for unknown function type")
+	}
+	return nil
+}
+
+func checkFunctionInputField(function *schemapb.FunctionSchema, fields []*schemapb.FieldSchema) error {
+	switch function.GetType() {
+	case schemapb.FunctionType_BM25:
+		if len(fields) != 1 || fields[0].DataType != schemapb.DataType_VarChar {
+			return fmt.Errorf("BM25 function input field must be a VARCHAR field, got %d field with type %s",
+				len(fields), fields[0].DataType.String())
+		}
+		h := typeutil.CreateFieldSchemaHelper(fields[0])
+		if !h.EnableTokenizer() {
+			return fmt.Errorf("BM25 function input field must set enable_tokenizer to true")
+		}
+
+	default:
+		return fmt.Errorf("check input field with unknown function type")
+	}
+	return nil
+}
+
+func checkFunctionBasicParams(function *schemapb.FunctionSchema) error {
+	if function.GetName() == "" {
+		return fmt.Errorf("function name cannot be empty")
+	}
+	if len(function.GetInputFieldNames()) == 0 {
+		return fmt.Errorf("function input field names cannot be empty, function: %s", function.GetName())
+	}
+	if len(function.GetOutputFieldNames()) == 0 {
+		return fmt.Errorf("function output field names cannot be empty, function: %s", function.GetName())
+	}
+	for _, input := range function.GetInputFieldNames() {
+		if input == "" {
+			return fmt.Errorf("function input field name cannot be empty string, function: %s", function.GetName())
+		}
+		// if input occurs more than once, error
+		if lo.Count(function.GetInputFieldNames(), input) > 1 {
+			return fmt.Errorf("each function input field should be used exactly once in the same function, function: %s, input field: %s", function.GetName(), input)
+		}
+	}
+	for _, output := range function.GetOutputFieldNames() {
+		if output == "" {
+			return fmt.Errorf("function output field name cannot be empty string, function: %s", function.GetName())
+		}
+		if lo.Count(function.GetInputFieldNames(), output) > 0 {
+			return fmt.Errorf("a single field cannot be both input and output in the same function, function: %s, field: %s", function.GetName(), output)
+		}
+		if lo.Count(function.GetOutputFieldNames(), output) > 1 {
+			return fmt.Errorf("each function output field should be used exactly once in the same function, function: %s, output field: %s", function.GetName(), output)
+		}
+	}
+	switch function.GetType() {
+	case schemapb.FunctionType_BM25:
+		if len(function.GetParams()) != 0 {
+			return fmt.Errorf("BM25 function accepts no params")
+		}
+	default:
+		return fmt.Errorf("check function params with unknown function type")
+	}
+	return nil
+}
+
 // validateMultipleVectorFields check if schema has multiple vector fields.
 func validateMultipleVectorFields(schema *schemapb.CollectionSchema) error {
 	vecExist := false
@@ -607,7 +764,7 @@ func validateMultipleVectorFields(schema *schemapb.CollectionSchema) error {
 	for i := range schema.Fields {
 		name := schema.Fields[i].Name
 		dType := schema.Fields[i].DataType
-		isVec := dType == schemapb.DataType_BinaryVector || dType == schemapb.DataType_FloatVector || dType == schemapb.DataType_Float16Vector
+		isVec := typeutil.IsVectorType(dType)
 		if isVec && vecExist && !enableMultipleVectorFields {
 			return fmt.Errorf(
 				"multiple vector fields is not supported, fields name: %s, %s",
@@ -618,6 +775,41 @@ func validateMultipleVectorFields(schema *schemapb.CollectionSchema) error {
 			vecExist = true
 			vecName = name
 		}
+	}
+
+	return nil
+}
+
+func validateLoadFieldsList(schema *schemapb.CollectionSchema) error {
+	var vectorCnt int
+	for _, field := range schema.Fields {
+		shouldLoad, err := common.ShouldFieldBeLoaded(field.GetTypeParams())
+		if err != nil {
+			return err
+		}
+		// shoud load field, skip other check
+		if shouldLoad {
+			if typeutil.IsVectorType(field.GetDataType()) {
+				vectorCnt++
+			}
+			continue
+		}
+
+		if field.IsPrimaryKey {
+			return merr.WrapErrParameterInvalidMsg("Primary key field %s cannot skip loading", field.GetName())
+		}
+
+		if field.IsPartitionKey {
+			return merr.WrapErrParameterInvalidMsg("Partition Key field %s cannot skip loading", field.GetName())
+		}
+
+		if field.IsClusteringKey {
+			return merr.WrapErrParameterInvalidMsg("Clustering Key field %s cannot skip loading", field.GetName())
+		}
+	}
+
+	if vectorCnt == 0 {
+		return merr.WrapErrParameterInvalidMsg("cannot config all vector field(s) skip loading")
 	}
 
 	return nil
@@ -639,10 +831,10 @@ func parsePrimaryFieldData2IDs(fieldData *schemapb.FieldData) (*schemapb.IDs, er
 				StrId: scalarField.GetStringData(),
 			}
 		default:
-			return nil, errors.New("currently only support DataType Int64 or VarChar as PrimaryField")
+			return nil, merr.WrapErrParameterInvalidMsg("currently only support DataType Int64 or VarChar as PrimaryField")
 		}
 	default:
-		return nil, errors.New("currently not support vector field as PrimaryField")
+		return nil, merr.WrapErrParameterInvalidMsg("currently not support vector field as PrimaryField")
 	}
 
 	return primaryData, nil
@@ -667,15 +859,15 @@ func autoGenPrimaryFieldData(fieldSchema *schemapb.FieldSchema, data interface{}
 				},
 			}
 		case schemapb.DataType_VarChar:
-			strIds := make([]string, len(data))
+			strIDs := make([]string, len(data))
 			for i, v := range data {
-				strIds[i] = strconv.FormatInt(v, 10)
+				strIDs[i] = strconv.FormatInt(v, 10)
 			}
 			fieldData.Field = &schemapb.FieldData_Scalars{
 				Scalars: &schemapb.ScalarField{
 					Data: &schemapb.ScalarField_StringData{
 						StringData: &schemapb.StringArray{
-							Data: strIds,
+							Data: strIDs,
 						},
 					},
 				},
@@ -707,21 +899,37 @@ func autoGenDynamicFieldData(data [][]byte) *schemapb.FieldData {
 	}
 }
 
-// fillFieldIDBySchema set fieldID to fieldData according FieldSchemas
-func fillFieldIDBySchema(columns []*schemapb.FieldData, schema *schemapb.CollectionSchema) error {
-	if len(columns) != len(schema.GetFields()) {
-		return fmt.Errorf("len(columns) mismatch the len(fields), len(columns): %d, len(fields): %d",
-			len(columns), len(schema.GetFields()))
-	}
+// fillFieldPropertiesBySchema set fieldID to fieldData according FieldSchemas
+func fillFieldPropertiesBySchema(columns []*schemapb.FieldData, schema *schemapb.CollectionSchema) error {
 	fieldName2Schema := make(map[string]*schemapb.FieldSchema)
+
+	expectColumnNum := 0
 	for _, field := range schema.GetFields() {
 		fieldName2Schema[field.Name] = field
+		if !field.GetIsFunctionOutput() {
+			expectColumnNum++
+		}
+	}
+
+	if len(columns) != expectColumnNum {
+		return fmt.Errorf("len(columns) mismatch the expectColumnNum, expectColumnNum: %d, len(columns): %d",
+			expectColumnNum, len(columns))
 	}
 
 	for _, fieldData := range columns {
 		if fieldSchema, ok := fieldName2Schema[fieldData.FieldName]; ok {
 			fieldData.FieldId = fieldSchema.FieldID
 			fieldData.Type = fieldSchema.DataType
+
+			// Set the ElementType because it may not be set in the insert request.
+			if fieldData.Type == schemapb.DataType_Array {
+				fd, ok := fieldData.Field.(*schemapb.FieldData_Scalars)
+				if !ok {
+					return fmt.Errorf("field convert FieldData_Scalars fail in fieldData, fieldName: %s,"+
+						" collectionName:%s", fieldData.FieldName, schema.Name)
+				}
+				fd.Scalars.GetArrayData().ElementType = fieldSchema.ElementType
+			}
 		} else {
 			return fmt.Errorf("fieldName %v not exist in collection schema", fieldData.FieldName)
 		}
@@ -743,7 +951,7 @@ func ValidateUsername(username string) error {
 
 	firstChar := username[0]
 	if !isAlpha(firstChar) {
-		return merr.WrapErrParameterInvalidMsg("invalid user name %s, the first character must be a letter, but got %s", username, firstChar)
+		return merr.WrapErrParameterInvalidMsg("invalid user name %s, the first character must be a letter, but got %s", username, string(firstChar))
 	}
 
 	usernameSize := len(username)
@@ -863,25 +1071,12 @@ func ValidatePrivilege(entity string) error {
 }
 
 func GetCurUserFromContext(ctx context.Context) (string, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", fmt.Errorf("fail to get md from the context")
-	}
-	authorization, ok := md[strings.ToLower(util.HeaderAuthorize)]
-	if !ok || len(authorization) < 1 {
-		return "", fmt.Errorf("fail to get authorization from the md, authorize:[%s]", util.HeaderAuthorize)
-	}
-	token := authorization[0]
-	rawToken, err := crypto.Base64Decode(token)
-	if err != nil {
-		return "", fmt.Errorf("fail to decode the token, token: %s", token)
-	}
-	secrets := strings.SplitN(rawToken, util.CredentialSeperator, 2)
-	if len(secrets) < 2 {
-		return "", fmt.Errorf("fail to get user info from the raw token, raw token: %s", rawToken)
-	}
-	username := secrets[0]
-	return username, nil
+	return contextutil.GetCurUserFromContext(ctx)
+}
+
+func GetCurUserFromContextOrDefault(ctx context.Context) string {
+	username, _ := GetCurUserFromContext(ctx)
+	return username
 }
 
 func GetCurDBNameFromContextOrDefault(ctx context.Context) string {
@@ -897,11 +1092,25 @@ func GetCurDBNameFromContextOrDefault(ctx context.Context) string {
 }
 
 func NewContextWithMetadata(ctx context.Context, username string, dbName string) context.Context {
+	dbKey := strings.ToLower(util.HeaderDBName)
+	if username == "" {
+		return contextutil.AppendToIncomingContext(ctx, dbKey, dbName)
+	}
 	originValue := fmt.Sprintf("%s%s%s", username, util.CredentialSeperator, username)
 	authKey := strings.ToLower(util.HeaderAuthorize)
 	authValue := crypto.Base64Encode(originValue)
-	dbKey := strings.ToLower(util.HeaderDBName)
 	return contextutil.AppendToIncomingContext(ctx, authKey, authValue, dbKey, dbName)
+}
+
+func AppendUserInfoForRPC(ctx context.Context) context.Context {
+	curUser, _ := GetCurUserFromContext(ctx)
+	if curUser != "" {
+		originValue := fmt.Sprintf("%s%s%s", curUser, util.CredentialSeperator, curUser)
+		authKey := strings.ToLower(util.HeaderAuthorize)
+		authValue := crypto.Base64Encode(originValue)
+		ctx = metadata.AppendToOutgoingContext(ctx, authKey, authValue)
+	}
+	return ctx
 }
 
 func GetRole(username string) ([]string, error) {
@@ -916,9 +1125,7 @@ func PasswordVerify(ctx context.Context, username, rawPwd string) bool {
 }
 
 func VerifyAPIKey(rawToken string) (string, error) {
-	if hoo == nil {
-		return "", merr.WrapErrServiceInternal("internal: Milvus Proxy is not ready yet. please wait")
-	}
+	hoo := hookutil.GetHook()
 	user, err := hoo.VerifyAPIKey(rawToken)
 	if err != nil {
 		log.Warn("fail to verify apikey", zap.String("api_key", rawToken), zap.Error(err))
@@ -977,53 +1184,73 @@ func translatePkOutputFields(schema *schemapb.CollectionSchema) ([]string, []int
 //	output_fields=["*"] 	 ==> [A,B,C,D]
 //	output_fields=["*",A] 	 ==> [A,B,C,D]
 //	output_fields=["*",C]    ==> [A,B,C,D]
-func translateOutputFields(outputFields []string, schema *schemapb.CollectionSchema, addPrimary bool) ([]string, []string, error) {
+func translateOutputFields(outputFields []string, schema *schemaInfo, addPrimary bool) ([]string, []string, []string, error) {
 	var primaryFieldName string
-	allFieldNameMap := make(map[string]bool)
+	var dynamicField *schemapb.FieldSchema
+	allFieldNameMap := make(map[string]int64)
 	resultFieldNameMap := make(map[string]bool)
 	resultFieldNames := make([]string, 0)
 	userOutputFieldsMap := make(map[string]bool)
 	userOutputFields := make([]string, 0)
-
+	userDynamicFieldsMap := make(map[string]bool)
+	userDynamicFields := make([]string, 0)
+	useAllDyncamicFields := false
 	for _, field := range schema.Fields {
 		if field.IsPrimaryKey {
 			primaryFieldName = field.Name
 		}
-		allFieldNameMap[field.Name] = true
+		if field.IsDynamic {
+			dynamicField = field
+		}
+		allFieldNameMap[field.Name] = field.GetFieldID()
 	}
 
 	for _, outputFieldName := range outputFields {
 		outputFieldName = strings.TrimSpace(outputFieldName)
 		if outputFieldName == "*" {
-			for fieldName := range allFieldNameMap {
-				resultFieldNameMap[fieldName] = true
-				userOutputFieldsMap[fieldName] = true
+			for fieldName, fieldID := range allFieldNameMap {
+				// skip Cold field
+				if schema.IsFieldLoaded(fieldID) {
+					resultFieldNameMap[fieldName] = true
+					userOutputFieldsMap[fieldName] = true
+				}
 			}
+			useAllDyncamicFields = true
 		} else {
-			if _, ok := allFieldNameMap[outputFieldName]; ok {
-				resultFieldNameMap[outputFieldName] = true
-				userOutputFieldsMap[outputFieldName] = true
-			} else {
-				if schema.EnableDynamicField {
-					schemaH, err := typeutil.CreateSchemaHelper(schema)
-					if err != nil {
-						return nil, nil, err
-					}
-					err = planparserv2.ParseIdentifier(schemaH, outputFieldName, func(expr *planpb.Expr) error {
-						if len(expr.GetColumnExpr().GetInfo().GetNestedPath()) == 1 &&
-							expr.GetColumnExpr().GetInfo().GetNestedPath()[0] == outputFieldName {
-							return nil
-						}
-						return fmt.Errorf("not support getting subkeys of json field yet")
-					})
-					if err != nil {
-						log.Info("parse output field name failed", zap.String("field name", outputFieldName))
-						return nil, nil, fmt.Errorf("parse output field name failed: %s", outputFieldName)
-					}
-					resultFieldNameMap[common.MetaFieldName] = true
+			if fieldID, ok := allFieldNameMap[outputFieldName]; ok {
+				if schema.IsFieldLoaded(fieldID) {
+					resultFieldNameMap[outputFieldName] = true
 					userOutputFieldsMap[outputFieldName] = true
 				} else {
-					return nil, nil, fmt.Errorf("field %s not exist", outputFieldName)
+					return nil, nil, nil, fmt.Errorf("field %s is not loaded", outputFieldName)
+				}
+			} else {
+				if schema.EnableDynamicField {
+					if schema.IsFieldLoaded(dynamicField.GetFieldID()) {
+						schemaH, err := typeutil.CreateSchemaHelper(schema.CollectionSchema)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						err = planparserv2.ParseIdentifier(schemaH, outputFieldName, func(expr *planpb.Expr) error {
+							if len(expr.GetColumnExpr().GetInfo().GetNestedPath()) == 1 &&
+								expr.GetColumnExpr().GetInfo().GetNestedPath()[0] == outputFieldName {
+								return nil
+							}
+							return fmt.Errorf("not support getting subkeys of json field yet")
+						})
+						if err != nil {
+							log.Info("parse output field name failed", zap.String("field name", outputFieldName))
+							return nil, nil, nil, fmt.Errorf("parse output field name failed: %s", outputFieldName)
+						}
+						resultFieldNameMap[common.MetaFieldName] = true
+						userOutputFieldsMap[outputFieldName] = true
+						userDynamicFieldsMap[outputFieldName] = true
+					} else {
+						// TODO after cold field be able to fetched with chunk cache, this check shall be removed
+						return nil, nil, nil, fmt.Errorf("field %s cannot be returned since dynamic field not loaded", outputFieldName)
+					}
+				} else {
+					return nil, nil, nil, fmt.Errorf("field %s not exist", outputFieldName)
 				}
 			}
 		}
@@ -1040,7 +1267,13 @@ func translateOutputFields(outputFields []string, schema *schemapb.CollectionSch
 	for fieldName := range userOutputFieldsMap {
 		userOutputFields = append(userOutputFields, fieldName)
 	}
-	return resultFieldNames, userOutputFields, nil
+	if !useAllDyncamicFields {
+		for fieldName := range userDynamicFieldsMap {
+			userDynamicFields = append(userDynamicFields, fieldName)
+		}
+	}
+
+	return resultFieldNames, userOutputFields, userDynamicFields, nil
 }
 
 func validateIndexName(indexName string) error {
@@ -1065,7 +1298,7 @@ func validateIndexName(indexName string) error {
 	for i := 1; i < indexNameSize; i++ {
 		c := indexName[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
-			msg := invalidMsg + "Index name cannot only contain numbers, letters, and underscores."
+			msg := invalidMsg + "Index name can only contain numbers, letters, and underscores."
 			return errors.New(msg)
 		}
 	}
@@ -1115,9 +1348,10 @@ func isPartitionLoaded(ctx context.Context, qc types.QueryCoordClient, collID in
 	return false, nil
 }
 
-func fillFieldsDataBySchema(schema *schemapb.CollectionSchema, insertMsg *msgstream.InsertMsg) error {
-	requiredFieldsNum := 0
+func checkFieldsDataBySchema(schema *schemapb.CollectionSchema, insertMsg *msgstream.InsertMsg, inInsert bool) error {
+	log := log.With(zap.String("collection", schema.GetName()))
 	primaryKeyNum := 0
+	autoGenFieldNum := 0
 
 	dataNameSet := typeutil.NewSet[string]()
 	for _, data := range insertMsg.FieldsData {
@@ -1133,20 +1367,29 @@ func fillFieldsDataBySchema(schema *schemapb.CollectionSchema, insertMsg *msgstr
 			log.Warn("not primary key field, but set autoID true", zap.String("field", fieldSchema.GetName()))
 			return merr.WrapErrParameterInvalidMsg("only primary key could be with AutoID enabled")
 		}
+
+		if fieldSchema.IsPrimaryKey {
+			primaryKeyNum++
+		}
 		if fieldSchema.GetDefaultValue() != nil && fieldSchema.IsPrimaryKey {
 			return merr.WrapErrParameterInvalidMsg("primary key can't be with default value")
 		}
-		if !fieldSchema.AutoID {
-			requiredFieldsNum++
+		if (fieldSchema.IsPrimaryKey && fieldSchema.AutoID && !Params.ProxyCfg.SkipAutoIDCheck.GetAsBool() && inInsert) || fieldSchema.GetIsFunctionOutput() {
+			// when inInsert, no need to pass when pk is autoid and SkipAutoIDCheck is false
+			autoGenFieldNum++
 		}
-		// if has no field pass in, consider use default value
-		// so complete it with field schema
 		if _, ok := dataNameSet[fieldSchema.GetName()]; !ok {
-			// primary key can not use default value
-			if fieldSchema.IsPrimaryKey {
-				primaryKeyNum++
+			if (fieldSchema.IsPrimaryKey && fieldSchema.AutoID && !Params.ProxyCfg.SkipAutoIDCheck.GetAsBool() && inInsert) || fieldSchema.GetIsFunctionOutput() {
+				// autoGenField
 				continue
 			}
+
+			if fieldSchema.GetDefaultValue() == nil && !fieldSchema.GetNullable() {
+				log.Warn("no corresponding fieldData pass in", zap.String("fieldSchema", fieldSchema.GetName()))
+				return merr.WrapErrParameterInvalidMsg("fieldSchema(%s) has no corresponding fieldData pass in", fieldSchema.GetName())
+			}
+			// when use default_value or has set Nullable
+			// it's ok that no corresponding fieldData found
 			dataToAppend := &schemapb.FieldData{
 				Type:      fieldSchema.GetDataType(),
 				FieldName: fieldSchema.GetName(),
@@ -1157,92 +1400,147 @@ func fillFieldsDataBySchema(schema *schemapb.CollectionSchema, insertMsg *msgstr
 
 	if primaryKeyNum > 1 {
 		log.Warn("more than 1 primary keys not supported",
-			zap.Int64("primaryKeyNum", int64(primaryKeyNum)),
-			zap.String("collection", schema.GetName()))
+			zap.Int64("primaryKeyNum", int64(primaryKeyNum)))
 		return merr.WrapErrParameterInvalidMsg("more than 1 primary keys not supported, got %d", primaryKeyNum)
 	}
 
-	if len(insertMsg.FieldsData) != requiredFieldsNum {
-		log.Warn("the number of fields is less than needed",
-			zap.Int("fieldNum", len(insertMsg.FieldsData)),
-			zap.Int("requiredFieldNum", requiredFieldsNum),
-			zap.String("collection", schema.GetName()))
-		return merr.WrapErrParameterInvalid(requiredFieldsNum, len(insertMsg.FieldsData), "the number of fields is less than needed")
+	expectedNum := len(schema.Fields)
+	actualNum := len(insertMsg.FieldsData) + autoGenFieldNum
+
+	if expectedNum != actualNum {
+		log.Warn("the number of fields is not the same as needed", zap.Int("expected", expectedNum), zap.Int("actual", actualNum))
+		return merr.WrapErrParameterInvalid(expectedNum, actualNum, "more fieldData has pass in")
 	}
 
 	return nil
 }
 
-func checkPrimaryFieldData(schema *schemapb.CollectionSchema, result *milvuspb.MutationResult, insertMsg *msgstream.InsertMsg, inInsert bool) (*schemapb.IDs, error) {
+func checkPrimaryFieldData(schema *schemapb.CollectionSchema, insertMsg *msgstream.InsertMsg) (*schemapb.IDs, error) {
+	log := log.With(zap.String("collectionName", insertMsg.CollectionName))
 	rowNums := uint32(insertMsg.NRows())
 	// TODO(dragondriver): in fact, NumRows is not trustable, we should check all input fields
 	if insertMsg.NRows() <= 0 {
 		return nil, merr.WrapErrParameterInvalid("invalid num_rows", fmt.Sprint(rowNums), "num_rows should be greater than 0")
 	}
 
-	if err := fillFieldsDataBySchema(schema, insertMsg); err != nil {
+	if err := checkFieldsDataBySchema(schema, insertMsg, true); err != nil {
 		return nil, err
 	}
 
 	primaryFieldSchema, err := typeutil.GetPrimaryFieldSchema(schema)
 	if err != nil {
-		log.Error("get primary field schema failed", zap.String("collectionName", insertMsg.CollectionName), zap.Any("schema", schema), zap.Error(err))
+		log.Error("get primary field schema failed", zap.Any("schema", schema), zap.Error(err))
 		return nil, err
 	}
-	// get primaryFieldData whether autoID is true or not
+	if primaryFieldSchema.GetNullable() {
+		return nil, merr.WrapErrParameterInvalidMsg("primary field not support null")
+	}
 	var primaryFieldData *schemapb.FieldData
-	if inInsert {
-		// when checkPrimaryFieldData in insert
-		if !primaryFieldSchema.AutoID {
-			primaryFieldData, err = typeutil.GetPrimaryFieldData(insertMsg.GetFieldsData(), primaryFieldSchema)
-			if err != nil {
-				log.Info("get primary field data failed", zap.String("collectionName", insertMsg.CollectionName), zap.Error(err))
-				return nil, err
-			}
-		} else {
-			// check primary key data not exist
-			if typeutil.IsPrimaryFieldDataExist(insertMsg.GetFieldsData(), primaryFieldSchema) {
-				return nil, fmt.Errorf("can not assign primary field data when auto id enabled %v", primaryFieldSchema.Name)
-			}
-			// if autoID == true, currently support autoID for int64 and varchar PrimaryField
-			primaryFieldData, err = autoGenPrimaryFieldData(primaryFieldSchema, insertMsg.GetRowIDs())
-			if err != nil {
-				log.Info("generate primary field data failed when autoID == true", zap.String("collectionName", insertMsg.CollectionName), zap.Error(err))
-				return nil, err
-			}
-			// if autoID == true, set the primary field data
-			// insertMsg.fieldsData need append primaryFieldData
-			insertMsg.FieldsData = append(insertMsg.FieldsData, primaryFieldData)
-		}
-	} else {
-		// when checkPrimaryFieldData in upsert
-		if primaryFieldSchema.AutoID {
-			// upsert has not supported when autoID == true
-			log.Info("can not upsert when auto id enabled",
-				zap.String("primaryFieldSchemaName", primaryFieldSchema.Name))
-			err := merr.WrapErrParameterInvalidMsg(fmt.Sprintf("upsert can not assign primary field data when auto id enabled %v", primaryFieldSchema.GetName()))
-			result.Status = merr.Status(err)
-			return nil, err
-		}
+	// when checkPrimaryFieldData in insert
+
+	skipAutoIDCheck := Params.ProxyCfg.SkipAutoIDCheck.GetAsBool() &&
+		primaryFieldSchema.AutoID &&
+		typeutil.IsPrimaryFieldDataExist(insertMsg.GetFieldsData(), primaryFieldSchema)
+
+	if !primaryFieldSchema.AutoID || skipAutoIDCheck {
 		primaryFieldData, err = typeutil.GetPrimaryFieldData(insertMsg.GetFieldsData(), primaryFieldSchema)
 		if err != nil {
-			log.Error("get primary field data failed when upsert", zap.String("collectionName", insertMsg.CollectionName), zap.Error(err))
+			log.Info("get primary field data failed", zap.Error(err))
 			return nil, err
 		}
+	} else {
+		// check primary key data not exist
+		if typeutil.IsPrimaryFieldDataExist(insertMsg.GetFieldsData(), primaryFieldSchema) {
+			return nil, merr.WrapErrParameterInvalidMsg(fmt.Sprintf("can not assign primary field data when auto id enabled %v", primaryFieldSchema.Name))
+		}
+		// if autoID == true, currently support autoID for int64 and varchar PrimaryField
+		primaryFieldData, err = autoGenPrimaryFieldData(primaryFieldSchema, insertMsg.GetRowIDs())
+		if err != nil {
+			log.Info("generate primary field data failed when autoID == true", zap.Error(err))
+			return nil, err
+		}
+		// if autoID == true, set the primary field data
+		// insertMsg.fieldsData need append primaryFieldData
+		insertMsg.FieldsData = append(insertMsg.FieldsData, primaryFieldData)
 	}
 
 	// parse primaryFieldData to result.IDs, and as returned primary keys
 	ids, err := parsePrimaryFieldData2IDs(primaryFieldData)
 	if err != nil {
-		log.Warn("parse primary field data to IDs failed", zap.String("collectionName", insertMsg.CollectionName), zap.Error(err))
+		log.Warn("parse primary field data to IDs failed", zap.Error(err))
 		return nil, err
 	}
 
 	return ids, nil
 }
 
+func checkUpsertPrimaryFieldData(schema *schemapb.CollectionSchema, insertMsg *msgstream.InsertMsg) (*schemapb.IDs, *schemapb.IDs, error) {
+	log := log.With(zap.String("collectionName", insertMsg.CollectionName))
+	rowNums := uint32(insertMsg.NRows())
+	// TODO(dragondriver): in fact, NumRows is not trustable, we should check all input fields
+	if insertMsg.NRows() <= 0 {
+		return nil, nil, merr.WrapErrParameterInvalid("invalid num_rows", fmt.Sprint(rowNums), "num_rows should be greater than 0")
+	}
+
+	if err := checkFieldsDataBySchema(schema, insertMsg, false); err != nil {
+		return nil, nil, err
+	}
+
+	primaryFieldSchema, err := typeutil.GetPrimaryFieldSchema(schema)
+	if err != nil {
+		log.Error("get primary field schema failed", zap.Any("schema", schema), zap.Error(err))
+		return nil, nil, err
+	}
+	if primaryFieldSchema.GetNullable() {
+		return nil, nil, merr.WrapErrParameterInvalidMsg("primary field not support null")
+	}
+	// get primaryFieldData whether autoID is true or not
+	var primaryFieldData *schemapb.FieldData
+	var newPrimaryFieldData *schemapb.FieldData
+
+	primaryFieldID := primaryFieldSchema.FieldID
+	primaryFieldName := primaryFieldSchema.Name
+	for i, field := range insertMsg.GetFieldsData() {
+		if field.FieldId == primaryFieldID || field.FieldName == primaryFieldName {
+			primaryFieldData = field
+			if primaryFieldSchema.AutoID {
+				// use the passed pk as new pk when autoID == false
+				// automatic generate pk as new pk wehen autoID == true
+				newPrimaryFieldData, err = autoGenPrimaryFieldData(primaryFieldSchema, insertMsg.GetRowIDs())
+				if err != nil {
+					log.Info("generate new primary field data failed when upsert", zap.Error(err))
+					return nil, nil, err
+				}
+				insertMsg.FieldsData = append(insertMsg.GetFieldsData()[:i], insertMsg.GetFieldsData()[i+1:]...)
+				insertMsg.FieldsData = append(insertMsg.FieldsData, newPrimaryFieldData)
+			}
+			break
+		}
+	}
+	// must assign primary field data when upsert
+	if primaryFieldData == nil {
+		return nil, nil, merr.WrapErrParameterInvalidMsg(fmt.Sprintf("must assign pk when upsert, primary field: %v", primaryFieldName))
+	}
+
+	// parse primaryFieldData to result.IDs, and as returned primary keys
+	ids, err := parsePrimaryFieldData2IDs(primaryFieldData)
+	if err != nil {
+		log.Warn("parse primary field data to IDs failed", zap.Error(err))
+		return nil, nil, err
+	}
+	if !primaryFieldSchema.GetAutoID() {
+		return ids, ids, nil
+	}
+	newIds, err := parsePrimaryFieldData2IDs(newPrimaryFieldData)
+	if err != nil {
+		log.Warn("parse primary field data to IDs failed", zap.Error(err))
+		return nil, nil, err
+	}
+	return newIds, ids, nil
+}
+
 func getPartitionKeyFieldData(fieldSchema *schemapb.FieldSchema, insertMsg *msgstream.InsertMsg) (*schemapb.FieldData, error) {
-	if len(insertMsg.GetPartitionName()) > 0 {
+	if len(insertMsg.GetPartitionName()) > 0 && !Params.ProxyCfg.SkipPartitionKeyCheck.GetAsBool() {
 		return nil, errors.New("not support manually specifying the partition names if partition key mode is used")
 	}
 
@@ -1367,7 +1665,16 @@ func isPartitionKeyMode(ctx context.Context, dbName string, colName string) (boo
 	return false, nil
 }
 
-// getDefaultPartitionNames only used in partition key mode
+func hasParitionKeyModeField(schema *schemapb.CollectionSchema) bool {
+	for _, fieldSchema := range schema.GetFields() {
+		if fieldSchema.IsPartitionKey {
+			return true
+		}
+	}
+	return false
+}
+
+// getDefaultPartitionsInPartitionKeyMode only used in partition key mode
 func getDefaultPartitionsInPartitionKeyMode(ctx context.Context, dbName string, collectionName string) ([]string, error) {
 	partitions, err := globalMetaCache.GetPartitions(ctx, dbName, collectionName)
 	if err != nil {
@@ -1378,32 +1685,6 @@ func getDefaultPartitionsInPartitionKeyMode(ctx context.Context, dbName string, 
 	partitionNames, _, err := typeutil.RearrangePartitionsForPartitionKey(partitions)
 	if err != nil {
 		return nil, err
-	}
-
-	return partitionNames, nil
-}
-
-// getDefaultPartitionNames only used in partition key mode
-func getDefaultPartitionNames(ctx context.Context, dbName string, collectionName string) ([]string, error) {
-	partitions, err := globalMetaCache.GetPartitions(ctx, dbName, collectionName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Make sure the order of the partition names got every time is the same
-	partitionNames := make([]string, len(partitions))
-	for partitionName := range partitions {
-		splits := strings.Split(partitionName, "_")
-		if len(splits) < 2 {
-			err = fmt.Errorf("bad default partion name in partition ket mode: %s", partitionName)
-			return nil, err
-		}
-		index, err := strconv.ParseInt(splits[len(splits)-1], 10, 64)
-		if err != nil {
-			return nil, err
-		}
-
-		partitionNames[index] = partitionName
 	}
 
 	return partitionNames, nil
@@ -1427,7 +1708,7 @@ func assignChannelsByPK(pks *schemapb.IDs, channelNames []string, insertMsg *msg
 }
 
 func assignPartitionKeys(ctx context.Context, dbName string, collName string, keys []*planpb.GenericValue) ([]string, error) {
-	partitionNames, err := getDefaultPartitionNames(ctx, dbName, collName)
+	partitionNames, err := globalMetaCache.GetPartitionsIndex(ctx, dbName, collName)
 	if err != nil {
 		return nil, err
 	}
@@ -1437,22 +1718,13 @@ func assignPartitionKeys(ctx context.Context, dbName string, collName string, ke
 		return nil, err
 	}
 
-	partitionKeyFieldSchema, err := typeutil.GetPartitionKeyFieldSchema(schema)
+	partitionKeyFieldSchema, err := typeutil.GetPartitionKeyFieldSchema(schema.CollectionSchema)
 	if err != nil {
 		return nil, err
 	}
 
 	hashedPartitionNames, err := typeutil2.HashKey2Partitions(partitionKeyFieldSchema, keys, partitionNames)
 	return hashedPartitionNames, err
-}
-
-func memsetLoop[T any](v T, numRows int) []T {
-	ret := make([]T, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, v)
-	}
-
-	return ret
 }
 
 func ErrWithLog(logger *log.MLogger, msg string, err error) error {
@@ -1526,47 +1798,92 @@ func SendReplicateMessagePack(ctx context.Context, replicateMsgStream msgstream.
 	case *milvuspb.CreateDatabaseRequest:
 		tsMsg = &msgstream.CreateDatabaseMsg{
 			BaseMsg:               getBaseMsg(ctx, ts),
-			CreateDatabaseRequest: *r,
+			CreateDatabaseRequest: r,
 		}
 	case *milvuspb.DropDatabaseRequest:
 		tsMsg = &msgstream.DropDatabaseMsg{
 			BaseMsg:             getBaseMsg(ctx, ts),
-			DropDatabaseRequest: *r,
+			DropDatabaseRequest: r,
+		}
+	case *milvuspb.AlterDatabaseRequest:
+		tsMsg = &msgstream.AlterDatabaseMsg{
+			BaseMsg:              getBaseMsg(ctx, ts),
+			AlterDatabaseRequest: r,
 		}
 	case *milvuspb.FlushRequest:
 		tsMsg = &msgstream.FlushMsg{
 			BaseMsg:      getBaseMsg(ctx, ts),
-			FlushRequest: *r,
+			FlushRequest: r,
 		}
 	case *milvuspb.LoadCollectionRequest:
 		tsMsg = &msgstream.LoadCollectionMsg{
 			BaseMsg:               getBaseMsg(ctx, ts),
-			LoadCollectionRequest: *r,
+			LoadCollectionRequest: r,
 		}
 	case *milvuspb.ReleaseCollectionRequest:
 		tsMsg = &msgstream.ReleaseCollectionMsg{
 			BaseMsg:                  getBaseMsg(ctx, ts),
-			ReleaseCollectionRequest: *r,
+			ReleaseCollectionRequest: r,
 		}
 	case *milvuspb.CreateIndexRequest:
 		tsMsg = &msgstream.CreateIndexMsg{
 			BaseMsg:            getBaseMsg(ctx, ts),
-			CreateIndexRequest: *r,
+			CreateIndexRequest: r,
 		}
 	case *milvuspb.DropIndexRequest:
 		tsMsg = &msgstream.DropIndexMsg{
 			BaseMsg:          getBaseMsg(ctx, ts),
-			DropIndexRequest: *r,
+			DropIndexRequest: r,
 		}
 	case *milvuspb.LoadPartitionsRequest:
 		tsMsg = &msgstream.LoadPartitionsMsg{
 			BaseMsg:               getBaseMsg(ctx, ts),
-			LoadPartitionsRequest: *r,
+			LoadPartitionsRequest: r,
 		}
 	case *milvuspb.ReleasePartitionsRequest:
 		tsMsg = &msgstream.ReleasePartitionsMsg{
 			BaseMsg:                  getBaseMsg(ctx, ts),
-			ReleasePartitionsRequest: *r,
+			ReleasePartitionsRequest: r,
+		}
+	case *milvuspb.AlterIndexRequest:
+		tsMsg = &msgstream.AlterIndexMsg{
+			BaseMsg:           getBaseMsg(ctx, ts),
+			AlterIndexRequest: r,
+		}
+	case *milvuspb.CreateCredentialRequest:
+		tsMsg = &msgstream.CreateUserMsg{
+			BaseMsg:                 getBaseMsg(ctx, ts),
+			CreateCredentialRequest: r,
+		}
+	case *milvuspb.UpdateCredentialRequest:
+		tsMsg = &msgstream.UpdateUserMsg{
+			BaseMsg:                 getBaseMsg(ctx, ts),
+			UpdateCredentialRequest: r,
+		}
+	case *milvuspb.DeleteCredentialRequest:
+		tsMsg = &msgstream.DeleteUserMsg{
+			BaseMsg:                 getBaseMsg(ctx, ts),
+			DeleteCredentialRequest: r,
+		}
+	case *milvuspb.CreateRoleRequest:
+		tsMsg = &msgstream.CreateRoleMsg{
+			BaseMsg:           getBaseMsg(ctx, ts),
+			CreateRoleRequest: r,
+		}
+	case *milvuspb.DropRoleRequest:
+		tsMsg = &msgstream.DropRoleMsg{
+			BaseMsg:         getBaseMsg(ctx, ts),
+			DropRoleRequest: r,
+		}
+	case *milvuspb.OperateUserRoleRequest:
+		tsMsg = &msgstream.OperateUserRoleMsg{
+			BaseMsg:                getBaseMsg(ctx, ts),
+			OperateUserRoleRequest: r,
+		}
+	case *milvuspb.OperatePrivilegeRequest:
+		tsMsg = &msgstream.OperatePrivilegeMsg{
+			BaseMsg:                 getBaseMsg(ctx, ts),
+			OperatePrivilegeRequest: r,
 		}
 	default:
 		log.Warn("unknown request", zap.Any("request", request))
@@ -1585,7 +1902,7 @@ func SendReplicateMessagePack(ctx context.Context, replicateMsgStream msgstream.
 	}
 }
 
-func GetCachedCollectionSchema(ctx context.Context, dbName string, colName string) (*schemapb.CollectionSchema, error) {
+func GetCachedCollectionSchema(ctx context.Context, dbName string, colName string) (*schemaInfo, error) {
 	if globalMetaCache != nil {
 		return globalMetaCache.GetCollectionSchema(ctx, dbName, colName)
 	}
@@ -1597,4 +1914,146 @@ func CheckDatabase(ctx context.Context, dbName string) bool {
 		return globalMetaCache.HasDatabase(ctx, dbName)
 	}
 	return false
+}
+
+func SetReportValue(status *commonpb.Status, value int) {
+	if value <= 0 {
+		return
+	}
+	if !merr.Ok(status) {
+		return
+	}
+	if status.ExtraInfo == nil {
+		status.ExtraInfo = make(map[string]string)
+	}
+	status.ExtraInfo["report_value"] = strconv.Itoa(value)
+}
+
+func GetCostValue(status *commonpb.Status) int {
+	if status == nil || status.ExtraInfo == nil {
+		return 0
+	}
+	value, err := strconv.Atoi(status.ExtraInfo["report_value"])
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+// GetRequestInfo returns collection name and rateType of request and return tokens needed.
+func GetRequestInfo(ctx context.Context, req interface{}) (int64, map[int64][]int64, internalpb.RateType, int, error) {
+	switch r := req.(type) {
+	case *milvuspb.InsertRequest:
+		dbID, collToPartIDs, err := getCollectionAndPartitionID(ctx, req.(reqPartName))
+		return dbID, collToPartIDs, internalpb.RateType_DMLInsert, proto.Size(r), err
+	case *milvuspb.UpsertRequest:
+		dbID, collToPartIDs, err := getCollectionAndPartitionID(ctx, req.(reqPartName))
+		return dbID, collToPartIDs, internalpb.RateType_DMLInsert, proto.Size(r), err
+	case *milvuspb.DeleteRequest:
+		dbID, collToPartIDs, err := getCollectionAndPartitionID(ctx, req.(reqPartName))
+		return dbID, collToPartIDs, internalpb.RateType_DMLDelete, proto.Size(r), err
+	case *milvuspb.ImportRequest:
+		dbID, collToPartIDs, err := getCollectionAndPartitionID(ctx, req.(reqPartName))
+		return dbID, collToPartIDs, internalpb.RateType_DMLBulkLoad, proto.Size(r), err
+	case *milvuspb.SearchRequest:
+		dbID, collToPartIDs, err := getCollectionAndPartitionIDs(ctx, req.(reqPartNames))
+		return dbID, collToPartIDs, internalpb.RateType_DQLSearch, int(r.GetNq()), err
+	case *milvuspb.QueryRequest:
+		dbID, collToPartIDs, err := getCollectionAndPartitionIDs(ctx, req.(reqPartNames))
+		return dbID, collToPartIDs, internalpb.RateType_DQLQuery, 1, err // think of the query request's nq as 1
+	case *milvuspb.CreateCollectionRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLCollection, 1, nil
+	case *milvuspb.DropCollectionRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLCollection, 1, nil
+	case *milvuspb.LoadCollectionRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLCollection, 1, nil
+	case *milvuspb.ReleaseCollectionRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLCollection, 1, nil
+	case *milvuspb.CreatePartitionRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLPartition, 1, nil
+	case *milvuspb.DropPartitionRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLPartition, 1, nil
+	case *milvuspb.LoadPartitionsRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLPartition, 1, nil
+	case *milvuspb.ReleasePartitionsRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLPartition, 1, nil
+	case *milvuspb.CreateIndexRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLIndex, 1, nil
+	case *milvuspb.DropIndexRequest:
+		dbID, collToPartIDs := getCollectionID(req.(reqCollName))
+		return dbID, collToPartIDs, internalpb.RateType_DDLIndex, 1, nil
+	case *milvuspb.FlushRequest:
+		db, err := globalMetaCache.GetDatabaseInfo(ctx, r.GetDbName())
+		if err != nil {
+			return util.InvalidDBID, map[int64][]int64{}, 0, 0, err
+		}
+
+		collToPartIDs := make(map[int64][]int64, 0)
+		for _, collectionName := range r.GetCollectionNames() {
+			collectionID, err := globalMetaCache.GetCollectionID(ctx, r.GetDbName(), collectionName)
+			if err != nil {
+				return util.InvalidDBID, map[int64][]int64{}, 0, 0, err
+			}
+			collToPartIDs[collectionID] = []int64{}
+		}
+		return db.dbID, collToPartIDs, internalpb.RateType_DDLFlush, 1, nil
+	case *milvuspb.ManualCompactionRequest:
+		dbName := GetCurDBNameFromContextOrDefault(ctx)
+		dbInfo, err := globalMetaCache.GetDatabaseInfo(ctx, dbName)
+		if err != nil {
+			return util.InvalidDBID, map[int64][]int64{}, 0, 0, err
+		}
+		return dbInfo.dbID, map[int64][]int64{
+			r.GetCollectionID(): {},
+		}, internalpb.RateType_DDLCompaction, 1, nil
+	default: // TODO: support more request
+		if req == nil {
+			return util.InvalidDBID, map[int64][]int64{}, 0, 0, fmt.Errorf("null request")
+		}
+		return util.InvalidDBID, map[int64][]int64{}, 0, 0, nil
+	}
+}
+
+// GetFailedResponse returns failed response.
+func GetFailedResponse(req any, err error) any {
+	switch req.(type) {
+	case *milvuspb.InsertRequest, *milvuspb.DeleteRequest, *milvuspb.UpsertRequest:
+		return failedMutationResult(err)
+	case *milvuspb.ImportRequest:
+		return &milvuspb.ImportResponse{
+			Status: merr.Status(err),
+		}
+	case *milvuspb.SearchRequest:
+		return &milvuspb.SearchResults{
+			Status: merr.Status(err),
+		}
+	case *milvuspb.QueryRequest:
+		return &milvuspb.QueryResults{
+			Status: merr.Status(err),
+		}
+	case *milvuspb.CreateCollectionRequest, *milvuspb.DropCollectionRequest,
+		*milvuspb.LoadCollectionRequest, *milvuspb.ReleaseCollectionRequest,
+		*milvuspb.CreatePartitionRequest, *milvuspb.DropPartitionRequest,
+		*milvuspb.LoadPartitionsRequest, *milvuspb.ReleasePartitionsRequest,
+		*milvuspb.CreateIndexRequest, *milvuspb.DropIndexRequest:
+		return merr.Status(err)
+	case *milvuspb.FlushRequest:
+		return &milvuspb.FlushResponse{
+			Status: merr.Status(err),
+		}
+	case *milvuspb.ManualCompactionRequest:
+		return &milvuspb.ManualCompactionResponse{
+			Status: merr.Status(err),
+		}
+	}
+	return nil
 }

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -29,27 +30,30 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 const (
-	CollectionID       = 1
-	PartitionID        = 1
-	SegmentID          = 1
-	RowIDField         = 0
-	TimestampField     = 1
-	BoolField          = 100
-	Int8Field          = 101
-	Int16Field         = 102
-	Int32Field         = 103
-	Int64Field         = 104
-	FloatField         = 105
-	DoubleField        = 106
-	StringField        = 107
-	BinaryVectorField  = 108
-	FloatVectorField   = 109
-	ArrayField         = 110
-	JSONField          = 111
-	Float16VectorField = 112
+	CollectionID           = 1
+	PartitionID            = 1
+	SegmentID              = 1
+	RowIDField             = 0
+	TimestampField         = 1
+	BoolField              = 100
+	Int8Field              = 101
+	Int16Field             = 102
+	Int32Field             = 103
+	Int64Field             = 104
+	FloatField             = 105
+	DoubleField            = 106
+	StringField            = 107
+	BinaryVectorField      = 108
+	FloatVectorField       = 109
+	ArrayField             = 110
+	JSONField              = 111
+	Float16VectorField     = 112
+	BFloat16VectorField    = 113
+	SparseFloatVectorField = 114
 )
 
 func genTestCollectionMeta() *etcdpb.CollectionMeta {
@@ -173,9 +177,84 @@ func genTestCollectionMeta() *etcdpb.CollectionMeta {
 						},
 					},
 				},
+				{
+					FieldID:     BFloat16VectorField,
+					Name:        "field_bfloat16_vector",
+					Description: "bfloat16_vector",
+					DataType:    schemapb.DataType_BFloat16Vector,
+					TypeParams: []*commonpb.KeyValuePair{
+						{
+							Key:   common.DimKey,
+							Value: "4",
+						},
+					},
+				},
+				{
+					FieldID:     SparseFloatVectorField,
+					Name:        "field_sparse_float_vector",
+					Description: "sparse_float_vector",
+					DataType:    schemapb.DataType_SparseFloatVector,
+					TypeParams:  []*commonpb.KeyValuePair{},
+				},
 			},
 		},
 	}
+}
+
+func TestInsertCodecFailed(t *testing.T) {
+	t.Run("vector field not support null", func(t *testing.T) {
+		tests := []struct {
+			description string
+			dataType    schemapb.DataType
+		}{
+			{"nullable FloatVector field", schemapb.DataType_FloatVector},
+			{"nullable Float16Vector field", schemapb.DataType_Float16Vector},
+			{"nullable BinaryVector field", schemapb.DataType_BinaryVector},
+			{"nullable BFloat16Vector field", schemapb.DataType_BFloat16Vector},
+			{"nullable SparseFloatVector field", schemapb.DataType_SparseFloatVector},
+		}
+
+		for _, test := range tests {
+			t.Run(test.description, func(t *testing.T) {
+				schema := &etcdpb.CollectionMeta{
+					ID:            CollectionID,
+					CreateTime:    1,
+					SegmentIDs:    []int64{SegmentID},
+					PartitionTags: []string{"partition_0", "partition_1"},
+					Schema: &schemapb.CollectionSchema{
+						Name:        "schema",
+						Description: "schema",
+						Fields: []*schemapb.FieldSchema{
+							{
+								FieldID:     RowIDField,
+								Name:        "row_id",
+								Description: "row_id",
+								DataType:    schemapb.DataType_Int64,
+							},
+							{
+								FieldID:     TimestampField,
+								Name:        "Timestamp",
+								Description: "Timestamp",
+								DataType:    schemapb.DataType_Int64,
+							},
+							{
+								DataType: test.dataType,
+							},
+						},
+					},
+				}
+				insertCodec := NewInsertCodecWithSchema(schema)
+				insertDataEmpty := &InsertData{
+					Data: map[int64]FieldData{
+						RowIDField:     &Int64FieldData{[]int64{}, nil, false},
+						TimestampField: &Int64FieldData{[]int64{}, nil, false},
+					},
+				}
+				_, err := insertCodec.Serialize(PartitionID, SegmentID, insertDataEmpty)
+				assert.Error(t, err)
+			})
+		}
+	})
 }
 
 func TestInsertCodec(t *testing.T) {
@@ -247,6 +326,21 @@ func TestInsertCodec(t *testing.T) {
 				Data: []byte{0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255},
 				Dim:  4,
 			},
+			BFloat16VectorField: &BFloat16VectorFieldData{
+				// length = 2 * Dim * numRows(2) = 16
+				Data: []byte{0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255},
+				Dim:  4,
+			},
+			SparseFloatVectorField: &SparseFloatVectorFieldData{
+				SparseFloatArray: schemapb.SparseFloatArray{
+					Dim: 600,
+					Contents: [][]byte{
+						typeutil.CreateSparseFloatRow([]uint32{0, 1, 2}, []float32{1.1, 1.2, 1.3}),
+						typeutil.CreateSparseFloatRow([]uint32{10, 20, 30}, []float32{2.1, 2.2, 2.3}),
+						typeutil.CreateSparseFloatRow([]uint32{100, 200, 599}, []float32{3.1, 3.2, 3.3}),
+					},
+				},
+			},
 		},
 	}
 
@@ -295,6 +389,21 @@ func TestInsertCodec(t *testing.T) {
 				Data: []byte{0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255},
 				Dim:  4,
 			},
+			BFloat16VectorField: &BFloat16VectorFieldData{
+				// length = 2 * Dim * numRows(2) = 16
+				Data: []byte{0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255},
+				Dim:  4,
+			},
+			SparseFloatVectorField: &SparseFloatVectorFieldData{
+				SparseFloatArray: schemapb.SparseFloatArray{
+					Dim: 300,
+					Contents: [][]byte{
+						typeutil.CreateSparseFloatRow([]uint32{5, 6, 7}, []float32{1.1, 1.2, 1.3}),
+						typeutil.CreateSparseFloatRow([]uint32{15, 26, 37}, []float32{2.1, 2.2, 2.3}),
+						typeutil.CreateSparseFloatRow([]uint32{105, 207, 299}, []float32{3.1, 3.2, 3.3}),
+					},
+				},
+			},
 			ArrayField: &ArrayFieldData{
 				ElementType: schemapb.DataType_Int32,
 				Data: []*schemapb.ScalarField{
@@ -321,21 +430,28 @@ func TestInsertCodec(t *testing.T) {
 
 	insertDataEmpty := &InsertData{
 		Data: map[int64]FieldData{
-			RowIDField:         &Int64FieldData{[]int64{}},
-			TimestampField:     &Int64FieldData{[]int64{}},
-			BoolField:          &BoolFieldData{[]bool{}},
-			Int8Field:          &Int8FieldData{[]int8{}},
-			Int16Field:         &Int16FieldData{[]int16{}},
-			Int32Field:         &Int32FieldData{[]int32{}},
-			Int64Field:         &Int64FieldData{[]int64{}},
-			FloatField:         &FloatFieldData{[]float32{}},
-			DoubleField:        &DoubleFieldData{[]float64{}},
-			StringField:        &StringFieldData{[]string{}},
-			BinaryVectorField:  &BinaryVectorFieldData{[]byte{}, 8},
-			FloatVectorField:   &FloatVectorFieldData{[]float32{}, 4},
-			Float16VectorField: &Float16VectorFieldData{[]byte{}, 4},
-			ArrayField:         &ArrayFieldData{schemapb.DataType_Int32, []*schemapb.ScalarField{}},
-			JSONField:          &JSONFieldData{[][]byte{}},
+			RowIDField:          &Int64FieldData{[]int64{}, nil, false},
+			TimestampField:      &Int64FieldData{[]int64{}, nil, false},
+			BoolField:           &BoolFieldData{[]bool{}, nil, false},
+			Int8Field:           &Int8FieldData{[]int8{}, nil, false},
+			Int16Field:          &Int16FieldData{[]int16{}, nil, false},
+			Int32Field:          &Int32FieldData{[]int32{}, nil, false},
+			Int64Field:          &Int64FieldData{[]int64{}, nil, false},
+			FloatField:          &FloatFieldData{[]float32{}, nil, false},
+			DoubleField:         &DoubleFieldData{[]float64{}, nil, false},
+			StringField:         &StringFieldData{[]string{}, schemapb.DataType_VarChar, nil, false},
+			BinaryVectorField:   &BinaryVectorFieldData{[]byte{}, 8},
+			FloatVectorField:    &FloatVectorFieldData{[]float32{}, 4},
+			Float16VectorField:  &Float16VectorFieldData{[]byte{}, 4},
+			BFloat16VectorField: &BFloat16VectorFieldData{[]byte{}, 4},
+			SparseFloatVectorField: &SparseFloatVectorFieldData{
+				SparseFloatArray: schemapb.SparseFloatArray{
+					Dim:      0,
+					Contents: [][]byte{},
+				},
+			},
+			ArrayField: &ArrayFieldData{schemapb.DataType_Int32, []*schemapb.ScalarField{}, nil, false},
+			JSONField:  &JSONFieldData{[][]byte{}, nil, false},
 		},
 	}
 	b, err := insertCodec.Serialize(PartitionID, SegmentID, insertDataEmpty)
@@ -382,6 +498,25 @@ func TestInsertCodec(t *testing.T) {
 		0, 255, 0, 255, 0, 255, 0, 255,
 		0, 255, 0, 255, 0, 255, 0, 255,
 	}, resultData.Data[Float16VectorField].(*Float16VectorFieldData).Data)
+	assert.Equal(t, []byte{
+		0, 255, 0, 255, 0, 255, 0, 255,
+		0, 255, 0, 255, 0, 255, 0, 255,
+		0, 255, 0, 255, 0, 255, 0, 255,
+		0, 255, 0, 255, 0, 255, 0, 255,
+	}, resultData.Data[BFloat16VectorField].(*BFloat16VectorFieldData).Data)
+
+	assert.EqualExportedValues(t, &schemapb.SparseFloatArray{
+		// merged dim should be max of all dims
+		Dim: 600,
+		Contents: [][]byte{
+			typeutil.CreateSparseFloatRow([]uint32{5, 6, 7}, []float32{1.1, 1.2, 1.3}),
+			typeutil.CreateSparseFloatRow([]uint32{15, 26, 37}, []float32{2.1, 2.2, 2.3}),
+			typeutil.CreateSparseFloatRow([]uint32{105, 207, 299}, []float32{3.1, 3.2, 3.3}),
+			typeutil.CreateSparseFloatRow([]uint32{0, 1, 2}, []float32{1.1, 1.2, 1.3}),
+			typeutil.CreateSparseFloatRow([]uint32{10, 20, 30}, []float32{2.1, 2.2, 2.3}),
+			typeutil.CreateSparseFloatRow([]uint32{100, 200, 599}, []float32{3.1, 3.2, 3.3}),
+		},
+	}, &resultData.Data[SparseFloatVectorField].(*SparseFloatVectorFieldData).SparseFloatArray)
 
 	int32ArrayList := [][]int32{{1, 2, 3}, {4, 5, 6}, {3, 2, 1}, {6, 5, 4}}
 	resultArrayList := [][]int32{}
@@ -428,11 +563,7 @@ func TestDeleteCodec(t *testing.T) {
 		pk1 := &Int64PrimaryKey{
 			Value: 1,
 		}
-		deleteData := &DeleteData{
-			Pks:      []PrimaryKey{pk1},
-			Tss:      []uint64{43757345},
-			RowCount: int64(1),
-		}
+		deleteData := NewDeleteData([]PrimaryKey{pk1}, []uint64{43757345})
 
 		pk2 := &Int64PrimaryKey{
 			Value: 2,
@@ -451,11 +582,7 @@ func TestDeleteCodec(t *testing.T) {
 	t.Run("string pk", func(t *testing.T) {
 		deleteCodec := NewDeleteCodec()
 		pk1 := NewVarCharPrimaryKey("test1")
-		deleteData := &DeleteData{
-			Pks:      []PrimaryKey{pk1},
-			Tss:      []uint64{43757345},
-			RowCount: int64(1),
-		}
+		deleteData := NewDeleteData([]PrimaryKey{pk1}, []uint64{43757345})
 
 		pk2 := NewVarCharPrimaryKey("test2")
 		deleteData.Append(pk2, 23578294723)
@@ -468,64 +595,141 @@ func TestDeleteCodec(t *testing.T) {
 		assert.Equal(t, sid, int64(1))
 		assert.Equal(t, data, deleteData)
 	})
-
-	t.Run("merge", func(t *testing.T) {
-		first := &DeleteData{
-			Pks:      []PrimaryKey{NewInt64PrimaryKey(1)},
-			Tss:      []uint64{100},
-			RowCount: 1,
-		}
-
-		second := &DeleteData{
-			Pks:      []PrimaryKey{NewInt64PrimaryKey(2)},
-			Tss:      []uint64{100},
-			RowCount: 1,
-		}
-
-		first.Merge(second)
-		assert.Equal(t, len(first.Pks), 2)
-		assert.Equal(t, len(first.Tss), 2)
-		assert.Equal(t, first.RowCount, int64(2))
-	})
 }
 
 func TestUpgradeDeleteLog(t *testing.T) {
-	binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, CollectionID, 1, 1)
-	eventWriter, err := binlogWriter.NextDeleteEventWriter()
-	assert.NoError(t, err)
-
-	dData := &DeleteData{
-		Pks:      []PrimaryKey{&Int64PrimaryKey{Value: 1}, &Int64PrimaryKey{Value: 2}},
-		Tss:      []Timestamp{100, 200},
-		RowCount: 2,
-	}
-
-	sizeTotal := 0
-	for i := int64(0); i < dData.RowCount; i++ {
-		int64PkValue := dData.Pks[i].(*Int64PrimaryKey).Value
-		ts := dData.Tss[i]
-		err = eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,%d", int64PkValue, ts))
+	t.Run("normal", func(t *testing.T) {
+		binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, CollectionID, 1, 1)
+		eventWriter, err := binlogWriter.NextDeleteEventWriter()
 		assert.NoError(t, err)
-		sizeTotal += binary.Size(int64PkValue)
-		sizeTotal += binary.Size(ts)
-	}
-	eventWriter.SetEventTimestamp(100, 200)
-	binlogWriter.SetEventTimeStamp(100, 200)
-	binlogWriter.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
 
-	err = binlogWriter.Finish()
-	assert.NoError(t, err)
-	buffer, err := binlogWriter.GetBuffer()
-	assert.NoError(t, err)
-	blob := &Blob{Value: buffer}
+		dData := &DeleteData{
+			Pks:      []PrimaryKey{&Int64PrimaryKey{Value: 1}, &Int64PrimaryKey{Value: 2}},
+			Tss:      []Timestamp{100, 200},
+			RowCount: 2,
+		}
 
-	dCodec := NewDeleteCodec()
-	parID, segID, deleteData, err := dCodec.Deserialize([]*Blob{blob})
-	assert.NoError(t, err)
-	assert.Equal(t, int64(1), parID)
-	assert.Equal(t, int64(1), segID)
-	assert.ElementsMatch(t, dData.Pks, deleteData.Pks)
-	assert.ElementsMatch(t, dData.Tss, deleteData.Tss)
+		sizeTotal := 0
+		for i := int64(0); i < dData.RowCount; i++ {
+			int64PkValue := dData.Pks[i].(*Int64PrimaryKey).Value
+			ts := dData.Tss[i]
+			err = eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,%d", int64PkValue, ts), true)
+			assert.NoError(t, err)
+			sizeTotal += binary.Size(int64PkValue)
+			sizeTotal += binary.Size(ts)
+		}
+		eventWriter.SetEventTimestamp(100, 200)
+		binlogWriter.SetEventTimeStamp(100, 200)
+		binlogWriter.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
+
+		err = binlogWriter.Finish()
+		assert.NoError(t, err)
+		buffer, err := binlogWriter.GetBuffer()
+		assert.NoError(t, err)
+		blob := &Blob{Value: buffer}
+
+		dCodec := NewDeleteCodec()
+		parID, segID, deleteData, err := dCodec.Deserialize([]*Blob{blob})
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1), parID)
+		assert.Equal(t, int64(1), segID)
+		assert.ElementsMatch(t, dData.Pks, deleteData.Pks)
+		assert.ElementsMatch(t, dData.Tss, deleteData.Tss)
+	})
+
+	t.Run("with split lenth error", func(t *testing.T) {
+		binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, CollectionID, 1, 1)
+		eventWriter, err := binlogWriter.NextDeleteEventWriter()
+		assert.NoError(t, err)
+
+		dData := &DeleteData{
+			Pks:      []PrimaryKey{&Int64PrimaryKey{Value: 1}, &Int64PrimaryKey{Value: 2}},
+			Tss:      []Timestamp{100, 200},
+			RowCount: 2,
+		}
+
+		for i := int64(0); i < dData.RowCount; i++ {
+			int64PkValue := dData.Pks[i].(*Int64PrimaryKey).Value
+			ts := dData.Tss[i]
+			err = eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,%d,?", int64PkValue, ts), true)
+			assert.NoError(t, err)
+		}
+		eventWriter.SetEventTimestamp(100, 200)
+		binlogWriter.SetEventTimeStamp(100, 200)
+		binlogWriter.AddExtra(originalSizeKey, fmt.Sprintf("%v", 0))
+
+		err = binlogWriter.Finish()
+		assert.NoError(t, err)
+		buffer, err := binlogWriter.GetBuffer()
+		assert.NoError(t, err)
+		blob := &Blob{Value: buffer}
+
+		dCodec := NewDeleteCodec()
+		_, _, _, err = dCodec.Deserialize([]*Blob{blob})
+		assert.Error(t, err)
+	})
+
+	t.Run("with parse int error", func(t *testing.T) {
+		binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, CollectionID, 1, 1)
+		eventWriter, err := binlogWriter.NextDeleteEventWriter()
+		assert.NoError(t, err)
+
+		dData := &DeleteData{
+			Pks:      []PrimaryKey{&Int64PrimaryKey{Value: 1}, &Int64PrimaryKey{Value: 2}},
+			Tss:      []Timestamp{100, 200},
+			RowCount: 2,
+		}
+
+		for i := int64(0); i < dData.RowCount; i++ {
+			ts := dData.Tss[i]
+			err = eventWriter.AddOneStringToPayload(fmt.Sprintf("abc,%d", ts), true)
+			assert.NoError(t, err)
+		}
+		eventWriter.SetEventTimestamp(100, 200)
+		binlogWriter.SetEventTimeStamp(100, 200)
+		binlogWriter.AddExtra(originalSizeKey, fmt.Sprintf("%v", 0))
+
+		err = binlogWriter.Finish()
+		assert.NoError(t, err)
+		buffer, err := binlogWriter.GetBuffer()
+		assert.NoError(t, err)
+		blob := &Blob{Value: buffer}
+
+		dCodec := NewDeleteCodec()
+		_, _, _, err = dCodec.Deserialize([]*Blob{blob})
+		assert.Error(t, err)
+	})
+
+	t.Run("with parse ts uint error", func(t *testing.T) {
+		binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, CollectionID, 1, 1)
+		eventWriter, err := binlogWriter.NextDeleteEventWriter()
+		assert.NoError(t, err)
+
+		dData := &DeleteData{
+			Pks:      []PrimaryKey{&Int64PrimaryKey{Value: 1}, &Int64PrimaryKey{Value: 2}},
+			Tss:      []Timestamp{100, 200},
+			RowCount: 2,
+		}
+
+		for i := int64(0); i < dData.RowCount; i++ {
+			int64PkValue := dData.Pks[i].(*Int64PrimaryKey).Value
+			err = eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,abc", int64PkValue), true)
+			assert.NoError(t, err)
+		}
+		eventWriter.SetEventTimestamp(100, 200)
+		binlogWriter.SetEventTimeStamp(100, 200)
+		binlogWriter.AddExtra(originalSizeKey, fmt.Sprintf("%v", 0))
+
+		err = binlogWriter.Finish()
+		assert.NoError(t, err)
+		buffer, err := binlogWriter.GetBuffer()
+		assert.NoError(t, err)
+		blob := &Blob{Value: buffer}
+
+		dCodec := NewDeleteCodec()
+		_, _, _, err = dCodec.Deserialize([]*Blob{blob})
+		assert.Error(t, err)
+	})
 }
 
 func TestDDCodec(t *testing.T) {
@@ -624,20 +828,20 @@ func TestMemorySize(t *testing.T) {
 			},
 		},
 	}
-	assert.Equal(t, insertData1.Data[RowIDField].GetMemorySize(), 8)
-	assert.Equal(t, insertData1.Data[TimestampField].GetMemorySize(), 8)
-	assert.Equal(t, insertData1.Data[BoolField].GetMemorySize(), 1)
-	assert.Equal(t, insertData1.Data[Int8Field].GetMemorySize(), 1)
-	assert.Equal(t, insertData1.Data[Int16Field].GetMemorySize(), 2)
-	assert.Equal(t, insertData1.Data[Int32Field].GetMemorySize(), 4)
-	assert.Equal(t, insertData1.Data[Int64Field].GetMemorySize(), 8)
-	assert.Equal(t, insertData1.Data[FloatField].GetMemorySize(), 4)
-	assert.Equal(t, insertData1.Data[DoubleField].GetMemorySize(), 8)
-	assert.Equal(t, insertData1.Data[StringField].GetMemorySize(), 17)
+	assert.Equal(t, insertData1.Data[RowIDField].GetMemorySize(), 9)
+	assert.Equal(t, insertData1.Data[TimestampField].GetMemorySize(), 9)
+	assert.Equal(t, insertData1.Data[BoolField].GetMemorySize(), 2)
+	assert.Equal(t, insertData1.Data[Int8Field].GetMemorySize(), 2)
+	assert.Equal(t, insertData1.Data[Int16Field].GetMemorySize(), 3)
+	assert.Equal(t, insertData1.Data[Int32Field].GetMemorySize(), 5)
+	assert.Equal(t, insertData1.Data[Int64Field].GetMemorySize(), 9)
+	assert.Equal(t, insertData1.Data[FloatField].GetMemorySize(), 5)
+	assert.Equal(t, insertData1.Data[DoubleField].GetMemorySize(), 9)
+	assert.Equal(t, insertData1.Data[StringField].GetMemorySize(), 18)
 	assert.Equal(t, insertData1.Data[BinaryVectorField].GetMemorySize(), 5)
-	assert.Equal(t, insertData1.Data[FloatField].GetMemorySize(), 4)
-	assert.Equal(t, insertData1.Data[ArrayField].GetMemorySize(), 3*4)
-	assert.Equal(t, insertData1.Data[JSONField].GetMemorySize(), len([]byte(`{"batch":1}`))+16)
+	assert.Equal(t, insertData1.Data[FloatField].GetMemorySize(), 5)
+	assert.Equal(t, insertData1.Data[ArrayField].GetMemorySize(), 3*4+1)
+	assert.Equal(t, insertData1.Data[JSONField].GetMemorySize(), len([]byte(`{"batch":1}`))+16+1)
 
 	insertData2 := &InsertData{
 		Data: map[int64]FieldData{
@@ -682,46 +886,139 @@ func TestMemorySize(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, insertData2.Data[RowIDField].GetMemorySize(), 16)
-	assert.Equal(t, insertData2.Data[TimestampField].GetMemorySize(), 16)
-	assert.Equal(t, insertData2.Data[BoolField].GetMemorySize(), 2)
-	assert.Equal(t, insertData2.Data[Int8Field].GetMemorySize(), 2)
-	assert.Equal(t, insertData2.Data[Int16Field].GetMemorySize(), 4)
-	assert.Equal(t, insertData2.Data[Int32Field].GetMemorySize(), 8)
-	assert.Equal(t, insertData2.Data[Int64Field].GetMemorySize(), 16)
-	assert.Equal(t, insertData2.Data[FloatField].GetMemorySize(), 8)
-	assert.Equal(t, insertData2.Data[DoubleField].GetMemorySize(), 16)
-	assert.Equal(t, insertData2.Data[StringField].GetMemorySize(), 35)
+	assert.Equal(t, insertData2.Data[RowIDField].GetMemorySize(), 17)
+	assert.Equal(t, insertData2.Data[TimestampField].GetMemorySize(), 17)
+	assert.Equal(t, insertData2.Data[BoolField].GetMemorySize(), 3)
+	assert.Equal(t, insertData2.Data[Int8Field].GetMemorySize(), 3)
+	assert.Equal(t, insertData2.Data[Int16Field].GetMemorySize(), 5)
+	assert.Equal(t, insertData2.Data[Int32Field].GetMemorySize(), 9)
+	assert.Equal(t, insertData2.Data[Int64Field].GetMemorySize(), 17)
+	assert.Equal(t, insertData2.Data[FloatField].GetMemorySize(), 9)
+	assert.Equal(t, insertData2.Data[DoubleField].GetMemorySize(), 17)
+	assert.Equal(t, insertData2.Data[StringField].GetMemorySize(), 36)
 	assert.Equal(t, insertData2.Data[BinaryVectorField].GetMemorySize(), 6)
-	assert.Equal(t, insertData2.Data[FloatField].GetMemorySize(), 8)
+	assert.Equal(t, insertData2.Data[FloatField].GetMemorySize(), 9)
 
 	insertDataEmpty := &InsertData{
 		Data: map[int64]FieldData{
-			RowIDField:        &Int64FieldData{[]int64{}},
-			TimestampField:    &Int64FieldData{[]int64{}},
-			BoolField:         &BoolFieldData{[]bool{}},
-			Int8Field:         &Int8FieldData{[]int8{}},
-			Int16Field:        &Int16FieldData{[]int16{}},
-			Int32Field:        &Int32FieldData{[]int32{}},
-			Int64Field:        &Int64FieldData{[]int64{}},
-			FloatField:        &FloatFieldData{[]float32{}},
-			DoubleField:       &DoubleFieldData{[]float64{}},
-			StringField:       &StringFieldData{[]string{}},
+			RowIDField:        &Int64FieldData{[]int64{}, nil, false},
+			TimestampField:    &Int64FieldData{[]int64{}, nil, false},
+			BoolField:         &BoolFieldData{[]bool{}, nil, false},
+			Int8Field:         &Int8FieldData{[]int8{}, nil, false},
+			Int16Field:        &Int16FieldData{[]int16{}, nil, false},
+			Int32Field:        &Int32FieldData{[]int32{}, nil, false},
+			Int64Field:        &Int64FieldData{[]int64{}, nil, false},
+			FloatField:        &FloatFieldData{[]float32{}, nil, false},
+			DoubleField:       &DoubleFieldData{[]float64{}, nil, false},
+			StringField:       &StringFieldData{[]string{}, schemapb.DataType_VarChar, nil, false},
 			BinaryVectorField: &BinaryVectorFieldData{[]byte{}, 8},
 			FloatVectorField:  &FloatVectorFieldData{[]float32{}, 4},
 		},
 	}
 
-	assert.Equal(t, insertDataEmpty.Data[RowIDField].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[TimestampField].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[BoolField].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[Int8Field].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[Int16Field].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[Int32Field].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[Int64Field].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[FloatField].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[DoubleField].GetMemorySize(), 0)
-	assert.Equal(t, insertDataEmpty.Data[StringField].GetMemorySize(), 0)
+	assert.Equal(t, insertDataEmpty.Data[RowIDField].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[TimestampField].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[BoolField].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[Int8Field].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[Int16Field].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[Int32Field].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[Int64Field].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[FloatField].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[DoubleField].GetMemorySize(), 1)
+	assert.Equal(t, insertDataEmpty.Data[StringField].GetMemorySize(), 1)
 	assert.Equal(t, insertDataEmpty.Data[BinaryVectorField].GetMemorySize(), 4)
 	assert.Equal(t, insertDataEmpty.Data[FloatVectorField].GetMemorySize(), 4)
+}
+
+func TestDeleteData(t *testing.T) {
+	pks, err := GenInt64PrimaryKeys(1, 2, 3)
+	require.NoError(t, err)
+
+	pks2, err := GenInt64PrimaryKeys(4, 5, 6)
+	require.NoError(t, err)
+
+	t.Run("merge", func(t *testing.T) {
+		first := NewDeleteData(pks, []Timestamp{100, 101, 102})
+		second := NewDeleteData(pks2, []Timestamp{103, 104, 105})
+		require.EqualValues(t, first.RowCount, second.RowCount)
+		require.EqualValues(t, first.Size(), second.Size())
+		require.EqualValues(t, 3, first.RowCount)
+		require.EqualValues(t, 72, first.Size())
+
+		first.Merge(second)
+		assert.Equal(t, len(first.Pks), 6)
+		assert.Equal(t, len(first.Tss), 6)
+		assert.EqualValues(t, first.RowCount, 6)
+		assert.EqualValues(t, first.Size(), 144)
+		assert.ElementsMatch(t, first.Pks, append(pks, pks2...))
+		assert.ElementsMatch(t, first.Tss, []Timestamp{100, 101, 102, 103, 104, 105})
+
+		assert.NotNil(t, second)
+		assert.EqualValues(t, 0, second.RowCount)
+		assert.EqualValues(t, 0, second.Size())
+	})
+
+	t.Run("append", func(t *testing.T) {
+		dData := NewDeleteData(nil, nil)
+		dData.Append(pks[0], 100)
+
+		assert.EqualValues(t, dData.RowCount, 1)
+		assert.EqualValues(t, dData.Size(), 24)
+	})
+
+	t.Run("append batch", func(t *testing.T) {
+		dData := NewDeleteData(nil, nil)
+		dData.AppendBatch(pks, []Timestamp{100, 101, 102})
+
+		assert.EqualValues(t, dData.RowCount, 3)
+		assert.EqualValues(t, dData.Size(), 72)
+	})
+}
+
+func TestAddFieldDataToPayload(t *testing.T) {
+	w := NewInsertBinlogWriter(schemapb.DataType_Int64, 10, 20, 30, 40, false)
+	e, _ := w.NextInsertEventWriter()
+	var err error
+	err = AddFieldDataToPayload(e, schemapb.DataType_Bool, &BoolFieldData{[]bool{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Int8, &Int8FieldData{[]int8{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Int16, &Int16FieldData{[]int16{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Int32, &Int32FieldData{[]int32{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Int64, &Int64FieldData{[]int64{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Float, &FloatFieldData{[]float32{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Double, &DoubleFieldData{[]float64{}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_String, &StringFieldData{[]string{"test"}, schemapb.DataType_VarChar, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Array, &ArrayFieldData{
+		ElementType: schemapb.DataType_VarChar,
+		Data: []*schemapb.ScalarField{{
+			Data: &schemapb.ScalarField_IntData{
+				IntData: &schemapb.IntArray{Data: []int32{1, 2, 3}},
+			},
+		}},
+	})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_JSON, &JSONFieldData{[][]byte{[]byte(`"batch":2}`)}, nil, false})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_BinaryVector, &BinaryVectorFieldData{[]byte{}, 8})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_FloatVector, &FloatVectorFieldData{[]float32{}, 4})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_Float16Vector, &Float16VectorFieldData{[]byte{}, 4})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_BFloat16Vector, &BFloat16VectorFieldData{[]byte{}, 8})
+	assert.Error(t, err)
+	err = AddFieldDataToPayload(e, schemapb.DataType_SparseFloatVector, &SparseFloatVectorFieldData{
+		SparseFloatArray: schemapb.SparseFloatArray{
+			Dim:      0,
+			Contents: [][]byte{},
+		},
+	})
+	assert.Error(t, err)
 }

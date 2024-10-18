@@ -16,6 +16,11 @@
 
 #pragma once
 
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <aws/core/Aws.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -25,6 +30,7 @@
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/utils/logging/FormattedLogSystem.h>
 #include <aws/s3/S3Client.h>
+#include <fmt/core.h>
 #include <google/cloud/credentials.h>
 #include <google/cloud/internal/oauth2_credentials.h>
 #include <google/cloud/internal/oauth2_google_credentials.h>
@@ -32,19 +38,18 @@
 #include <google/cloud/storage/oauth2/google_credentials.h>
 #include <google/cloud/status_or.h>
 
-#include <map>
-#include <memory>
-#include <string>
-#include <vector>
-#include <fmt/core.h>
-
 #include "common/EasyAssert.h"
+#include "common/Exception.h"
 #include "storage/ChunkManager.h"
 #include "storage/Types.h"
 
 namespace milvus::storage {
 
-enum class RemoteStorageType { S3 = 0, GOOGLE_CLOUD = 1, ALIYUN_CLOUD = 2 };
+enum class RemoteStorageType {
+    S3 = 0,
+    GOOGLE_CLOUD = 1,
+    ALIYUN_CLOUD = 2,
+};
 
 template <typename... Args>
 
@@ -113,8 +118,7 @@ class MinioChunkManager : public ChunkManager {
          uint64_t offset,
          void* buf,
          uint64_t len) {
-        throw SegcoreError(NotImplemented,
-                           GetName() + "Read with offset not implement");
+        PanicInfo(NotImplemented, GetName() + "Read with offset not implement");
     }
 
     virtual void
@@ -122,8 +126,8 @@ class MinioChunkManager : public ChunkManager {
           uint64_t offset,
           void* buf,
           uint64_t len) {
-        throw SegcoreError(NotImplemented,
-                           GetName() + "Write with offset not implement");
+        PanicInfo(NotImplemented,
+                  GetName() + "Write with offset not implement");
     }
 
     virtual uint64_t
@@ -257,6 +261,15 @@ class AliyunChunkManager : public MinioChunkManager {
     }
 };
 
+class TencentCloudChunkManager : public MinioChunkManager {
+ public:
+    explicit TencentCloudChunkManager(const StorageConfig& storage_config);
+    virtual std::string
+    GetName() const {
+        return "TencentCloudChunkManager";
+    }
+};
+
 using MinioChunkManagerPtr = std::unique_ptr<MinioChunkManager>;
 
 static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG =
@@ -302,7 +315,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
         request->SetResponseStreamFactory(streamFactory);
         auto auth_header = credentials_->AuthorizationHeader();
         if (!auth_header.ok()) {
-            throw SegcoreError(
+            PanicInfo(
                 S3Error,
                 fmt::format("get authorization failed, errcode: {}",
                             StatusCodeToString(auth_header.status().code())));

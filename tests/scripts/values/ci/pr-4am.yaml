@@ -3,6 +3,27 @@ metrics:
     enabled: true
 log:
   level: debug
+
+extraConfigFiles:
+  user.yaml: |+
+    indexCoord:
+      scheduler:
+        interval: 100
+
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 1
+      preference:
+        matchExpressions:
+        - key: "node-role.kubernetes.io/e2e"
+          operator: "Exists"
+
+tolerations:
+- key: "node-role.kubernetes.io/e2e"
+  operator: "Exists"
+  effect: "NoSchedule"  
+
 proxy:
   resources:
     requests:
@@ -64,6 +85,19 @@ pulsar:
   components:
     autorecovery: false
   proxy:
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+            - key: "node-role.kubernetes.io/e2e"
+              operator: "Exists"
+
+    tolerations:
+    - key: "node-role.kubernetes.io/e2e"
+      operator: "Exists"
+      effect: "NoSchedule"
     configData:
       PULSAR_MEM: >
         -Xms1024m -Xmx1024m
@@ -80,6 +114,19 @@ pulsar:
         memory: "100Mi"
         cpu: "0.1"
   broker:
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+            - key: "node-role.kubernetes.io/e2e"
+              operator: "Exists"
+
+    tolerations:
+    - key: "node-role.kubernetes.io/e2e"
+      operator: "Exists"
+      effect: "NoSchedule"
     resources:
       requests:
         cpu: "0.5"
@@ -108,6 +155,19 @@ pulsar:
       backlogQuotaDefaultRetentionPolicy: producer_exception
 
   bookkeeper:
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+            - key: "node-role.kubernetes.io/e2e"
+              operator: "Exists"
+
+    tolerations:
+    - key: "node-role.kubernetes.io/e2e"
+      operator: "Exists"
+      effect: "NoSchedule"
     configData:
       PULSAR_MEM: >
         -Xms4096m
@@ -135,6 +195,19 @@ pulsar:
         memory: "4Gi"
 
   zookeeper:
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+            - key: "node-role.kubernetes.io/e2e"
+              operator: "Exists"
+
+    tolerations:
+    - key: "node-role.kubernetes.io/e2e"
+      operator: "Exists"
+      effect: "NoSchedule"
     replicaCount: 1
     configData:
       PULSAR_MEM: >
@@ -154,25 +227,66 @@ pulsar:
         cpu: "0.3"
         memory: "512Mi"
 kafka:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+          - key: "node-role.kubernetes.io/e2e"
+            operator: "Exists"
+  tolerations:
+  - key: "node-role.kubernetes.io/e2e"
+    operator: "Exists"
+    effect: "NoSchedule"
+
   resources:
     requests:
       cpu: "0.5"
       memory: "1Gi"
   zookeeper:
+
     replicaCount: 1
     resources:
       requests:
         cpu: "0.3"
         memory: "512Mi"
 etcd:
-  nodeSelector:
-    nvme: "true"
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+          - key: "node-role.kubernetes.io/e2e"
+            operator: "Exists"
+
+  tolerations:
+  - key: "node-role.kubernetes.io/e2e"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+
   replicaCount: 1
   resources:
     requests:
       cpu: "0.3"
       memory: "100Mi"
 minio:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+          - key: "node-role.kubernetes.io/e2e"
+            operator: "Exists"
+
+  tolerations:
+  - key: "node-role.kubernetes.io/e2e"
+    operator: "Exists"
+    effect: "NoSchedule"
+
   resources:
     requests:
       cpu: "0.3"

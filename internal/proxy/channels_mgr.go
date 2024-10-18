@@ -19,7 +19,6 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strconv"
 	"sync"
 
@@ -178,7 +177,6 @@ func createStream(factory msgstream.Factory, pchans []pChan, repack repackFuncTy
 	var err error
 
 	stream, err = factory.NewMsgStream(context.Background())
-
 	if err != nil {
 		return nil, err
 	}
@@ -187,10 +185,6 @@ func createStream(factory msgstream.Factory, pchans []pChan, repack repackFuncTy
 	if repack != nil {
 		stream.SetRepackFunc(repack)
 	}
-	runtime.SetFinalizer(stream, func(stream msgstream.MsgStream) {
-		stream.Close()
-	})
-
 	return stream, nil
 }
 
@@ -240,6 +234,8 @@ func (mgr *singleTypeChannelsMgr) createMsgStream(collectionID UniqueID) (msgstr
 			zap.Strings("physical_channels", channelInfos.pchans))
 		mgr.infos[collectionID] = streamInfos{channelInfos: channelInfos, stream: stream}
 		incPChansMetrics(channelInfos.pchans)
+	} else {
+		stream.Close()
 	}
 
 	return mgr.infos[collectionID].stream, nil

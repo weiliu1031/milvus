@@ -22,10 +22,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
@@ -33,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/http/healthz"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/expr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -43,6 +46,13 @@ type HTTPServerTestSuite struct {
 func (suite *HTTPServerTestSuite) SetupSuite() {
 	paramtable.Init()
 	ServeHTTP()
+	conn, err := net.DialTimeout("tcp", "localhost:"+DefaultListenPort, time.Second*5)
+	if err != nil {
+		time.Sleep(time.Second)
+		conn, err = net.DialTimeout("tcp", "localhost:"+DefaultListenPort, time.Second*5)
+	}
+	suite.Equal(nil, err)
+	conn.Close()
 }
 
 func (suite *HTTPServerTestSuite) TearDownSuite() {
@@ -91,6 +101,7 @@ func (suite *HTTPServerTestSuite) TestHealthzHandler() {
 	url := "http://localhost:" + DefaultListenPort + "/healthz"
 	client := http.Client{}
 
+	healthz.SetComponentNum(1)
 	healthz.Register(&MockIndicator{"m1", commonpb.StateCode_Healthy})
 
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -108,6 +119,7 @@ func (suite *HTTPServerTestSuite) TestHealthzHandler() {
 	body, _ = io.ReadAll(resp.Body)
 	suite.Equal("{\"state\":\"OK\",\"detail\":[{\"name\":\"m1\",\"code\":1}]}", string(body))
 
+	healthz.SetComponentNum(2)
 	healthz.Register(&MockIndicator{"m2", commonpb.StateCode_Abnormal})
 	req, _ = http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("Content-Type", "application/json")
@@ -115,7 +127,10 @@ func (suite *HTTPServerTestSuite) TestHealthzHandler() {
 	suite.Nil(err)
 	defer resp.Body.Close()
 	body, _ = io.ReadAll(resp.Body)
-	suite.Equal("{\"state\":\"component m2 state is Abnormal\",\"detail\":[{\"name\":\"m1\",\"code\":1},{\"name\":\"m2\",\"code\":2}]}", string(body))
+	respObj := &healthz.HealthResponse{}
+	err = json.Unmarshal(body, respObj)
+	suite.NoError(err)
+	suite.NotEqual("OK", respObj.State)
 }
 
 func (suite *HTTPServerTestSuite) TestEventlogHandler() {
@@ -181,6 +196,31 @@ func (suite *HTTPServerTestSuite) TestPprofHandler() {
 			fmt.Println(err.Error())
 		}
 	}
+}
+
+func (suite *HTTPServerTestSuite) TestExprHandler() {
+	expr.Init()
+	expr.Register("foo", "hello")
+	suite.Run("fail", func() {
+		url := "http://localhost:" + DefaultListenPort + ExprPath + "?code=foo"
+		client := http.Client{}
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		resp, err := client.Do(req)
+		suite.Nil(err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		suite.True(strings.Contains(string(body), "failed to execute"))
+	})
+	suite.Run("success", func() {
+		url := "http://localhost:" + DefaultListenPort + ExprPath + "?auth=by-dev&code=foo"
+		client := http.Client{}
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		resp, err := client.Do(req)
+		suite.Nil(err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		suite.True(strings.Contains(string(body), "hello"))
+	})
 }
 
 func TestHTTPServerSuite(t *testing.T) {

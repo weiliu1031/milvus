@@ -20,7 +20,7 @@ func Test_GetPrivilegeExtObj(t *testing.T) {
 	assert.Equal(t, commonpb.ObjectPrivilege_PrivilegeLoad, privilegeExt.ObjectPrivilege)
 	assert.Equal(t, int32(3), privilegeExt.ObjectNameIndex)
 
-	request2 := &milvuspb.CreatePartitionRequest{}
+	request2 := &milvuspb.GetPersistentSegmentInfoRequest{}
 	_, err = GetPrivilegeExtObj(request2)
 	assert.Error(t, err)
 }
@@ -71,4 +71,11 @@ func Test_PolicyForResource(t *testing.T) {
 	assert.Equal(t,
 		`COLLECTION-db.col1`,
 		PolicyForResource("db", "COLLECTION", "col1"))
+}
+
+func Test_PolicyCheckerWithRole(t *testing.T) {
+	a := PolicyForPrivilege("admin", "COLLECTION", "col1", "ALL", "default")
+	b := PolicyForPrivilege("foo", "COLLECTION", "col1", "ALL", "default")
+	assert.True(t, PolicyCheckerWithRole(a, "admin"))
+	assert.False(t, PolicyCheckerWithRole(b, "admin"))
 }

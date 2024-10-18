@@ -18,6 +18,7 @@ package components
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -26,6 +27,7 @@ import (
 	grpcdatanode "github.com/milvus-io/milvus/internal/distributed/datanode"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -48,6 +50,10 @@ func NewDataNode(ctx context.Context, factory dependency.Factory) (*DataNode, er
 	}, nil
 }
 
+func (d *DataNode) Prepare() error {
+	return d.svr.Prepare()
+}
+
 // Run starts service
 func (d *DataNode) Run() error {
 	if err := d.svr.Run(); err != nil {
@@ -60,10 +66,8 @@ func (d *DataNode) Run() error {
 
 // Stop terminates service
 func (d *DataNode) Stop() error {
-	if err := d.svr.Stop(); err != nil {
-		return err
-	}
-	return nil
+	timeout := paramtable.Get().DataNodeCfg.GracefulStopTimeout.GetAsDuration(time.Second)
+	return exitWhenStopTimeout(d.svr.Stop, timeout)
 }
 
 // GetComponentStates returns DataNode's states

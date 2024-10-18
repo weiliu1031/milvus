@@ -58,7 +58,19 @@ enum ErrorCode {
     FieldNotLoaded = 2027,
     ExprInvalid = 2028,
     UnistdError = 2030,
+    MetricTypeNotMatch = 2031,
+    DimNotMatch = 2032,
+    ClusterSkip = 2033,
+    MemAllocateFailed = 2034,
+    MemAllocateSizeNotMatch = 2035,
+    MmapError = 2036,
+    OutOfRange = 2037,
+    GcpNativeError = 2038,
     KnowhereError = 2100,
+
+    // timeout or cancel related.
+    FollyOtherException = 2200,
+    FollyCancel = 2201
 };
 namespace impl {
 void
@@ -83,7 +95,7 @@ class SegcoreError : public std::runtime_error {
     }
 
     ErrorCode
-    get_error_code() {
+    get_error_code() const {
         return error_code_;
     }
 
@@ -107,11 +119,10 @@ FailureCStatus(int code, const std::string& msg) {
 }
 
 inline CStatus
-FailureCStatus(std::exception* ex) {
-    if (dynamic_cast<SegcoreError*>(ex) != nullptr) {
-        auto segcore_error = dynamic_cast<SegcoreError*>(ex);
-        return CStatus{static_cast<int>(segcore_error->get_error_code()),
-                       strdup(ex->what())};
+FailureCStatus(const std::exception* ex) {
+    if (auto segcore_err = dynamic_cast<const SegcoreError*>(ex)) {
+        return CStatus{static_cast<int>(segcore_err->get_error_code()),
+                       strdup(segcore_err->what())};
     }
     return CStatus{static_cast<int>(UnexpectedError), strdup(ex->what())};
 }
@@ -120,7 +131,7 @@ FailureCStatus(std::exception* ex) {
 
 #define AssertInfo(expr, info, args...)                              \
     do {                                                             \
-        auto _expr_res = bool(expr);                                 \
+        auto _expr_res = static_cast<bool>(expr);                    \
         /* call func only when needed */                             \
         if (!_expr_res) {                                            \
             milvus::impl::EasyAssertInfo(_expr_res,                  \

@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package paramtable
 
@@ -84,14 +89,14 @@ func TestServiceParam(t *testing.T) {
 		// test default value
 		{
 			pc := &PulsarConfig{}
-			base := &BaseTable{mgr: &config.Manager{}}
+			base := &BaseTable{mgr: config.NewManager()}
 			pc.Init(base)
 			assert.Empty(t, pc.Address.GetValue())
 		}
 		{
 			assert.NotEqual(t, SParams.PulsarCfg.Address.GetValue(), "")
 			t.Logf("pulsar address = %s", SParams.PulsarCfg.Address.GetValue())
-			assert.Equal(t, SParams.PulsarCfg.MaxMessageSize.GetAsInt(), SuggestPulsarMaxMessageSize)
+			assert.Equal(t, SParams.PulsarCfg.MaxMessageSize.GetAsInt(), 2097152)
 		}
 
 		address := "pulsar://localhost:6650"
@@ -163,12 +168,17 @@ func TestServiceParam(t *testing.T) {
 		// test default value
 		{
 			kc := &KafkaConfig{}
-			base := &BaseTable{mgr: &config.Manager{}}
+			base := &BaseTable{mgr: config.NewManager()}
 			kc.Init(base)
 			assert.Empty(t, kc.Address.GetValue())
-			assert.Equal(t, kc.SaslMechanisms.GetValue(), "PLAIN")
-			assert.Equal(t, kc.SecurityProtocol.GetValue(), "SASL_SSL")
+			assert.Empty(t, kc.SaslMechanisms.GetValue())
+			assert.Empty(t, kc.SecurityProtocol.GetValue())
 			assert.Equal(t, kc.ReadTimeout.GetAsDuration(time.Second), 10*time.Second)
+			assert.Equal(t, kc.KafkaUseSSL.GetAsBool(), false)
+			assert.Empty(t, kc.KafkaTLSCACert.GetValue())
+			assert.Empty(t, kc.KafkaTLSCert.GetValue())
+			assert.Empty(t, kc.KafkaTLSKey.GetValue())
+			assert.Empty(t, kc.KafkaTLSKeyPassword.GetValue())
 		}
 	})
 
@@ -186,11 +196,15 @@ func TestServiceParam(t *testing.T) {
 
 		assert.Equal(t, Params.UseSSL.GetAsBool(), false)
 
+		assert.NotEmpty(t, Params.SslCACert.GetValue())
+
 		assert.Equal(t, Params.UseIAM.GetAsBool(), false)
 
 		assert.Equal(t, Params.CloudProvider.GetValue(), "aws")
 
 		assert.Equal(t, Params.IAMEndpoint.GetValue(), "")
+
+		assert.Equal(t, Params.GcpCredentialJSON.GetValue(), "")
 
 		t.Logf("Minio BucketName = %s", Params.BucketName.GetValue())
 

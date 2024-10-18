@@ -18,7 +18,7 @@
 #include "common/SystemProperty.h"
 #include "common/Tracer.h"
 #include "common/Types.h"
-#include "query/generated/ExecPlanNodeVisitor.h"
+#include "query/ExecPlanNodeVisitor.h"
 
 namespace milvus::segcore {
 
@@ -56,10 +56,21 @@ SegmentInternalInterface::FillTargetEntry(const query::Plan* plan,
     AssertInfo(results.seg_offsets_.size() == size,
                "Size of result distances is not equal to size of ids");
 
+    std::unique_ptr<DataArray> field_data;
     // fill other entries except primary key by result_offset
     for (auto field_id : plan->target_entries_) {
-        auto field_data =
-            bulk_subscript(field_id, results.seg_offsets_.data(), size);
+        if (plan->schema_.get_dynamic_field_id().has_value() &&
+            plan->schema_.get_dynamic_field_id().value() == field_id &&
+            !plan->target_dynamic_fields_.empty()) {
+            auto& target_dynamic_fields = plan->target_dynamic_fields_;
+            field_data = std::move(bulk_subscript(field_id,
+                                                  results.seg_offsets_.data(),
+                                                  size,
+                                                  target_dynamic_fields));
+        } else {
+            field_data = std::move(
+                bulk_subscript(field_id, results.seg_offsets_.data(), size));
+        }
         results.output_fields_data_[field_id] = std::move(field_data);
     }
 }
@@ -67,11 +78,12 @@ SegmentInternalInterface::FillTargetEntry(const query::Plan* plan,
 std::unique_ptr<SearchResult>
 SegmentInternalInterface::Search(
     const query::Plan* plan,
-    const query::PlaceholderGroup* placeholder_group) const {
+    const query::PlaceholderGroup* placeholder_group,
+    Timestamp timestamp) const {
     std::shared_lock lck(mutex_);
     milvus::tracer::AddEvent("obtained_segment_lock_mutex");
     check_search(plan);
-    query::ExecPlanNodeVisitor visitor(*this, 1L << 63, placeholder_group);
+    query::ExecPlanNodeVisitor visitor(*this, timestamp, placeholder_group);
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
@@ -79,14 +91,18 @@ SegmentInternalInterface::Search(
 }
 
 std::unique_ptr<proto::segcore::RetrieveResults>
-SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
+SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
+                                   const query::RetrievePlan* plan,
                                    Timestamp timestamp,
-                                   int64_t limit_size) const {
+                                   int64_t limit_size,
+                                   bool ignore_non_pk) const {
     std::shared_lock lck(mutex_);
+    tracer::AutoSpan span("Retrieve", tracer::GetRootSpan());
     auto results = std::make_unique<proto::segcore::RetrieveResults>();
     query::ExecPlanNodeVisitor visitor(*this, timestamp);
     auto retrieve_results = visitor.get_retrieve_result(*plan->plan_node_);
     retrieve_results.segment_ = (void*)this;
+    results->set_has_more_result(retrieve_results.has_more_result);
 
     auto result_rows = retrieve_results.result_offsets_.size();
     int64_t output_data_size = 0;
@@ -94,11 +110,12 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
         output_data_size += get_field_avg_size(field_id) * result_rows;
     }
     if (output_data_size > limit_size) {
-        throw SegcoreError(
+        PanicInfo(
             RetrieveError,
             fmt::format("query results exceed the limit size ", limit_size));
     }
 
+    results->set_all_retrieve_count(retrieve_results.total_data_cnt_);
     if (plan->plan_node_->is_count_) {
         AssertInfo(retrieve_results.field_data_.size() == 1,
                    "count result should only have one column");
@@ -108,21 +125,42 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
 
     results->mutable_offset()->Add(retrieve_results.result_offsets_.begin(),
                                    retrieve_results.result_offsets_.end());
+    FillTargetEntry(trace_ctx,
+                    plan,
+                    results,
+                    retrieve_results.result_offsets_.data(),
+                    retrieve_results.result_offsets_.size(),
+                    ignore_non_pk,
+                    true);
+    return results;
+}
+
+void
+SegmentInternalInterface::FillTargetEntry(
+    tracer::TraceContext* trace_ctx,
+    const query::RetrievePlan* plan,
+    const std::unique_ptr<proto::segcore::RetrieveResults>& results,
+    const int64_t* offsets,
+    int64_t size,
+    bool ignore_non_pk,
+    bool fill_ids) const {
+    tracer::AutoSpan span("FillTargetEntry", tracer::GetRootSpan());
 
     auto fields_data = results->mutable_fields_data();
     auto ids = results->mutable_ids();
     auto pk_field_id = plan->schema_.get_primary_field_id();
+
+    auto is_pk_field = [&, pk_field_id](const FieldId& field_id) -> bool {
+        return pk_field_id.has_value() && pk_field_id.value() == field_id;
+    };
+
     for (auto field_id : plan->field_ids_) {
         if (SystemProperty::Instance().IsSystem(field_id)) {
             auto system_type =
                 SystemProperty::Instance().GetSystemFieldType(field_id);
 
-            auto size = retrieve_results.result_offsets_.size();
             FixedVector<int64_t> output(size);
-            bulk_subscript(system_type,
-                           retrieve_results.result_offsets_.data(),
-                           size,
-                           output.data());
+            bulk_subscript(system_type, offsets, size, output.data());
 
             auto data_array = std::make_unique<DataArray>();
             data_array->set_field_id(field_id.get());
@@ -136,18 +174,31 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
             continue;
         }
 
+        if (ignore_non_pk && !is_pk_field(field_id)) {
+            continue;
+        }
+
+        if (plan->schema_.get_dynamic_field_id().has_value() &&
+            plan->schema_.get_dynamic_field_id().value() == field_id &&
+            !plan->target_dynamic_fields_.empty()) {
+            auto& target_dynamic_fields = plan->target_dynamic_fields_;
+            auto col =
+                bulk_subscript(field_id, offsets, size, target_dynamic_fields);
+            fields_data->AddAllocated(col.release());
+            continue;
+        }
+
         auto& field_meta = plan->schema_[field_id];
 
-        auto col = bulk_subscript(field_id,
-                                  retrieve_results.result_offsets_.data(),
-                                  retrieve_results.result_offsets_.size());
+        auto col = bulk_subscript(field_id, offsets, size);
         if (field_meta.get_data_type() == DataType::ARRAY) {
             col->mutable_scalars()->mutable_array_data()->set_element_type(
                 proto::schema::DataType(field_meta.get_element_type()));
         }
-        auto col_data = col.release();
-        fields_data->AddAllocated(col_data);
-        if (pk_field_id.has_value() && pk_field_id.value() == field_id) {
+        if (fill_ids && is_pk_field(field_id)) {
+            // fill_ids should be true when the first Retrieve was called. The reduce phase depends on the ids to do
+            // merge-sort.
+            auto col_data = col.get();
             switch (field_meta.get_data_type()) {
                 case DataType::INT64: {
                     auto int_ids = ids->mutable_int_id();
@@ -171,7 +222,27 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
                 }
             }
         }
+        if (!ignore_non_pk) {
+            // when ignore_non_pk is false, it indicates two situations:
+            //  1. No need to do the two-phase Retrieval, the target entries should be returned as the first Retrieval
+            //      is done, below two cases are included:
+            //       a. There is only one segment;
+            //       b. No pagination is used;
+            //  2. The FillTargetEntry was called by the second Retrieval (by offsets).
+            fields_data->AddAllocated(col.release());
+        }
     }
+}
+
+std::unique_ptr<proto::segcore::RetrieveResults>
+SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
+                                   const query::RetrievePlan* Plan,
+                                   const int64_t* offsets,
+                                   int64_t size) const {
+    std::shared_lock lck(mutex_);
+    tracer::AutoSpan span("RetrieveByOffsets", tracer::GetRootSpan());
+    auto results = std::make_unique<proto::segcore::RetrieveResults>();
+    FillTargetEntry(trace_ctx, Plan, results, offsets, size, false, false);
     return results;
 }
 
@@ -186,8 +257,16 @@ SegmentInternalInterface::get_real_count() const {
 #endif
     auto plan = std::make_unique<query::RetrievePlan>(get_schema());
     plan->plan_node_ = std::make_unique<query::RetrievePlanNode>();
+    milvus::plan::PlanNodePtr plannode;
+    std::vector<milvus::plan::PlanNodePtr> sources;
+    plannode = std::make_shared<milvus::plan::MvccNode>(
+        milvus::plan::GetNextPlanNodeId());
+    sources = std::vector<milvus::plan::PlanNodePtr>{plannode};
+    plannode = std::make_shared<milvus::plan::CountNode>(
+        milvus::plan::GetNextPlanNodeId(), sources);
+    plan->plan_node_->plannodes_ = plannode;
     plan->plan_node_->is_count_ = true;
-    auto res = Retrieve(plan.get(), MAX_TIMESTAMP, INT64_MAX);
+    auto res = Retrieve(nullptr, plan.get(), MAX_TIMESTAMP, INT64_MAX, false);
     AssertInfo(res->fields_data().size() == 1,
                "count result should only have one column");
     AssertInfo(res->fields_data()[0].has_scalars(),
@@ -208,7 +287,7 @@ SegmentInternalInterface::get_field_avg_size(FieldId field_id) const {
             return sizeof(int64_t);
         }
 
-        throw SegcoreError(FieldIDInvalid, "unsupported system field id");
+        PanicInfo(FieldIDInvalid, "unsupported system field id");
     }
 
     auto schema = get_schema();
@@ -216,7 +295,7 @@ SegmentInternalInterface::get_field_avg_size(FieldId field_id) const {
     auto data_type = field_meta.get_data_type();
 
     std::shared_lock lck(mutex_);
-    if (datatype_is_variable(data_type)) {
+    if (IsVariableDataType(data_type)) {
         if (variable_fields_avg_size_.find(field_id) ==
             variable_fields_avg_size_.end()) {
             return 0;
@@ -239,7 +318,7 @@ SegmentInternalInterface::set_field_avg_size(FieldId field_id,
     auto data_type = field_meta.get_data_type();
 
     std::unique_lock lck(mutex_);
-    if (datatype_is_variable(data_type)) {
+    if (IsVariableDataType(data_type)) {
         AssertInfo(num_rows > 0,
                    "The num rows of field data should be greater than 0");
         if (variable_fields_avg_size_.find(field_id) ==
@@ -266,11 +345,15 @@ SegmentInternalInterface::timestamp_filter(BitsetType& bitset,
 
     auto pilot = upper_bound(timestamps, 0, cnt, timestamp);
     // offset bigger than pilot should be filtered out.
-    for (int offset = pilot; offset < cnt; offset = bitset.find_next(offset)) {
-        if (offset == BitsetType::npos) {
+    auto offset = pilot;
+    while (offset < cnt) {
+        bitset[offset] = false;
+
+        const auto next_offset = bitset.find_next(offset);
+        if (!next_offset.has_value()) {
             return;
         }
-        bitset[offset] = false;
+        offset = next_offset.value();
     }
 }
 
@@ -295,7 +378,7 @@ SegmentInternalInterface::timestamp_filter(BitsetType& bitset,
 
 const SkipIndex&
 SegmentInternalInterface::GetSkipIndex() const {
-    return skipIndex_;
+    return skip_index_;
 }
 
 void
@@ -303,16 +386,19 @@ SegmentInternalInterface::LoadPrimitiveSkipIndex(milvus::FieldId field_id,
                                                  int64_t chunk_id,
                                                  milvus::DataType data_type,
                                                  const void* chunk_data,
+                                                 const bool* valid_data,
                                                  int64_t count) {
-    skipIndex_.LoadPrimitive(field_id, chunk_id, data_type, chunk_data, count);
+    skip_index_.LoadPrimitive(
+        field_id, chunk_id, data_type, chunk_data, valid_data, count);
 }
 
-void
-SegmentInternalInterface::LoadStringSkipIndex(
-    milvus::FieldId field_id,
-    int64_t chunk_id,
-    const milvus::VariableColumn<std::string>& var_column) {
-    skipIndex_.LoadString(field_id, chunk_id, var_column);
+index::TextMatchIndex*
+SegmentInternalInterface::GetTextIndex(FieldId field_id) const {
+    std::shared_lock lock(mutex_);
+    auto iter = text_indexes_.find(field_id);
+    AssertInfo(iter != text_indexes_.end(),
+               "failed to get text index, text index not found");
+    return iter->second.get();
 }
 
 }  // namespace milvus::segcore

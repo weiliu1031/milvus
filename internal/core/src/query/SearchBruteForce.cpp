@@ -12,15 +12,19 @@
 #include <string>
 #include <vector>
 
+#include "SearchBruteForce.h"
+#include "SubSearchResult.h"
 #include "common/Consts.h"
 #include "common/EasyAssert.h"
 #include "common/RangeSearchHelper.h"
 #include "common/Utils.h"
 #include "common/Tracer.h"
-#include "SearchBruteForce.h"
-#include "SubSearchResult.h"
+#include "common/Types.h"
 #include "knowhere/comp/brute_force.h"
 #include "knowhere/comp/index_param.h"
+#include "knowhere/index/index_node.h"
+#include "log/Log.h"
+
 namespace milvus::query {
 
 void
@@ -29,20 +33,40 @@ CheckBruteForceSearchParam(const FieldMeta& field,
     auto data_type = field.get_data_type();
     auto& metric_type = search_info.metric_type_;
 
-    AssertInfo(datatype_is_vector(data_type),
+    AssertInfo(IsVectorDataType(data_type),
                "[BruteForceSearch] Data type isn't vector type");
-    bool is_float_data_type = (data_type == DataType::VECTOR_FLOAT ||
-                               data_type == DataType::VECTOR_FLOAT16);
+    bool is_float_vec_data_type = IsFloatVectorDataType(data_type);
     bool is_float_metric_type = IsFloatMetricType(metric_type);
-    AssertInfo(is_float_data_type == is_float_metric_type,
+    AssertInfo(is_float_vec_data_type == is_float_metric_type,
                "[BruteForceSearch] Data type and metric type miss-match");
+}
+
+knowhere::Json
+PrepareBFSearchParams(const SearchInfo& search_info) {
+    knowhere::Json search_cfg = search_info.search_params_;
+
+    search_cfg[knowhere::meta::METRIC_TYPE] = search_info.metric_type_;
+    search_cfg[knowhere::meta::TOPK] = search_info.topk_;
+
+    // save trace context into search conf
+    if (search_info.trace_ctx_.traceID != nullptr &&
+        search_info.trace_ctx_.spanID != nullptr) {
+        search_cfg[knowhere::meta::TRACE_ID] =
+            tracer::GetTraceIDAsHexStr(&search_info.trace_ctx_);
+        search_cfg[knowhere::meta::SPAN_ID] =
+            tracer::GetSpanIDAsHexStr(&search_info.trace_ctx_);
+        search_cfg[knowhere::meta::TRACE_FLAGS] =
+            search_info.trace_ctx_.traceFlags;
+    }
+
+    return search_cfg;
 }
 
 SubSearchResult
 BruteForceSearch(const dataset::SearchDataset& dataset,
                  const void* chunk_data_raw,
                  int64_t chunk_rows,
-                 const knowhere::Json& conf,
+                 const SearchInfo& search_info,
                  const BitsetView& bitset,
                  DataType data_type) {
     SubSearchResult sub_result(dataset.num_queries,
@@ -55,60 +79,54 @@ BruteForceSearch(const dataset::SearchDataset& dataset,
 
     auto base_dataset = knowhere::GenDataSet(chunk_rows, dim, chunk_data_raw);
     auto query_dataset = knowhere::GenDataSet(nq, dim, dataset.query_data);
-
-    if (data_type == DataType::VECTOR_FLOAT16) {
-        // Todo: Temporarily use cast to float32 to achieve, need to optimize
-        // first, First, transfer the cast to knowhere part
-        // second, knowhere partially supports float16 and removes the forced conversion to float32
-        auto xb = base_dataset->GetTensor();
-        std::vector<float> float_xb(base_dataset->GetRows() *
-                                    base_dataset->GetDim());
-
-        auto xq = query_dataset->GetTensor();
-        std::vector<float> float_xq(query_dataset->GetRows() *
-                                    query_dataset->GetDim());
-
-        auto fp16_xb = static_cast<const float16*>(xb);
-        for (int i = 0; i < base_dataset->GetRows() * base_dataset->GetDim();
-             i++) {
-            float_xb[i] = (float)fp16_xb[i];
-        }
-
-        auto fp16_xq = static_cast<const float16*>(xq);
-        for (int i = 0; i < query_dataset->GetRows() * query_dataset->GetDim();
-             i++) {
-            float_xq[i] = (float)fp16_xq[i];
-        }
-        void* void_ptr_xb = static_cast<void*>(float_xb.data());
-        void* void_ptr_xq = static_cast<void*>(float_xq.data());
-        base_dataset = knowhere::GenDataSet(chunk_rows, dim, void_ptr_xb);
-        query_dataset = knowhere::GenDataSet(nq, dim, void_ptr_xq);
+    if (data_type == DataType::VECTOR_SPARSE_FLOAT) {
+        base_dataset->SetIsSparse(true);
+        query_dataset->SetIsSparse(true);
     }
-
-    auto config = knowhere::Json{
-        {knowhere::meta::METRIC_TYPE, dataset.metric_type},
-        {knowhere::meta::DIM, dim},
-        {knowhere::meta::TOPK, topk},
-    };
+    auto search_cfg = PrepareBFSearchParams(search_info);
+    // `range_search_k` is only used as one of the conditions for iterator early termination.
+    // not gurantee to return exactly `range_search_k` results, which may be more or less.
+    // set it to -1 will return all results in the range.
+    search_cfg[knowhere::meta::RANGE_SEARCH_K] = topk;
 
     sub_result.mutable_seg_offsets().resize(nq * topk);
     sub_result.mutable_distances().resize(nq * topk);
 
-    if (conf.contains(RADIUS)) {
-        config[RADIUS] = conf[RADIUS].get<float>();
-        if (conf.contains(RANGE_FILTER)) {
-            config[RANGE_FILTER] = conf[RANGE_FILTER].get<float>();
-            CheckRangeSearchParam(
-                config[RADIUS], config[RANGE_FILTER], dataset.metric_type);
+    if (search_cfg.contains(RADIUS)) {
+        if (search_cfg.contains(RANGE_FILTER)) {
+            CheckRangeSearchParam(search_cfg[RADIUS],
+                                  search_cfg[RANGE_FILTER],
+                                  search_info.metric_type_);
         }
-        auto res = knowhere::BruteForce::RangeSearch(
-            base_dataset, query_dataset, config, bitset);
+        knowhere::expected<knowhere::DataSetPtr> res;
+        if (data_type == DataType::VECTOR_FLOAT) {
+            res = knowhere::BruteForce::RangeSearch<float>(
+                base_dataset, query_dataset, search_cfg, bitset);
+        } else if (data_type == DataType::VECTOR_FLOAT16) {
+            res = knowhere::BruteForce::RangeSearch<float16>(
+                base_dataset, query_dataset, search_cfg, bitset);
+        } else if (data_type == DataType::VECTOR_BFLOAT16) {
+            res = knowhere::BruteForce::RangeSearch<bfloat16>(
+                base_dataset, query_dataset, search_cfg, bitset);
+        } else if (data_type == DataType::VECTOR_BINARY) {
+            res = knowhere::BruteForce::RangeSearch<uint8_t>(
+                base_dataset, query_dataset, search_cfg, bitset);
+        } else if (data_type == DataType::VECTOR_SPARSE_FLOAT) {
+            res = knowhere::BruteForce::RangeSearch<
+                knowhere::sparse::SparseRow<float>>(
+                base_dataset, query_dataset, search_cfg, bitset);
+        } else {
+            PanicInfo(
+                ErrorCode::Unsupported,
+                "Unsupported dataType for chunk brute force range search:{}",
+                data_type);
+        }
         milvus::tracer::AddEvent("knowhere_finish_BruteForce_RangeSearch");
         if (!res.has_value()) {
             PanicInfo(KnowhereError,
-                      fmt::format("failed to range search: {}: {}",
-                                  KnowhereStatusString(res.error()),
-                                  res.what()));
+                      "Brute force range search fail: {}, {}",
+                      KnowhereStatusString(res.error()),
+                      res.what());
         }
         auto result =
             ReGenRangeSearchResult(res.value(), topk, nq, dataset.metric_type);
@@ -118,22 +136,125 @@ BruteForceSearch(const dataset::SearchDataset& dataset,
         std::copy_n(
             GetDatasetDistance(result), nq * topk, sub_result.get_distances());
     } else {
-        auto stat = knowhere::BruteForce::SearchWithBuf(
-            base_dataset,
-            query_dataset,
-            sub_result.mutable_seg_offsets().data(),
-            sub_result.mutable_distances().data(),
-            config,
-            bitset);
+        knowhere::Status stat;
+        if (data_type == DataType::VECTOR_FLOAT) {
+            stat = knowhere::BruteForce::SearchWithBuf<float>(
+                base_dataset,
+                query_dataset,
+                sub_result.mutable_seg_offsets().data(),
+                sub_result.mutable_distances().data(),
+                search_cfg,
+                bitset);
+        } else if (data_type == DataType::VECTOR_FLOAT16) {
+            stat = knowhere::BruteForce::SearchWithBuf<float16>(
+                base_dataset,
+                query_dataset,
+                sub_result.mutable_seg_offsets().data(),
+                sub_result.mutable_distances().data(),
+                search_cfg,
+                bitset);
+        } else if (data_type == DataType::VECTOR_BFLOAT16) {
+            stat = knowhere::BruteForce::SearchWithBuf<bfloat16>(
+                base_dataset,
+                query_dataset,
+                sub_result.mutable_seg_offsets().data(),
+                sub_result.mutable_distances().data(),
+                search_cfg,
+                bitset);
+        } else if (data_type == DataType::VECTOR_BINARY) {
+            stat = knowhere::BruteForce::SearchWithBuf<uint8_t>(
+                base_dataset,
+                query_dataset,
+                sub_result.mutable_seg_offsets().data(),
+                sub_result.mutable_distances().data(),
+                search_cfg,
+                bitset);
+        } else if (data_type == DataType::VECTOR_SPARSE_FLOAT) {
+            stat = knowhere::BruteForce::SearchSparseWithBuf(
+                base_dataset,
+                query_dataset,
+                sub_result.mutable_seg_offsets().data(),
+                sub_result.mutable_distances().data(),
+                search_cfg,
+                bitset);
+        } else {
+            PanicInfo(ErrorCode::Unsupported,
+                      "Unsupported dataType for chunk brute force search:{}",
+                      data_type);
+        }
         milvus::tracer::AddEvent("knowhere_finish_BruteForce_SearchWithBuf");
         if (stat != knowhere::Status::success) {
-            throw SegcoreError(
-                KnowhereError,
-                "invalid metric type, " + KnowhereStatusString(stat));
+            PanicInfo(KnowhereError,
+                      "Brute force search fail: " + KnowhereStatusString(stat));
         }
     }
     sub_result.round_values();
     return sub_result;
+}
+
+SubSearchResult
+BruteForceSearchIterators(const dataset::SearchDataset& dataset,
+                          const void* chunk_data_raw,
+                          int64_t chunk_rows,
+                          const SearchInfo& search_info,
+                          const BitsetView& bitset,
+                          DataType data_type) {
+    auto nq = dataset.num_queries;
+    auto dim = dataset.dim;
+    auto base_dataset = knowhere::GenDataSet(chunk_rows, dim, chunk_data_raw);
+    auto query_dataset = knowhere::GenDataSet(nq, dim, dataset.query_data);
+    if (data_type == DataType::VECTOR_SPARSE_FLOAT) {
+        base_dataset->SetIsSparse(true);
+        query_dataset->SetIsSparse(true);
+    }
+    auto search_cfg = PrepareBFSearchParams(search_info);
+
+    knowhere::expected<std::vector<knowhere::IndexNode::IteratorPtr>>
+        iterators_val;
+    switch (data_type) {
+        case DataType::VECTOR_FLOAT:
+            iterators_val = knowhere::BruteForce::AnnIterator<float>(
+                base_dataset, query_dataset, search_cfg, bitset);
+            break;
+        case DataType::VECTOR_FLOAT16:
+            iterators_val = knowhere::BruteForce::AnnIterator<float16>(
+                base_dataset, query_dataset, search_cfg, bitset);
+            break;
+        case DataType::VECTOR_BFLOAT16:
+            iterators_val = knowhere::BruteForce::AnnIterator<bfloat16>(
+                base_dataset, query_dataset, search_cfg, bitset);
+            break;
+        case DataType::VECTOR_SPARSE_FLOAT:
+            iterators_val = knowhere::BruteForce::AnnIterator<
+                knowhere::sparse::SparseRow<float>>(
+                base_dataset, query_dataset, search_cfg, bitset);
+            break;
+        default:
+            PanicInfo(ErrorCode::Unsupported,
+                      "Unsupported dataType for chunk brute force iterator:{}",
+                      data_type);
+    }
+    if (iterators_val.has_value()) {
+        AssertInfo(
+            iterators_val.value().size() == nq,
+            "Wrong state, initialized knowhere_iterators count:{} is not "
+            "equal to nq:{} for single chunk",
+            iterators_val.value().size(),
+            nq);
+        SubSearchResult subSearchResult(dataset.num_queries,
+                                        dataset.topk,
+                                        dataset.metric_type,
+                                        dataset.round_decimal,
+                                        iterators_val.value());
+        return std::move(subSearchResult);
+    } else {
+        LOG_ERROR(
+            "Failed to get valid knowhere brute-force-iterators from chunk, "
+            "terminate search_group_by operation");
+        PanicInfo(ErrorCode::Unsupported,
+                  "Returned knowhere brute-force-iterator has non-ready "
+                  "iterators inside, terminate search_group_by operation");
+    }
 }
 
 }  // namespace milvus::query

@@ -41,6 +41,7 @@ import (
 )
 
 type upsertTask struct {
+	baseTask
 	Condition
 
 	upsertMsg *msgstream.UpsertMsg
@@ -59,9 +60,12 @@ type upsertTask struct {
 	chTicker         channelsTimeTicker
 	vChannels        []vChan
 	pChannels        []pChan
-	schema           *schemapb.CollectionSchema
+	schema           *schemaInfo
 	partitionKeyMode bool
 	partitionKeys    *schemapb.FieldData
+	// automatic generate pk as new pk wehen autoID == true
+	// delete task need use the oldIds
+	oldIds *schemapb.IDs
 }
 
 // TraceCtx returns upsertTask context
@@ -133,6 +137,11 @@ func (it *upsertTask) getChannels() []pChan {
 }
 
 func (it *upsertTask) OnEnqueue() error {
+	if it.req.Base == nil {
+		it.req.Base = commonpbutil.NewMsgBase()
+	}
+	it.req.Base.MsgType = commonpb.MsgType_Upsert
+	it.req.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }
 
@@ -147,7 +156,7 @@ func (it *upsertTask) insertPreExecute(ctx context.Context) error {
 	// set upsertTask.insertRequest.rowIDs
 	tr := timerecord.NewTimeRecorder("applyPK")
 	rowIDBegin, rowIDEnd, _ := it.idAllocator.Alloc(rowNums)
-	metrics.ProxyApplyPrimaryKeyLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(tr.ElapseSpan()))
+	metrics.ProxyApplyPrimaryKeyLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 
 	it.upsertMsg.InsertMsg.RowIDs = make([]UniqueID, rowNums)
 	it.rowIDs = make([]UniqueID, rowNums)
@@ -172,32 +181,32 @@ func (it *upsertTask) insertPreExecute(ctx context.Context) error {
 	it.result.SuccIndex = sliceIndex
 
 	if it.schema.EnableDynamicField {
-		err := checkDynamicFieldData(it.schema, it.upsertMsg.InsertMsg)
+		err := checkDynamicFieldData(it.schema.CollectionSchema, it.upsertMsg.InsertMsg)
 		if err != nil {
 			return err
 		}
 	}
 
-	// check primaryFieldData whether autoID is true or not
-	// only allow support autoID == false
+	// use the passed pk as new pk when autoID == false
+	// automatic generate pk as new pk wehen autoID == true
 	var err error
-	it.result.IDs, err = checkPrimaryFieldData(it.schema, it.result, it.upsertMsg.InsertMsg, false)
+	it.result.IDs, it.oldIds, err = checkUpsertPrimaryFieldData(it.schema.CollectionSchema, it.upsertMsg.InsertMsg)
 	log := log.Ctx(ctx).With(zap.String("collectionName", it.upsertMsg.InsertMsg.CollectionName))
 	if err != nil {
 		log.Warn("check primary field data and hash primary key failed when upsert",
 			zap.Error(err))
-		return err
+		return merr.WrapErrAsInputErrorWhen(err, merr.ErrParameterInvalid)
 	}
 	// set field ID to insert field data
-	err = fillFieldIDBySchema(it.upsertMsg.InsertMsg.GetFieldsData(), it.schema)
+	err = fillFieldPropertiesBySchema(it.upsertMsg.InsertMsg.GetFieldsData(), it.schema.CollectionSchema)
 	if err != nil {
 		log.Warn("insert set fieldID to fieldData failed when upsert",
 			zap.Error(err))
-		return err
+		return merr.WrapErrAsInputErrorWhen(err, merr.ErrParameterInvalid)
 	}
 
 	if it.partitionKeyMode {
-		fieldSchema, _ := typeutil.GetPartitionKeyFieldSchema(it.schema)
+		fieldSchema, _ := typeutil.GetPartitionKeyFieldSchema(it.schema.CollectionSchema)
 		it.partitionKeys, err = getPartitionKeyFieldData(fieldSchema, it.upsertMsg.InsertMsg)
 		if err != nil {
 			log.Warn("get partition keys from insert request failed",
@@ -214,7 +223,7 @@ func (it *upsertTask) insertPreExecute(ctx context.Context) error {
 	}
 
 	if err := newValidateUtil(withNANCheck(), withOverflowCheck(), withMaxLenCheck()).
-		Validate(it.upsertMsg.InsertMsg.GetFieldsData(), it.schema, it.upsertMsg.InsertMsg.NRows()); err != nil {
+		Validate(it.upsertMsg.InsertMsg.GetFieldsData(), it.schema.schemaHelper, it.upsertMsg.InsertMsg.NRows()); err != nil {
 		return err
 	}
 
@@ -244,7 +253,7 @@ func (it *upsertTask) deletePreExecute(ctx context.Context) error {
 		// multi entities with same pk and diff partition keys may be hashed to multi physical partitions
 		// if deleteMsg.partitionID = common.InvalidPartition,
 		// all segments with this pk under the collection will have the delete record
-		it.upsertMsg.DeleteMsg.PartitionID = common.InvalidPartitionID
+		it.upsertMsg.DeleteMsg.PartitionID = common.AllPartitionsID
 	} else {
 		// partition name could be defaultPartitionName or name specified by sdk
 		partName := it.upsertMsg.DeleteMsg.PartitionName
@@ -315,7 +324,7 @@ func (it *upsertTask) PreExecute(ctx context.Context) error {
 
 	it.upsertMsg = &msgstream.UpsertMsg{
 		InsertMsg: &msgstream.InsertMsg{
-			InsertRequest: msgpb.InsertRequest{
+			InsertRequest: &msgpb.InsertRequest{
 				Base: commonpbutil.NewMsgBase(
 					commonpbutil.WithMsgType(commonpb.MsgType_Insert),
 					commonpbutil.WithSourceID(paramtable.GetNodeID()),
@@ -329,7 +338,7 @@ func (it *upsertTask) PreExecute(ctx context.Context) error {
 			},
 		},
 		DeleteMsg: &msgstream.DeleteMsg{
-			DeleteRequest: msgpb.DeleteRequest{
+			DeleteRequest: &msgpb.DeleteRequest{
 				Base: commonpbutil.NewMsgBase(
 					commonpbutil.WithMsgType(commonpb.MsgType_Delete),
 					commonpbutil.WithSourceID(paramtable.GetNodeID()),
@@ -439,7 +448,7 @@ func (it *upsertTask) deleteExecute(ctx context.Context, msgPack *msgstream.MsgP
 		it.result.Status = merr.Status(err)
 		return err
 	}
-	it.upsertMsg.DeleteMsg.PrimaryKeys = it.result.IDs
+	it.upsertMsg.DeleteMsg.PrimaryKeys = it.oldIds
 	it.upsertMsg.DeleteMsg.HashValues = typeutil.HashPK2Channels(it.upsertMsg.DeleteMsg.PrimaryKeys, channelNames)
 
 	// repack delete msg by dmChannel
@@ -455,9 +464,9 @@ func (it *upsertTask) deleteExecute(ctx context.Context, msgPack *msgstream.MsgP
 		if !ok {
 			msgid, err := it.idAllocator.AllocOne()
 			if err != nil {
-				errors.Wrap(err, "failed to allocate MsgID for delete of upsert")
+				return errors.Wrap(err, "failed to allocate MsgID for delete of upsert")
 			}
-			sliceRequest := msgpb.DeleteRequest{
+			sliceRequest := &msgpb.DeleteRequest{
 				Base: commonpbutil.NewMsgBase(
 					commonpbutil.WithMsgType(commonpb.MsgType_Delete),
 					commonpbutil.WithTimeStamp(ts),

@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/exp/mmap"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
@@ -66,6 +67,9 @@ var (
 					Description:  "",
 					DataType:     schemapb.DataType_FloatVector,
 					AutoID:       false,
+					TypeParams: []*commonpb.KeyValuePair{
+						{Key: common.DimKey, Value: "8"},
+					},
 				},
 			},
 		},
@@ -136,14 +140,8 @@ func (c *mockChunkmgr) MultiRead(ctx context.Context, filePaths []string) ([][]b
 	return nil, errNotImplErr
 }
 
-func (c *mockChunkmgr) ReadWithPrefix(ctx context.Context, prefix string) ([]string, [][]byte, error) {
-	// TODO
-	return nil, nil, errNotImplErr
-}
-
-func (c *mockChunkmgr) ListWithPrefix(ctx context.Context, prefix string, recursive bool) ([]string, []time.Time, error) {
-	// TODO
-	return nil, nil, errNotImplErr
+func (c *mockChunkmgr) WalkWithPrefix(ctx context.Context, prefix string, recursive bool, walkFunc storage.ChunkObjectWalkFunc) error {
+	return errNotImplErr
 }
 
 func (c *mockChunkmgr) Mmap(ctx context.Context, filePath string) (*mmap.ReaderAt, error) {

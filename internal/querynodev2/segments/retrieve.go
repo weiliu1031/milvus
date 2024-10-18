@@ -21,65 +21,75 @@ import (
 	"fmt"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	"github.com/milvus-io/milvus/internal/util/streamrpc"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
+
+type RetrieveSegmentResult struct {
+	Result  *segcorepb.RetrieveResults
+	Segment Segment
+}
 
 // retrieveOnSegments performs retrieve on listed segments
 // all segment ids are validated before calling this function
-func retrieveOnSegments(ctx context.Context, segments []Segment, segType SegmentType, plan *RetrievePlan) ([]*segcorepb.RetrieveResults, error) {
-	var (
-		resultCh = make(chan *segcorepb.RetrieveResults, len(segments))
-		errs     = make([]error, len(segments))
-		wg       sync.WaitGroup
-	)
+func retrieveOnSegments(ctx context.Context, mgr *Manager, segments []Segment, segType SegmentType, plan *RetrievePlan, req *querypb.QueryRequest) ([]RetrieveSegmentResult, error) {
+	resultCh := make(chan RetrieveSegmentResult, len(segments))
+
+	anySegIsLazyLoad := func() bool {
+		for _, seg := range segments {
+			if seg.IsLazyLoad() {
+				return true
+			}
+		}
+		return false
+	}()
+	plan.ignoreNonPk = !anySegIsLazyLoad && len(segments) > 1 && req.GetReq().GetLimit() != typeutil.Unlimited && plan.ShouldIgnoreNonPk()
 
 	label := metrics.SealedSegmentLabel
 	if segType == commonpb.SegmentState_Growing {
 		label = metrics.GrowingSegmentLabel
 	}
 
-	for i, segment := range segments {
-		wg.Add(1)
-		go func(seg Segment, i int) {
-			defer wg.Done()
-			tr := timerecord.NewTimeRecorder("retrieveOnSegments")
-			result, err := seg.Retrieve(ctx, plan)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			errs[i] = nil
-			resultCh <- result
-			metrics.QueryNodeSQSegmentLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
-				metrics.QueryLabel, label).Observe(float64(tr.ElapseSpan().Milliseconds()))
-		}(segment, i)
-	}
-	wg.Wait()
-	close(resultCh)
-
-	for _, err := range errs {
+	retriever := func(ctx context.Context, s Segment) error {
+		tr := timerecord.NewTimeRecorder("retrieveOnSegments")
+		result, err := s.Retrieve(ctx, plan)
 		if err != nil {
-			return nil, err
+			return err
 		}
+		resultCh <- RetrieveSegmentResult{
+			result,
+			s,
+		}
+		metrics.QueryNodeSQSegmentLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
+			metrics.QueryLabel, label).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		return nil
 	}
 
-	var retrieveResults []*segcorepb.RetrieveResults
-	for result := range resultCh {
-		retrieveResults = append(retrieveResults, result)
+	err := doOnSegments(ctx, mgr, segments, retriever)
+	close(resultCh)
+	if err != nil {
+		return nil, err
 	}
 
-	return retrieveResults, nil
+	results := make([]RetrieveSegmentResult, 0, len(segments))
+	for r := range resultCh {
+		results = append(results, r)
+	}
+	return results, nil
 }
 
-func retrieveOnSegmentsWithStream(ctx context.Context, segments []Segment, segType SegmentType, plan *RetrievePlan, svr streamrpc.QueryStreamServer) error {
+func retrieveOnSegmentsWithStream(ctx context.Context, mgr *Manager, segments []Segment, segType SegmentType, plan *RetrievePlan, svr streamrpc.QueryStreamServer) error {
 	var (
 		errs = make([]error, len(segments))
 		wg   sync.WaitGroup
@@ -95,18 +105,30 @@ func retrieveOnSegmentsWithStream(ctx context.Context, segments []Segment, segTy
 		go func(segment Segment, i int) {
 			defer wg.Done()
 			tr := timerecord.NewTimeRecorder("retrieveOnSegmentsWithStream")
-			result, err := segment.Retrieve(ctx, plan)
+			var result *segcorepb.RetrieveResults
+			err := doOnSegment(ctx, mgr, segment, func(ctx context.Context, segment Segment) error {
+				var err error
+				result, err = segment.Retrieve(ctx, plan)
+				return err
+			})
 			if err != nil {
 				errs[i] = err
 				return
 			}
 
-			if err = svr.Send(&internalpb.RetrieveResults{
-				Status:     merr.Success(),
-				Ids:        result.GetIds(),
-				FieldsData: result.GetFieldsData(),
-			}); err != nil {
-				errs[i] = err
+			if len(result.GetOffset()) != 0 {
+				if err = svr.Send(&internalpb.RetrieveResults{
+					Status:     merr.Success(),
+					Ids:        result.GetIds(),
+					FieldsData: result.GetFieldsData(),
+					CostAggregation: &internalpb.CostAggregation{
+						TotalRelatedDataSize: GetSegmentRelatedDataSize(segment),
+					},
+					SealedSegmentIDsRetrieved: []int64{segment.ID()},
+					AllRetrieveCount:          result.GetAllRetrieveCount(),
+				}); err != nil {
+					errs[i] = err
+				}
 			}
 
 			errs[i] = nil
@@ -119,29 +141,33 @@ func retrieveOnSegmentsWithStream(ctx context.Context, segments []Segment, segTy
 }
 
 // retrieve will retrieve all the validate target segments
-func Retrieve(ctx context.Context, manager *Manager, plan *RetrievePlan, req *querypb.QueryRequest) ([]*segcorepb.RetrieveResults, []Segment, error) {
+func Retrieve(ctx context.Context, manager *Manager, plan *RetrievePlan, req *querypb.QueryRequest) ([]RetrieveSegmentResult, []Segment, error) {
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+
 	var err error
 	var SegType commonpb.SegmentState
-	var retrieveResults []*segcorepb.RetrieveResults
 	var retrieveSegments []Segment
 
 	segIDs := req.GetSegmentIDs()
 	collID := req.Req.GetCollectionID()
+	log.Debug("retrieve on segments", zap.Int64s("segmentIDs", segIDs), zap.Int64("collectionID", collID))
 
 	if req.GetScope() == querypb.DataScope_Historical {
 		SegType = SegmentTypeSealed
-		retrieveSegments, err = validateOnHistorical(ctx, manager, collID, nil, segIDs)
+		retrieveSegments, err = validateOnHistorical(ctx, manager, collID, req.GetReq().GetPartitionIDs(), segIDs)
 	} else {
 		SegType = SegmentTypeGrowing
-		retrieveSegments, err = validateOnStream(ctx, manager, collID, nil, segIDs)
+		retrieveSegments, err = validateOnStream(ctx, manager, collID, req.GetReq().GetPartitionIDs(), segIDs)
 	}
 
 	if err != nil {
-		return retrieveResults, retrieveSegments, err
+		return nil, retrieveSegments, err
 	}
 
-	retrieveResults, err = retrieveOnSegments(ctx, retrieveSegments, SegType, plan)
-	return retrieveResults, retrieveSegments, err
+	result, err := retrieveOnSegments(ctx, manager, retrieveSegments, SegType, plan, req)
+	return result, retrieveSegments, err
 }
 
 // retrieveStreaming will retrieve all the validate target segments  and  return by stream
@@ -155,16 +181,16 @@ func RetrieveStream(ctx context.Context, manager *Manager, plan *RetrievePlan, r
 
 	if req.GetScope() == querypb.DataScope_Historical {
 		SegType = SegmentTypeSealed
-		retrieveSegments, err = validateOnHistorical(ctx, manager, collID, nil, segIDs)
+		retrieveSegments, err = validateOnHistorical(ctx, manager, collID, req.GetReq().GetPartitionIDs(), segIDs)
 	} else {
 		SegType = SegmentTypeGrowing
-		retrieveSegments, err = validateOnStream(ctx, manager, collID, nil, segIDs)
+		retrieveSegments, err = validateOnStream(ctx, manager, collID, req.GetReq().GetPartitionIDs(), segIDs)
 	}
 
 	if err != nil {
 		return retrieveSegments, err
 	}
 
-	err = retrieveOnSegmentsWithStream(ctx, retrieveSegments, SegType, plan, srv)
+	err = retrieveOnSegmentsWithStream(ctx, manager, retrieveSegments, SegType, plan, srv)
 	return retrieveSegments, err
 }

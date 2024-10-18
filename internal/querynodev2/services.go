@@ -21,12 +21,13 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -37,7 +38,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
-	"github.com/milvus-io/milvus/internal/querynodev2/collector"
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tasks"
@@ -48,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/hardware"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -64,11 +65,11 @@ func (node *QueryNode) GetComponentStates(ctx context.Context, req *milvuspb.Get
 	code := node.lifetime.GetState()
 	nodeID := common.NotRegisteredID
 
+	if node.session != nil && node.session.Registered() {
+		nodeID = node.GetNodeID()
+	}
 	log.Debug("QueryNode current state", zap.Int64("NodeID", nodeID), zap.String("StateCode", code.String()))
 
-	if node.session != nil && node.session.Registered() {
-		nodeID = paramtable.GetNodeID()
-	}
 	info := &milvuspb.ComponentInfo{
 		NodeID:    nodeID,
 		Role:      typeutil.QueryNodeRole,
@@ -113,13 +114,6 @@ func (node *QueryNode) GetStatistics(ctx context.Context, req *querypb.GetStatis
 	}
 	defer node.lifetime.Done()
 
-	err := merr.CheckTargetID(req.GetReq().GetBase())
-	if err != nil {
-		log.Warn("target ID check failed", zap.Error(err))
-		return &internalpb.GetStatisticsResponse{
-			Status: merr.Status(err),
-		}, nil
-	}
 	failRet := &internalpb.GetStatisticsResponse{
 		Status: merr.Success(),
 	}
@@ -196,17 +190,18 @@ func (node *QueryNode) composeIndexMeta(indexInfos []*indexpb.IndexInfo, schema 
 }
 
 // WatchDmChannels create consumers on dmChannels to receive Incremental data，which is the important part of real-time query
-func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDmChannelsRequest) (*commonpb.Status, error) {
+func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDmChannelsRequest) (status *commonpb.Status, e error) {
+	defer node.updateDistributionModifyTS()
+
 	channel := req.GetInfos()[0]
 	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", req.GetCollectionID()),
 		zap.String("channel", channel.GetChannelName()),
-		zap.Int64("currentNodeID", paramtable.GetNodeID()),
+		zap.Int64("currentNodeID", node.GetNodeID()),
 	)
 
 	log.Info("received watch channel request",
 		zap.Int64("version", req.GetVersion()),
-		zap.String("metricType", req.GetLoadMeta().GetMetricType()),
 	)
 
 	// check node healthy
@@ -214,17 +209,6 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
-
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
-		return merr.Status(err), nil
-	}
-
-	// check metric type
-	if req.GetLoadMeta().GetMetricType() == "" {
-		err := fmt.Errorf("empty metric type, collection = %d", req.GetCollectionID())
-		return merr.Status(err), nil
-	}
 
 	// check index
 	if len(req.GetIndexInfoList()) == 0 {
@@ -254,8 +238,12 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 
 	node.manager.Collection.PutOrRef(req.GetCollectionID(), req.GetSchema(),
 		node.composeIndexMeta(req.GetIndexInfoList(), req.Schema), req.GetLoadMeta())
-	collection := node.manager.Collection.Get(req.GetCollectionID())
-	collection.SetMetricType(req.GetLoadMeta().GetMetricType())
+	defer func() {
+		if !merr.Ok(status) {
+			node.manager.Collection.Unref(req.GetCollectionID(), 1)
+		}
+	}()
+
 	delegator, err := delegator.NewShardDelegator(
 		ctx,
 		req.GetCollectionID(),
@@ -269,6 +257,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 		node.factory,
 		channel.GetSeekPosition().GetTimestamp(),
 		node.queryHook,
+		node.chunkManager,
 	)
 	if err != nil {
 		log.Warn("failed to create shard delegator", zap.Error(err))
@@ -301,29 +290,22 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 		}
 	}()
 
-	flushedSet := typeutil.NewSet(channel.GetFlushedSegmentIds()...)
-	infos := lo.Map(lo.Values(req.GetSegmentInfos()), func(info *datapb.SegmentInfo, _ int) *datapb.SegmentInfo {
-		if flushedSet.Contain(info.GetID()) {
-			// for flushed segments, exclude all insert data
-			info = typeutil.Clone(info)
-			info.DmlPosition = &msgpb.MsgPosition{
-				Timestamp: typeutil.MaxTimestamp,
-			}
-		}
-		return info
+	growingInfo := lo.SliceToMap(channel.GetUnflushedSegmentIds(), func(id int64) (int64, uint64) {
+		info := req.GetSegmentInfos()[id]
+		return id, info.GetDmlPosition().GetTimestamp()
 	})
-	pipeline.ExcludedSegments(infos...)
-	for _, channelInfo := range req.GetInfos() {
-		droppedInfos := lo.Map(channelInfo.GetDroppedSegmentIds(), func(id int64, _ int) *datapb.SegmentInfo {
-			return &datapb.SegmentInfo{
-				ID: id,
-				DmlPosition: &msgpb.MsgPosition{
-					Timestamp: typeutil.MaxTimestamp,
-				},
-			}
-		})
-		pipeline.ExcludedSegments(droppedInfos...)
-	}
+	delegator.AddExcludedSegments(growingInfo)
+
+	defer func() {
+		if err != nil {
+			// remove legacy growing
+			node.manager.Segment.RemoveBy(ctx, segments.WithChannel(channel.GetChannelName()),
+				segments.WithType(segments.SegmentTypeGrowing))
+			// remove legacy l0 segments
+			node.manager.Segment.RemoveBy(ctx, segments.WithChannel(channel.GetChannelName()),
+				segments.WithLevel(datapb.SegmentLevel_L0))
+		}
+	}()
 
 	err = loadL0Segments(ctx, delegator, req)
 	if err != nil {
@@ -360,10 +342,11 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 }
 
 func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmChannelRequest) (*commonpb.Status, error) {
+	defer node.updateDistributionModifyTS()
 	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", req.GetCollectionID()),
 		zap.String("channel", req.GetChannelName()),
-		zap.Int64("currentNodeID", paramtable.GetNodeID()),
+		zap.Int64("currentNodeID", node.GetNodeID()),
 	)
 
 	log.Info("received unsubscribe channel request")
@@ -374,11 +357,6 @@ func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmC
 	}
 	defer node.lifetime.Done()
 
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
-		return merr.Status(err), nil
-	}
-
 	node.unsubscribingChannels.Insert(req.GetChannelName())
 	defer node.unsubscribingChannels.Remove(req.GetChannelName())
 	delegator, ok := node.delegators.GetAndRemove(req.GetChannelName())
@@ -387,7 +365,8 @@ func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmC
 		delegator.Close()
 
 		node.pipelineManager.Remove(req.GetChannelName())
-		node.manager.Segment.RemoveBy(segments.WithChannel(req.GetChannelName()), segments.WithType(segments.SegmentTypeGrowing))
+		node.manager.Segment.RemoveBy(ctx, segments.WithChannel(req.GetChannelName()), segments.WithType(segments.SegmentTypeGrowing))
+		node.manager.Segment.RemoveBy(ctx, segments.WithChannel(req.GetChannelName()), segments.WithLevel(datapb.SegmentLevel_L0))
 		node.tSafeManager.Remove(ctx, req.GetChannelName())
 
 		node.manager.Collection.Unref(req.GetCollectionID(), 1)
@@ -421,6 +400,7 @@ func (node *QueryNode) LoadPartitions(ctx context.Context, req *querypb.LoadPart
 
 // LoadSegments load historical data into query node, historical data can be vector data or index
 func (node *QueryNode) LoadSegments(ctx context.Context, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
+	defer node.updateDistributionModifyTS()
 	segment := req.GetInfos()[0]
 
 	log := log.Ctx(ctx).With(
@@ -428,28 +408,41 @@ func (node *QueryNode) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 		zap.Int64("partitionID", segment.GetPartitionID()),
 		zap.String("shard", segment.GetInsertChannel()),
 		zap.Int64("segmentID", segment.GetSegmentID()),
-		zap.Int64("currentNodeID", paramtable.GetNodeID()),
+		zap.String("level", segment.GetLevel().String()),
+		zap.Int64("currentNodeID", node.GetNodeID()),
+		zap.Int64("dstNodeID", req.GetDstNodeID()),
 	)
 
 	log.Info("received load segments request",
 		zap.Int64("version", req.GetVersion()),
 		zap.Bool("needTransfer", req.GetNeedTransfer()),
-	)
+		zap.String("loadScope", req.GetLoadScope().String()))
 	// check node healthy
 	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
-	node.lifetime.Done()
-
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
-		return merr.Status(err), nil
-	}
+	defer node.lifetime.Done()
 
 	// check index
 	if len(req.GetIndexInfoList()) == 0 {
 		err := merr.WrapErrIndexNotFoundForCollection(req.GetSchema().GetName())
 		return merr.Status(err), nil
+	}
+
+	// fallback binlog memory size to log size when it is zero
+	fallbackBinlogMemorySize := func(binlogs []*datapb.FieldBinlog) {
+		for _, insertBinlogs := range binlogs {
+			for _, b := range insertBinlogs.GetBinlogs() {
+				if b.GetMemorySize() == 0 {
+					b.MemorySize = b.GetLogSize()
+				}
+			}
+		}
+	}
+	for _, s := range req.GetInfos() {
+		fallbackBinlogMemorySize(s.GetBinlogPaths())
+		fallbackBinlogMemorySize(s.GetStatslogs())
+		fallbackBinlogMemorySize(s.GetDeltalogs())
 	}
 
 	// Delegates request to workers
@@ -541,11 +534,12 @@ func (node *QueryNode) ReleasePartitions(ctx context.Context, req *querypb.Relea
 
 // ReleaseSegments remove the specified segments from query node according segmentIDs, partitionIDs, and collectionID
 func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.ReleaseSegmentsRequest) (*commonpb.Status, error) {
+	defer node.updateDistributionModifyTS()
 	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", req.GetCollectionID()),
 		zap.String("shard", req.GetShard()),
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
-		zap.Int64("currentNodeID", paramtable.GetNodeID()),
+		zap.Int64("currentNodeID", node.GetNodeID()),
 	)
 
 	log.Info("received release segment request",
@@ -559,11 +553,6 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 	}
 	defer node.lifetime.Done()
 
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
-		return merr.Status(err), nil
-	}
-
 	if req.GetNeedTransfer() {
 		delegator, ok := node.delegators.Get(req.GetShard())
 		if !ok {
@@ -571,21 +560,6 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 			log.Warn(msg)
 			err := merr.WrapErrChannelNotFound(req.GetShard())
 			return merr.Status(err), nil
-		}
-
-		// when we try to release a segment, add it to pipeline's exclude list first
-		// in case of consumed it's growing segment again
-		pipeline := node.pipelineManager.Get(req.GetShard())
-		if pipeline != nil {
-			droppedInfos := lo.Map(req.GetSegmentIDs(), func(id int64, _ int) *datapb.SegmentInfo {
-				return &datapb.SegmentInfo{
-					ID: id,
-					DmlPosition: &msgpb.MsgPosition{
-						Timestamp: typeutil.MaxTimestamp,
-					},
-				}
-			})
-			pipeline.ExcludedSegments(droppedInfos...)
 		}
 
 		req.NeedTransfer = false
@@ -601,7 +575,7 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 	log.Info("start to release segments")
 	sealedCount := 0
 	for _, id := range req.GetSegmentIDs() {
-		_, count := node.manager.Segment.Remove(id, req.GetScope())
+		_, count := node.manager.Segment.Remove(ctx, id, req.GetScope())
 		sealedCount += count
 	}
 	node.manager.Collection.Unref(req.GetCollectionID(), uint32(sealedCount))
@@ -648,11 +622,11 @@ func (node *QueryNode) GetSegmentInfo(ctx context.Context, in *querypb.GetSegmen
 		info := &querypb.SegmentInfo{
 			SegmentID:    segment.ID(),
 			SegmentState: segment.Type(),
-			DmChannel:    segment.Shard(),
+			DmChannel:    segment.Shard().VirtualName(),
 			PartitionID:  segment.Partition(),
 			CollectionID: segment.Collection(),
-			NodeID:       paramtable.GetNodeID(),
-			NodeIds:      []int64{paramtable.GetNodeID()},
+			NodeID:       node.GetNodeID(),
+			NodeIds:      []int64{node.GetNodeID()},
 			MemSize:      segment.MemSize(),
 			NumRows:      segment.InsertCount(),
 			IndexName:    indexName,
@@ -677,18 +651,23 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 		zap.String("channel", channel),
 		zap.String("scope", req.GetScope().String()),
 	)
-
-	resp := &internalpb.SearchResults{}
+	channelsMvcc := make(map[string]uint64)
+	for _, ch := range req.GetDmlChannels() {
+		channelsMvcc[ch] = req.GetReq().GetMvccTimestamp()
+	}
+	resp := &internalpb.SearchResults{
+		ChannelsMvcc: channelsMvcc,
+	}
 	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		resp.Status = merr.Status(err)
 		return resp, nil
 	}
 	defer node.lifetime.Done()
 
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
 	defer func() {
-		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.FailLabel, metrics.FromLeader).Inc()
+		if !merr.Ok(resp.GetStatus()) {
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.FailLabel, metrics.FromLeader).Inc()
 		}
 	}()
 
@@ -709,7 +688,13 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 		return resp, nil
 	}
 
-	task := tasks.NewSearchTask(searchCtx, collection, node.manager, req)
+	var task tasks.Task
+	if paramtable.Get().QueryNodeCfg.UseStreamComputing.GetAsBool() {
+		task = tasks.NewStreamingSearchTask(searchCtx, collection, node.manager, req, node.serverID)
+	} else {
+		task = tasks.NewSearchTask(searchCtx, collection, node.manager, req, node.serverID)
+	}
+
 	if err := node.scheduler.Add(task); err != nil {
 		log.Warn("failed to search channel", zap.Error(err))
 		resp.Status = merr.Status(err)
@@ -729,10 +714,10 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 	))
 
 	latency := tr.ElapseSpan()
-	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
+	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
 
-	resp = task.Result()
+	resp = task.SearchResult()
 	resp.GetCostAggregation().ResponseTime = tr.ElapseSpan().Milliseconds()
 	resp.GetCostAggregation().TotalNQ = node.scheduler.GetWaitingTaskTotalNQ()
 	return resp, nil
@@ -740,21 +725,16 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 
 // Search performs replica search tasks.
 func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (*internalpb.SearchResults, error) {
-	if req.FromShardLeader {
-		// for compatible with rolling upgrade from version before v2.2.9
-		return node.SearchSegments(ctx, req)
-	}
-
 	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", req.GetReq().GetCollectionID()),
 		zap.Strings("channels", req.GetDmlChannels()),
-		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
 		zap.Int64("nq", req.GetReq().GetNq()),
 	)
 
 	log.Debug("Received SearchRequest",
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
-		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()))
+		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()),
+		zap.Uint64("mvccTimestamp", req.GetReq().GetMvccTimestamp()))
 
 	tr := timerecord.NewTimeRecorderWithTrace(ctx, "SearchRequest")
 
@@ -765,14 +745,6 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 	}
 	defer node.lifetime.Done()
 
-	err := merr.CheckTargetID(req.GetReq().GetBase())
-	if err != nil {
-		log.Warn("target ID check failed", zap.Error(err))
-		return &internalpb.SearchResults{
-			Status: merr.Status(err),
-		}, nil
-	}
-
 	resp := &internalpb.SearchResults{
 		Status: merr.Success(),
 	}
@@ -782,71 +754,41 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 		return resp, nil
 	}
 
-	// Check if the metric type specified in search params matches the metric type in the index info.
-	if !req.GetFromShardLeader() && req.GetReq().GetMetricType() != "" {
-		if req.GetReq().GetMetricType() != collection.GetMetricType() {
-			resp.Status = merr.Status(merr.WrapErrParameterInvalid(collection.GetMetricType(), req.GetReq().GetMetricType(),
-				fmt.Sprintf("collection:%d, metric type not match", collection.ID())))
-			return resp, nil
-		}
+	if len(req.GetDmlChannels()) != 1 {
+		err := merr.WrapErrParameterInvalid(1, len(req.GetDmlChannels()), "count of channel to be searched should only be 1, wrong code")
+		resp.Status = merr.Status(err)
+		log.Warn("got wrong number of channels to be searched", zap.Error(err))
+		return resp, nil
 	}
 
-	// Define the metric type when it has not been explicitly assigned by the user.
-	if !req.GetFromShardLeader() && req.GetReq().GetMetricType() == "" {
-		req.Req.MetricType = collection.GetMetricType()
+	ch := req.GetDmlChannels()[0]
+	channelReq := &querypb.SearchRequest{
+		Req:             req.Req,
+		DmlChannels:     []string{ch},
+		SegmentIDs:      req.SegmentIDs,
+		Scope:           req.Scope,
+		TotalChannelNum: req.TotalChannelNum,
 	}
-
-	toReduceResults := make([]*internalpb.SearchResults, len(req.GetDmlChannels()))
-	runningGp, runningCtx := errgroup.WithContext(ctx)
-	for i, ch := range req.GetDmlChannels() {
-		ch := ch
-		req := &querypb.SearchRequest{
-			Req:             req.Req,
-			DmlChannels:     []string{ch},
-			SegmentIDs:      req.SegmentIDs,
-			FromShardLeader: req.FromShardLeader,
-			Scope:           req.Scope,
-			TotalChannelNum: req.TotalChannelNum,
-		}
-
-		i := i
-		runningGp.Go(func() error {
-			ret, err := node.searchChannel(runningCtx, req, ch)
-			if err != nil {
-				return err
-			}
-			if err := merr.Error(ret.GetStatus()); err != nil {
-				return err
-			}
-			toReduceResults[i] = ret
-			return nil
-		})
-	}
-	if err := runningGp.Wait(); err != nil {
+	ret, err := node.searchChannel(ctx, channelReq, ch)
+	if err != nil {
 		resp.Status = merr.Status(err)
 		return resp, nil
 	}
 
 	tr.RecordSpan()
-	result, err := segments.ReduceSearchResults(ctx, toReduceResults, req.Req.GetNq(), req.Req.GetTopk(), req.Req.GetMetricType())
-	if err != nil {
-		log.Warn("failed to reduce search results", zap.Error(err))
-		resp.Status = merr.Status(err)
-		return resp, nil
-	}
-	reduceLatency := tr.RecordSpan()
-	metrics.QueryNodeReduceLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.ReduceShards).
-		Observe(float64(reduceLatency.Milliseconds()))
+	ret.Status = merr.Success()
 
-	collector.Rate.Add(metricsinfo.NQPerSecond, float64(req.GetReq().GetNq()))
-	collector.Rate.Add(metricsinfo.SearchThroughput, float64(proto.Size(req)))
-	metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.SearchLabel).
+	reduceLatency := tr.RecordSpan()
+	metrics.QueryNodeReduceLatency.
+		WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.ReduceShards, metrics.BatchReduce).
+		Observe(float64(reduceLatency.Milliseconds()))
+	metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(node.GetNodeID(), 10), metrics.SearchLabel).
 		Add(float64(proto.Size(req)))
 
-	if result.GetCostAggregation() != nil {
-		result.GetCostAggregation().ResponseTime = tr.ElapseSpan().Milliseconds()
+	if ret.GetCostAggregation() != nil {
+		ret.GetCostAggregation().ResponseTime = tr.ElapseSpan().Milliseconds()
 	}
-	return result, nil
+	return ret, nil
 }
 
 // only used for delegator query segments from worker
@@ -870,17 +812,14 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 	}
 	defer node.lifetime.Done()
 
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
 	defer func() {
 		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.FromLeader).Inc()
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.FromLeader).Inc()
 		}
 	}()
 
-	log.Debug("start do query segments",
-		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
-		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
-	)
+	log.Debug("start do query segments", zap.Int64s("segmentIDs", req.GetSegmentIDs()))
 	// add cancel when error occurs
 	queryCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -906,17 +845,16 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 		return resp, nil
 	}
 
-	tr.CtxElapse(ctx, fmt.Sprintf("do query done, traceID = %s, fromShardLeader = %t, vChannel = %s, segmentIDs = %v",
+	tr.CtxElapse(ctx, fmt.Sprintf("do query done, traceID = %s,  vChannel = %s, segmentIDs = %v",
 		traceID,
-		req.GetFromShardLeader(),
 		channel,
 		req.GetSegmentIDs(),
 	))
 
 	// TODO QueryNodeSQLatencyInQueue QueryNodeReduceLatency
 	latency := tr.ElapseSpan()
-	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
+	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
 	result := task.Result()
 	result.GetCostAggregation().ResponseTime = latency.Milliseconds()
 	result.GetCostAggregation().TotalNQ = node.scheduler.GetWaitingTaskTotalNQ()
@@ -925,11 +863,6 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 
 // Query performs replica query tasks.
 func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*internalpb.RetrieveResults, error) {
-	if req.FromShardLeader {
-		// for compatible with rolling upgrade from version before v2.2.9
-		return node.QuerySegments(ctx, req)
-	}
-
 	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", req.GetReq().GetCollectionID()),
 		zap.Strings("shards", req.GetDmlChannels()),
@@ -951,25 +884,16 @@ func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*i
 	}
 	defer node.lifetime.Done()
 
-	err := merr.CheckTargetID(req.GetReq().GetBase())
-	if err != nil {
-		log.Warn("target ID check failed", zap.Error(err))
-		return &internalpb.RetrieveResults{
-			Status: merr.Status(err),
-		}, nil
-	}
-
 	toMergeResults := make([]*internalpb.RetrieveResults, len(req.GetDmlChannels()))
 	runningGp, runningCtx := errgroup.WithContext(ctx)
 
 	for i, ch := range req.GetDmlChannels() {
 		ch := ch
 		req := &querypb.QueryRequest{
-			Req:             req.Req,
-			DmlChannels:     []string{ch},
-			SegmentIDs:      req.SegmentIDs,
-			FromShardLeader: req.FromShardLeader,
-			Scope:           req.Scope,
+			Req:         req.Req,
+			DmlChannels: []string{ch},
+			SegmentIDs:  req.SegmentIDs,
+			Scope:       req.Scope,
 		}
 
 		idx := i
@@ -1000,17 +924,20 @@ func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*i
 		}, nil
 	}
 	reduceLatency := tr.RecordSpan()
-	metrics.QueryNodeReduceLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.ReduceShards).
+	metrics.QueryNodeReduceLatency.WithLabelValues(fmt.Sprint(node.GetNodeID()),
+		metrics.QueryLabel, metrics.ReduceShards, metrics.BatchReduce).
 		Observe(float64(reduceLatency.Milliseconds()))
 
-	if !req.FromShardLeader {
-		collector.Rate.Add(metricsinfo.NQPerSecond, 1)
-		metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel).Add(float64(proto.Size(req)))
-	}
+	metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(node.GetNodeID(), 10), metrics.QueryLabel).Add(float64(proto.Size(req)))
+	relatedDataSize := lo.Reduce(toMergeResults, func(acc int64, result *internalpb.RetrieveResults, _ int) int64 {
+		return acc + result.GetCostAggregation().GetTotalRelatedDataSize()
+	}, 0)
 
-	if ret.GetCostAggregation() != nil {
-		ret.GetCostAggregation().ResponseTime = tr.ElapseSpan().Milliseconds()
+	if ret.CostAggregation == nil {
+		ret.CostAggregation = &internalpb.CostAggregation{}
 	}
+	ret.CostAggregation.ResponseTime = tr.ElapseSpan().Milliseconds()
+	ret.CostAggregation.TotalRelatedDataSize = relatedDataSize
 	return ret, nil
 }
 
@@ -1036,22 +963,15 @@ func (node *QueryNode) QueryStream(req *querypb.QueryRequest, srv querypb.QueryN
 	}
 	defer node.lifetime.Done()
 
-	err := merr.CheckTargetID(req.GetReq().GetBase())
-	if err != nil {
-		log.Warn("target ID check failed", zap.Error(err))
-		return err
-	}
-
 	runningGp, runningCtx := errgroup.WithContext(ctx)
 
 	for _, ch := range req.GetDmlChannels() {
 		ch := ch
 		req := &querypb.QueryRequest{
-			Req:             req.Req,
-			DmlChannels:     []string{ch},
-			SegmentIDs:      req.SegmentIDs,
-			FromShardLeader: req.FromShardLeader,
-			Scope:           req.Scope,
+			Req:         req.Req,
+			DmlChannels: []string{ch},
+			SegmentIDs:  req.SegmentIDs,
+			Scope:       req.Scope,
 		}
 
 		runningGp.Go(func() error {
@@ -1070,8 +990,7 @@ func (node *QueryNode) QueryStream(req *querypb.QueryRequest, srv querypb.QueryN
 		return nil
 	}
 
-	collector.Rate.Add(metricsinfo.NQPerSecond, 1)
-	metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel).Add(float64(proto.Size(req)))
+	metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(node.GetNodeID(), 10), metrics.QueryLabel).Add(float64(proto.Size(req)))
 	return nil
 }
 
@@ -1090,10 +1009,10 @@ func (node *QueryNode) QueryStreamSegments(req *querypb.QueryRequest, srv queryp
 	)
 
 	resp := &internalpb.RetrieveResults{}
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
 	defer func() {
 		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.FromLeader).Inc()
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.FromLeader).Inc()
 		}
 	}()
 
@@ -1104,10 +1023,7 @@ func (node *QueryNode) QueryStreamSegments(req *querypb.QueryRequest, srv queryp
 	}
 	defer node.lifetime.Done()
 
-	log.Debug("start do query with channel",
-		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
-		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
-	)
+	log.Debug("start do query with channel", zap.Int64s("segmentIDs", req.GetSegmentIDs()))
 
 	tr := timerecord.NewTimeRecorder("queryChannel")
 
@@ -1118,17 +1034,16 @@ func (node *QueryNode) QueryStreamSegments(req *querypb.QueryRequest, srv queryp
 		return nil
 	}
 
-	tr.CtxElapse(ctx, fmt.Sprintf("do query done, traceID = %s, fromShardLeader = %t, vChannel = %s, segmentIDs = %v",
+	tr.CtxElapse(ctx, fmt.Sprintf("do query done, traceID = %s,  vChannel = %s, segmentIDs = %v",
 		traceID,
-		req.GetFromShardLeader(),
 		channel,
 		req.GetSegmentIDs(),
 	))
 
 	// TODO QueryNodeSQLatencyInQueue QueryNodeReduceLatency
 	latency := tr.ElapseSpan()
-	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
+	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
 	return nil
 }
 
@@ -1141,7 +1056,7 @@ func (node *QueryNode) SyncReplicaSegments(ctx context.Context, req *querypb.Syn
 func (node *QueryNode) ShowConfigurations(ctx context.Context, req *internalpb.ShowConfigurationsRequest) (*internalpb.ShowConfigurationsResponse, error) {
 	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		log.Warn("QueryNode.ShowConfigurations failed",
-			zap.Int64("nodeId", paramtable.GetNodeID()),
+			zap.Int64("nodeId", node.GetNodeID()),
 			zap.String("req", req.Pattern),
 			zap.Error(err))
 
@@ -1171,7 +1086,7 @@ func (node *QueryNode) ShowConfigurations(ctx context.Context, req *internalpb.S
 func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		log.Warn("QueryNode.GetMetrics failed",
-			zap.Int64("nodeId", paramtable.GetNodeID()),
+			zap.Int64("nodeId", node.GetNodeID()),
 			zap.String("req", req.Request),
 			zap.Error(err))
 
@@ -1185,7 +1100,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 	metricType, err := metricsinfo.ParseMetricType(req.Request)
 	if err != nil {
 		log.Warn("QueryNode.GetMetrics failed to parse metric type",
-			zap.Int64("nodeId", paramtable.GetNodeID()),
+			zap.Int64("nodeId", node.GetNodeID()),
 			zap.String("req", req.Request),
 			zap.Error(err))
 
@@ -1198,7 +1113,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 		queryNodeMetrics, err := getSystemInfoMetrics(ctx, req, node)
 		if err != nil {
 			log.Warn("QueryNode.GetMetrics failed",
-				zap.Int64("nodeId", paramtable.GetNodeID()),
+				zap.Int64("nodeId", node.GetNodeID()),
 				zap.String("req", req.Request),
 				zap.String("metricType", metricType),
 				zap.Error(err))
@@ -1207,7 +1122,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 			}, nil
 		}
 		log.RatedDebug(50, "QueryNode.GetMetrics",
-			zap.Int64("nodeID", paramtable.GetNodeID()),
+			zap.Int64("nodeID", node.GetNodeID()),
 			zap.String("req", req.Request),
 			zap.String("metricType", metricType),
 			zap.Any("queryNodeMetrics", queryNodeMetrics))
@@ -1216,7 +1131,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 	}
 
 	log.Debug("QueryNode.GetMetrics failed, request metric type is not implemented yet",
-		zap.Int64("nodeID", paramtable.GetNodeID()),
+		zap.Int64("nodeID", node.GetNodeID()),
 		zap.String("req", req.Request),
 		zap.String("metricType", metricType))
 
@@ -1228,7 +1143,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.GetDataDistributionRequest) (*querypb.GetDataDistributionResponse, error) {
 	log := log.Ctx(ctx).With(
 		zap.Int64("msgID", req.GetBase().GetMsgID()),
-		zap.Int64("nodeID", paramtable.GetNodeID()),
+		zap.Int64("nodeID", node.GetNodeID()),
 	)
 	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		log.Warn("QueryNode.GetDataDistribution failed",
@@ -1240,10 +1155,20 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 	}
 	defer node.lifetime.Done()
 
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+	lastModifyTs := node.getDistributionModifyTS()
+	distributionChange := func() bool {
+		if req.GetLastUpdateTs() == 0 {
+			return true
+		}
+
+		return req.GetLastUpdateTs() < lastModifyTs
+	}
+
+	if !distributionChange() {
 		return &querypb.GetDataDistributionResponse{
-			Status: merr.Status(err),
+			Status:       merr.Success(),
+			NodeID:       node.GetNodeID(),
+			LastModifyTs: lastModifyTs,
 		}, nil
 	}
 
@@ -1254,8 +1179,10 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 			ID:                 s.ID(),
 			Collection:         s.Collection(),
 			Partition:          s.Partition(),
-			Channel:            s.Shard(),
+			Channel:            s.Shard().VirtualName(),
 			Version:            s.Version(),
+			Level:              s.Level(),
+			IsSorted:           s.IsSorted(),
 			LastDeltaTimestamp: s.LastDeltaTimestamp(),
 			IndexInfo: lo.SliceToMap(s.Indexes(), func(info *segments.IndexedFieldInfo) (int64, *querypb.FieldIndexInfo) {
 				return info.IndexInfo.FieldID, info.IndexInfo
@@ -1301,38 +1228,38 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		}
 
 		leaderViews = append(leaderViews, &querypb.LeaderView{
-			Collection:       delegator.Collection(),
-			Channel:          key,
-			SegmentDist:      sealedSegments,
-			GrowingSegments:  growingSegments,
-			TargetVersion:    delegator.GetTargetVersion(),
-			NumOfGrowingRows: numOfGrowingRows,
+			Collection:             delegator.Collection(),
+			Channel:                key,
+			SegmentDist:            sealedSegments,
+			GrowingSegments:        growingSegments,
+			TargetVersion:          delegator.GetTargetVersion(),
+			NumOfGrowingRows:       numOfGrowingRows,
+			PartitionStatsVersions: delegator.GetPartitionStatsVersions(ctx),
 		})
 		return true
 	})
 
 	return &querypb.GetDataDistributionResponse{
-		Status:      merr.Success(),
-		NodeID:      paramtable.GetNodeID(),
-		Segments:    segmentVersionInfos,
-		Channels:    channelVersionInfos,
-		LeaderViews: leaderViews,
+		Status:          merr.Success(),
+		NodeID:          node.GetNodeID(),
+		Segments:        segmentVersionInfos,
+		Channels:        channelVersionInfos,
+		LeaderViews:     leaderViews,
+		LastModifyTs:    lastModifyTs,
+		MemCapacityInMB: float64(hardware.GetMemoryCount() / 1024 / 1024),
 	}, nil
 }
 
 func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDistributionRequest) (*commonpb.Status, error) {
+	defer node.updateDistributionModifyTS()
+
 	log := log.Ctx(ctx).With(zap.Int64("collectionID", req.GetCollectionID()),
-		zap.String("channel", req.GetChannel()), zap.Int64("currentNodeID", paramtable.GetNodeID()))
+		zap.String("channel", req.GetChannel()), zap.Int64("currentNodeID", node.GetNodeID()))
 	// check node healthy
 	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
-
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
-		return merr.Status(err), nil
-	}
 
 	// get shard delegator
 	shardDelegator, ok := node.delegators.Get(req.GetChannel())
@@ -1381,20 +1308,25 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 			})
 		case querypb.SyncType_UpdateVersion:
 			log.Info("sync action", zap.Int64("TargetVersion", action.GetTargetVersion()))
-			pipeline := node.pipelineManager.Get(req.GetChannel())
-			if pipeline != nil {
-				droppedInfos := lo.Map(action.GetDroppedInTarget(), func(id int64, _ int) *datapb.SegmentInfo {
-					return &datapb.SegmentInfo{
-						ID: id,
-						DmlPosition: &msgpb.MsgPosition{
-							Timestamp: typeutil.MaxTimestamp,
-						},
-					}
-				})
-				pipeline.ExcludedSegments(droppedInfos...)
-			}
+			droppedInfos := lo.SliceToMap(action.GetDroppedInTarget(), func(id int64) (int64, uint64) {
+				if action.GetCheckpoint() == nil {
+					return id, typeutil.MaxTimestamp
+				}
+				return id, action.GetCheckpoint().Timestamp
+			})
+			shardDelegator.AddExcludedSegments(droppedInfos)
+			flushedInfo := lo.SliceToMap(action.GetSealedInTarget(), func(id int64) (int64, uint64) {
+				if action.GetCheckpoint() == nil {
+					return id, typeutil.MaxTimestamp
+				}
+				return id, action.GetCheckpoint().Timestamp
+			})
+			shardDelegator.AddExcludedSegments(flushedInfo)
 			shardDelegator.SyncTargetVersion(action.GetTargetVersion(), action.GetGrowingInTarget(),
-				action.GetSealedInTarget(), action.GetDroppedInTarget())
+				action.GetSealedInTarget(), action.GetDroppedInTarget(), action.GetCheckpoint())
+		case querypb.SyncType_UpdatePartitionStats:
+			log.Info("sync update partition stats versions")
+			shardDelegator.SyncPartitionStats(ctx, action.PartitionStatsVersions)
 		default:
 			return merr.Status(merr.WrapErrServiceInternal("unknown action type", action.GetType().String())), nil
 		}
@@ -1406,9 +1338,10 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 		return merr.Status(err), nil
 	}
 
+	// in case of target node offline, when try to remove segment from leader's distribution, use wildcardNodeID(-1) to skip nodeID check
 	for _, action := range removeActions {
 		shardDelegator.ReleaseSegments(ctx, &querypb.ReleaseSegmentsRequest{
-			NodeID:       action.GetNodeID(),
+			NodeID:       -1,
 			SegmentIDs:   []int64{action.GetSegmentID()},
 			Scope:        querypb.DataScope_Historical,
 			CollectionID: req.GetCollectionID(),
@@ -1424,6 +1357,7 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 		zap.Int64("collectionID", req.GetCollectionId()),
 		zap.String("channel", req.GetVchannelName()),
 		zap.Int64("segmentID", req.GetSegmentId()),
+		zap.String("scope", req.GetScope().String()),
 	)
 
 	// check node healthy
@@ -1432,18 +1366,21 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 	}
 	defer node.lifetime.Done()
 
-	// check target matches
-	if err := merr.CheckTargetID(req.GetBase()); err != nil {
-		return merr.Status(err), nil
+	log.Debug("QueryNode received worker delete detail", zap.Stringer("info", &deleteRequestStringer{DeleteRequest: req}))
+
+	filters := []segments.SegmentFilter{
+		segments.WithID(req.GetSegmentId()),
 	}
 
-	log.Info("QueryNode received worker delete request")
-	log.Debug("Worker delete detail",
-		zap.String("pks", req.GetPrimaryKeys().String()),
-		zap.Uint64s("tss", req.GetTimestamps()),
-	)
+	// do not add filter for Unknown & All scope, for backward cap
+	switch req.GetScope() {
+	case querypb.DataScope_Historical:
+		filters = append(filters, segments.WithType(segments.SegmentTypeSealed))
+	case querypb.DataScope_Streaming:
+		filters = append(filters, segments.WithType(segments.SegmentTypeGrowing))
+	}
 
-	segments := node.manager.Segment.GetBy(segments.WithID(req.GetSegmentId()))
+	segments := node.manager.Segment.GetBy(filters...)
 	if len(segments) == 0 {
 		err := merr.WrapErrSegmentNotFound(req.GetSegmentId())
 		log.Warn("segment not found for delete")
@@ -1452,7 +1389,7 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 
 	pks := storage.ParseIDs2PrimaryKeys(req.GetPrimaryKeys())
 	for _, segment := range segments {
-		err := segment.Delete(pks, req.GetTimestamps())
+		err := segment.Delete(ctx, pks, req.GetTimestamps())
 		if err != nil {
 			log.Warn("segment delete failed", zap.Error(err))
 			return merr.Status(err), nil
@@ -1460,4 +1397,35 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 	}
 
 	return merr.Success(), nil
+}
+
+type deleteRequestStringer struct {
+	*querypb.DeleteRequest
+}
+
+func (req *deleteRequestStringer) String() string {
+	var pkInfo string
+	switch {
+	case req.GetPrimaryKeys().GetIntId() != nil:
+		ids := req.GetPrimaryKeys().GetIntId().GetData()
+		pkInfo = fmt.Sprintf("Pks range[%d-%d], len: %d", ids[0], ids[len(ids)-1], len(ids))
+	case req.GetPrimaryKeys().GetStrId() != nil:
+		ids := req.GetPrimaryKeys().GetStrId().GetData()
+		pkInfo = fmt.Sprintf("Pks range[%s-%s], len: %d", ids[0], ids[len(ids)-1], len(ids))
+	}
+	tss := req.GetTimestamps()
+	return fmt.Sprintf("%s, timestamp range: [%d-%d]", pkInfo, tss[0], tss[len(tss)-1])
+}
+
+func (node *QueryNode) updateDistributionModifyTS() {
+	node.lastModifyLock.Lock()
+	defer node.lastModifyLock.Unlock()
+
+	node.lastModifyTs = time.Now().UnixNano()
+}
+
+func (node *QueryNode) getDistributionModifyTS() int64 {
+	node.lastModifyLock.RLock()
+	defer node.lastModifyLock.RUnlock()
+	return node.lastModifyTs
 }

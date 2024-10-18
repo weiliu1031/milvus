@@ -43,8 +43,10 @@ func (mgr *indexCheckerMgrImpl) GetChecker(indexType string) (IndexChecker, erro
 }
 
 func (mgr *indexCheckerMgrImpl) registerIndexChecker() {
-	mgr.checkers[IndexRaftIvfFlat] = newIVFBaseChecker()
+	mgr.checkers[IndexRaftIvfFlat] = newRaftIVFFlatChecker()
 	mgr.checkers[IndexRaftIvfPQ] = newRaftIVFPQChecker()
+	mgr.checkers[IndexRaftCagra] = newCagraChecker()
+	mgr.checkers[IndexRaftBruteForce] = newRaftBruteForceChecker()
 	mgr.checkers[IndexFaissIDMap] = newFlatChecker()
 	mgr.checkers[IndexFaissIvfFlat] = newIVFBaseChecker()
 	mgr.checkers[IndexFaissIvfPQ] = newIVFPQChecker()
@@ -54,6 +56,23 @@ func (mgr *indexCheckerMgrImpl) registerIndexChecker() {
 	mgr.checkers[IndexFaissBinIvfFlat] = newBinIVFFlatChecker()
 	mgr.checkers[IndexHNSW] = newHnswChecker()
 	mgr.checkers[IndexDISKANN] = newDiskannChecker()
+	mgr.checkers[IndexSparseInverted] = newSparseInvertedIndexChecker()
+	mgr.checkers[IndexFaissHNSW] = newFloatVectorBaseChecker()
+	mgr.checkers[IndexFaissHNSWPQ] = newFloatVectorBaseChecker()
+	mgr.checkers[IndexFaissHNSWSQ] = newFloatVectorBaseChecker()
+	mgr.checkers[IndexFaissHNSWPRQ] = newFloatVectorBaseChecker()
+	// WAND doesn't have more index params than sparse inverted index, thus
+	// using the same checker.
+	mgr.checkers[IndexSparseWand] = newSparseInvertedIndexChecker()
+	mgr.checkers[IndexINVERTED] = newINVERTEDChecker()
+	mgr.checkers[IndexSTLSORT] = newSTLSORTChecker()
+	mgr.checkers["Asceneding"] = newSTLSORTChecker()
+	mgr.checkers[IndexTRIE] = newTRIEChecker()
+	mgr.checkers[IndexTrie] = newTRIEChecker()
+	mgr.checkers[IndexBitmap] = newBITMAPChecker()
+	mgr.checkers[IndexHybrid] = newHYBRIDChecker()
+	mgr.checkers["marisa-trie"] = newTRIEChecker()
+	mgr.checkers[AutoIndex] = newAUTOINDEXChecker()
 }
 
 func newIndexCheckerMgr() *indexCheckerMgrImpl {

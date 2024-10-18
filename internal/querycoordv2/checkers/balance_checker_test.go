@@ -23,9 +23,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
+	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -46,6 +47,7 @@ type BalanceCheckerTestSuite struct {
 	broker    *meta.MockBroker
 	nodeMgr   *session.NodeManager
 	scheduler *task.MockScheduler
+	targetMgr *meta.TargetManager
 }
 
 func (suite *BalanceCheckerTestSuite) SetupSuite() {
@@ -73,9 +75,10 @@ func (suite *BalanceCheckerTestSuite) SetupTest() {
 	suite.meta = meta.NewMeta(idAllocator, store, suite.nodeMgr)
 	suite.broker = meta.NewMockBroker(suite.T())
 	suite.scheduler = task.NewMockScheduler(suite.T())
+	suite.targetMgr = meta.NewTargetManager(suite.broker, suite.meta)
 
 	suite.balancer = balance.NewMockBalancer(suite.T())
-	suite.checker = NewBalanceChecker(suite.meta, suite.balancer, suite.nodeMgr, suite.scheduler)
+	suite.checker = NewBalanceChecker(suite.meta, suite.targetMgr, suite.nodeMgr, suite.scheduler, func() balance.Balance { return suite.balancer })
 }
 
 func (suite *BalanceCheckerTestSuite) TearDownTest() {
@@ -85,25 +88,55 @@ func (suite *BalanceCheckerTestSuite) TearDownTest() {
 func (suite *BalanceCheckerTestSuite) TestAutoBalanceConf() {
 	// set up nodes info
 	nodeID1, nodeID2 := 1, 2
-	suite.nodeMgr.Add(session.NewNodeInfo(int64(nodeID1), "localhost"))
-	suite.nodeMgr.Add(session.NewNodeInfo(int64(nodeID2), "localhost"))
-	suite.checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, int64(nodeID1))
-	suite.checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, int64(nodeID2))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   int64(nodeID1),
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   int64(nodeID2),
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.checker.meta.ResourceManager.HandleNodeUp(int64(nodeID1))
+	suite.checker.meta.ResourceManager.HandleNodeUp(int64(nodeID2))
 
 	// set collections meta
-	cid1, replicaID1 := 1, 1
+	segments := []*datapb.SegmentInfo{
+		{
+			ID:            1,
+			PartitionID:   1,
+			InsertChannel: "test-insert-channel",
+		},
+	}
+	channels := []*datapb.VchannelInfo{
+		{
+			CollectionID: 1,
+			ChannelName:  "test-insert-channel",
+		},
+	}
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, mock.Anything).Return(channels, segments, nil)
+
+	// set collections meta
+	cid1, replicaID1, partitionID1 := 1, 1, 1
 	collection1 := utils.CreateTestCollection(int64(cid1), int32(replicaID1))
 	collection1.Status = querypb.LoadStatus_Loaded
 	replica1 := utils.CreateTestReplica(int64(replicaID1), int64(cid1), []int64{int64(nodeID1), int64(nodeID2)})
-	suite.checker.meta.CollectionManager.PutCollection(collection1)
+	partition1 := utils.CreateTestPartition(int64(cid1), int64(partitionID1))
+	suite.checker.meta.CollectionManager.PutCollection(collection1, partition1)
 	suite.checker.meta.ReplicaManager.Put(replica1)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid1))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid1))
 
-	cid2, replicaID2 := 2, 2
+	cid2, replicaID2, partitionID2 := 2, 2, 2
 	collection2 := utils.CreateTestCollection(int64(cid2), int32(replicaID2))
 	collection2.Status = querypb.LoadStatus_Loaded
 	replica2 := utils.CreateTestReplica(int64(replicaID2), int64(cid2), []int64{int64(nodeID1), int64(nodeID2)})
-	suite.checker.meta.CollectionManager.PutCollection(collection2)
+	partition2 := utils.CreateTestPartition(int64(cid2), int64(partitionID2))
+	suite.checker.meta.CollectionManager.PutCollection(collection2, partition2)
 	suite.checker.meta.ReplicaManager.Put(replica2)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid2))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid2))
 
 	// test disable auto balance
 	paramtable.Get().Save(Params.QueryCoordCfg.AutoBalance.Key, "false")
@@ -132,25 +165,54 @@ func (suite *BalanceCheckerTestSuite) TestAutoBalanceConf() {
 func (suite *BalanceCheckerTestSuite) TestBusyScheduler() {
 	// set up nodes info
 	nodeID1, nodeID2 := 1, 2
-	suite.nodeMgr.Add(session.NewNodeInfo(int64(nodeID1), "localhost"))
-	suite.nodeMgr.Add(session.NewNodeInfo(int64(nodeID2), "localhost"))
-	suite.checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, int64(nodeID1))
-	suite.checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, int64(nodeID2))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   int64(nodeID1),
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   int64(nodeID2),
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.checker.meta.ResourceManager.HandleNodeUp(int64(nodeID1))
+	suite.checker.meta.ResourceManager.HandleNodeUp(int64(nodeID2))
+
+	segments := []*datapb.SegmentInfo{
+		{
+			ID:            1,
+			PartitionID:   1,
+			InsertChannel: "test-insert-channel",
+		},
+	}
+	channels := []*datapb.VchannelInfo{
+		{
+			CollectionID: 1,
+			ChannelName:  "test-insert-channel",
+		},
+	}
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, mock.Anything).Return(channels, segments, nil)
 
 	// set collections meta
-	cid1, replicaID1 := 1, 1
+	cid1, replicaID1, partitionID1 := 1, 1, 1
 	collection1 := utils.CreateTestCollection(int64(cid1), int32(replicaID1))
 	collection1.Status = querypb.LoadStatus_Loaded
 	replica1 := utils.CreateTestReplica(int64(replicaID1), int64(cid1), []int64{int64(nodeID1), int64(nodeID2)})
-	suite.checker.meta.CollectionManager.PutCollection(collection1)
+	partition1 := utils.CreateTestPartition(int64(cid1), int64(partitionID1))
+	suite.checker.meta.CollectionManager.PutCollection(collection1, partition1)
 	suite.checker.meta.ReplicaManager.Put(replica1)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid1))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid1))
 
-	cid2, replicaID2 := 2, 2
+	cid2, replicaID2, partitionID2 := 2, 2, 2
 	collection2 := utils.CreateTestCollection(int64(cid2), int32(replicaID2))
 	collection2.Status = querypb.LoadStatus_Loaded
 	replica2 := utils.CreateTestReplica(int64(replicaID2), int64(cid2), []int64{int64(nodeID1), int64(nodeID2)})
-	suite.checker.meta.CollectionManager.PutCollection(collection2)
+	partition2 := utils.CreateTestPartition(int64(cid2), int64(partitionID2))
+	suite.checker.meta.CollectionManager.PutCollection(collection2, partition2)
 	suite.checker.meta.ReplicaManager.Put(replica2)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid2))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid2))
 
 	// test scheduler busy
 	paramtable.Get().Save(Params.QueryCoordCfg.AutoBalance.Key, "true")
@@ -158,34 +220,69 @@ func (suite *BalanceCheckerTestSuite) TestBusyScheduler() {
 		return 1
 	})
 	replicasToBalance := suite.checker.replicasToBalance()
-	suite.Empty(replicasToBalance)
-	segPlans, _ := suite.checker.balanceReplicas(replicasToBalance)
-	suite.Empty(segPlans)
+	suite.Len(replicasToBalance, 1)
 }
 
 func (suite *BalanceCheckerTestSuite) TestStoppingBalance() {
 	// set up nodes info, stopping node1
 	nodeID1, nodeID2 := 1, 2
-	suite.nodeMgr.Add(session.NewNodeInfo(int64(nodeID1), "localhost"))
-	suite.nodeMgr.Add(session.NewNodeInfo(int64(nodeID2), "localhost"))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   int64(nodeID1),
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   int64(nodeID2),
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
 	suite.nodeMgr.Stopping(int64(nodeID1))
-	suite.checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, int64(nodeID1))
-	suite.checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, int64(nodeID2))
+	suite.checker.meta.ResourceManager.HandleNodeUp(int64(nodeID1))
+	suite.checker.meta.ResourceManager.HandleNodeUp(int64(nodeID2))
+
+	segments := []*datapb.SegmentInfo{
+		{
+			ID:            1,
+			PartitionID:   1,
+			InsertChannel: "test-insert-channel",
+		},
+	}
+	channels := []*datapb.VchannelInfo{
+		{
+			CollectionID: 1,
+			ChannelName:  "test-insert-channel",
+		},
+	}
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, mock.Anything).Return(channels, segments, nil)
 
 	// set collections meta
-	cid1, replicaID1 := 1, 1
+	cid1, replicaID1, partitionID1 := 1, 1, 1
 	collection1 := utils.CreateTestCollection(int64(cid1), int32(replicaID1))
 	collection1.Status = querypb.LoadStatus_Loaded
 	replica1 := utils.CreateTestReplica(int64(replicaID1), int64(cid1), []int64{int64(nodeID1), int64(nodeID2)})
-	suite.checker.meta.CollectionManager.PutCollection(collection1)
+	partition1 := utils.CreateTestPartition(int64(cid1), int64(partitionID1))
+	suite.checker.meta.CollectionManager.PutCollection(collection1, partition1)
 	suite.checker.meta.ReplicaManager.Put(replica1)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid1))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid1))
 
-	cid2, replicaID2 := 2, 2
+	cid2, replicaID2, partitionID2 := 2, 2, 2
 	collection2 := utils.CreateTestCollection(int64(cid2), int32(replicaID2))
 	collection2.Status = querypb.LoadStatus_Loaded
 	replica2 := utils.CreateTestReplica(int64(replicaID2), int64(cid2), []int64{int64(nodeID1), int64(nodeID2)})
-	suite.checker.meta.CollectionManager.PutCollection(collection2)
+	partition2 := utils.CreateTestPartition(int64(cid2), int64(partitionID2))
+	suite.checker.meta.CollectionManager.PutCollection(collection2, partition2)
 	suite.checker.meta.ReplicaManager.Put(replica2)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid2))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid2))
+
+	mr1 := replica1.CopyForWrite()
+	mr1.AddRONode(1)
+	suite.checker.meta.ReplicaManager.Put(mr1.IntoReplica())
+
+	mr2 := replica2.CopyForWrite()
+	mr2.AddRONode(1)
+	suite.checker.meta.ReplicaManager.Put(mr2.IntoReplica())
 
 	// test stopping balance
 	idsToBalance := []int64{int64(replicaID1), int64(replicaID2)}
@@ -195,15 +292,80 @@ func (suite *BalanceCheckerTestSuite) TestStoppingBalance() {
 	// checker check
 	segPlans, chanPlans := make([]balance.SegmentAssignPlan, 0), make([]balance.ChannelAssignPlan, 0)
 	mockPlan := balance.SegmentAssignPlan{
-		Segment:   utils.CreateTestSegment(1, 1, 1, 1, 1, "1"),
-		ReplicaID: 1,
-		From:      1,
-		To:        2,
+		Segment: utils.CreateTestSegment(1, 1, 1, 1, 1, "1"),
+		Replica: meta.NilReplica,
+		From:    1,
+		To:      2,
 	}
 	segPlans = append(segPlans, mockPlan)
 	suite.balancer.EXPECT().BalanceReplica(mock.Anything).Return(segPlans, chanPlans)
 	tasks := suite.checker.Check(context.TODO())
 	suite.Len(tasks, 2)
+}
+
+func (suite *BalanceCheckerTestSuite) TestTargetNotReady() {
+	// set up nodes info, stopping node1
+	nodeID1, nodeID2 := int64(1), int64(2)
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   nodeID1,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   nodeID2,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Stopping(nodeID1)
+	suite.checker.meta.ResourceManager.HandleNodeUp(nodeID1)
+	suite.checker.meta.ResourceManager.HandleNodeUp(nodeID2)
+
+	segments := []*datapb.SegmentInfo{
+		{
+			ID:            1,
+			PartitionID:   1,
+			InsertChannel: "test-insert-channel",
+		},
+	}
+	channels := []*datapb.VchannelInfo{
+		{
+			CollectionID: 1,
+			ChannelName:  "test-insert-channel",
+		},
+	}
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, mock.Anything).Return(channels, segments, nil)
+
+	// set collections meta
+	cid1, replicaID1, partitionID1 := 1, 1, 1
+	collection1 := utils.CreateTestCollection(int64(cid1), int32(replicaID1))
+	collection1.Status = querypb.LoadStatus_Loaded
+	replica1 := utils.CreateTestReplica(int64(replicaID1), int64(cid1), []int64{nodeID1, nodeID2})
+	partition1 := utils.CreateTestPartition(int64(cid1), int64(partitionID1))
+	suite.checker.meta.CollectionManager.PutCollection(collection1, partition1)
+	suite.checker.meta.ReplicaManager.Put(replica1)
+	suite.targetMgr.UpdateCollectionNextTarget(int64(cid1))
+	suite.targetMgr.UpdateCollectionCurrentTarget(int64(cid1))
+
+	cid2, replicaID2, partitionID2 := 2, 2, 2
+	collection2 := utils.CreateTestCollection(int64(cid2), int32(replicaID2))
+	collection2.Status = querypb.LoadStatus_Loaded
+	replica2 := utils.CreateTestReplica(int64(replicaID2), int64(cid2), []int64{nodeID1, nodeID2})
+	partition2 := utils.CreateTestPartition(int64(cid2), int64(partitionID2))
+	suite.checker.meta.CollectionManager.PutCollection(collection2, partition2)
+	suite.checker.meta.ReplicaManager.Put(replica2)
+
+	mr1 := replica1.CopyForWrite()
+	mr1.AddRONode(1)
+	suite.checker.meta.ReplicaManager.Put(mr1.IntoReplica())
+
+	mr2 := replica2.CopyForWrite()
+	mr2.AddRONode(1)
+	suite.checker.meta.ReplicaManager.Put(mr2.IntoReplica())
+
+	// test stopping balance
+	idsToBalance := []int64{int64(replicaID1)}
+	replicasToBalance := suite.checker.replicasToBalance()
+	suite.ElementsMatch(idsToBalance, replicasToBalance)
 }
 
 func TestBalanceCheckerSuite(t *testing.T) {

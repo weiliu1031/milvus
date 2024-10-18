@@ -16,6 +16,8 @@
 
 package conc
 
+import "go.uber.org/atomic"
+
 type future interface {
 	wait()
 	OK() bool
@@ -29,11 +31,13 @@ type Future[T any] struct {
 	ch    chan struct{}
 	value T
 	err   error
+	done  *atomic.Bool
 }
 
 func newFuture[T any]() *Future[T] {
 	return &Future[T]{
-		ch: make(chan struct{}),
+		ch:   make(chan struct{}),
+		done: atomic.NewBool(false),
 	}
 }
 
@@ -53,6 +57,11 @@ func (future *Future[T]) Value() T {
 	<-future.ch
 
 	return future.value
+}
+
+// Done indicates if the fn has finished.
+func (future *Future[T]) Done() bool {
+	return future.done.Load()
 }
 
 // False if error occurred,
@@ -86,6 +95,7 @@ func Go[T any](fn func() (T, error)) *Future[T] {
 	go func() {
 		future.value, future.err = fn()
 		close(future.ch)
+		future.done.Store(true)
 	}()
 	return future
 }
@@ -101,4 +111,16 @@ func AwaitAll[T future](futures ...T) error {
 	}
 
 	return nil
+}
+
+// BlockOnAll blocks until all futures complete.
+// Return the first error in these futures.
+func BlockOnAll[T future](futures ...T) error {
+	var err error
+	for i := range futures {
+		if e := futures[i].Err(); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
 }

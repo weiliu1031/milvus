@@ -23,12 +23,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/eventlog"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
@@ -45,6 +49,7 @@ type Collection struct {
 
 	mut             sync.RWMutex
 	refreshNotifier chan struct{}
+	LoadSpan        trace.Span
 }
 
 func (collection *Collection) SetRefreshNotifier(notifier chan struct{}) {
@@ -79,6 +84,7 @@ func (collection *Collection) Clone() *Collection {
 		CreatedAt:          collection.CreatedAt,
 		UpdatedAt:          collection.UpdatedAt,
 		refreshNotifier:    collection.refreshNotifier,
+		LoadSpan:           collection.LoadSpan,
 	}
 }
 
@@ -100,14 +106,17 @@ type CollectionManager struct {
 
 	collections map[typeutil.UniqueID]*Collection
 	partitions  map[typeutil.UniqueID]*Partition
-	catalog     metastore.QueryCoordCatalog
+
+	collectionPartitions map[typeutil.UniqueID]typeutil.Set[typeutil.UniqueID]
+	catalog              metastore.QueryCoordCatalog
 }
 
 func NewCollectionManager(catalog metastore.QueryCoordCatalog) *CollectionManager {
 	return &CollectionManager{
-		collections: make(map[int64]*Collection),
-		partitions:  make(map[int64]*Partition),
-		catalog:     catalog,
+		collections:          make(map[int64]*Collection),
+		partitions:           make(map[int64]*Partition),
+		collectionPartitions: make(map[int64]typeutil.Set[typeutil.UniqueID]),
+		catalog:              catalog,
 	}
 }
 
@@ -150,6 +159,16 @@ func (m *CollectionManager) Recover(broker Broker) error {
 			continue
 		}
 
+		err := m.upgradeLoadFields(collection, broker)
+		if err != nil {
+			if errors.Is(err, merr.ErrCollectionNotFound) {
+				log.Warn("collection not found, skip upgrade logic and wait for release")
+			} else {
+				log.Warn("upgrade load field failed", zap.Error(err))
+				return err
+			}
+		}
+
 		m.collections[collection.CollectionID] = &Collection{
 			CollectionLoadInfo: collection,
 		}
@@ -172,9 +191,11 @@ func (m *CollectionManager) Recover(broker Broker) error {
 				continue
 			}
 
-			m.partitions[partition.PartitionID] = &Partition{
-				PartitionLoadInfo: partition,
-			}
+			m.putPartition([]*Partition{
+				{
+					PartitionLoadInfo: partition,
+				},
+			}, false)
 		}
 	}
 
@@ -186,11 +207,41 @@ func (m *CollectionManager) Recover(broker Broker) error {
 	return nil
 }
 
+func (m *CollectionManager) upgradeLoadFields(collection *querypb.CollectionLoadInfo, broker Broker) error {
+	// only fill load fields when value is nil
+	if collection.LoadFields != nil {
+		return nil
+	}
+
+	// invoke describe collection to get collection schema
+	resp, err := broker.DescribeCollection(context.Background(), collection.CollectionID)
+	if err := merr.CheckRPCCall(resp, err); err != nil {
+		return err
+	}
+
+	// fill all field id as legacy default behavior
+	collection.LoadFields = lo.FilterMap(resp.GetSchema().GetFields(), func(fieldSchema *schemapb.FieldSchema, _ int) (int64, bool) {
+		// load fields list excludes system fields
+		return fieldSchema.GetFieldID(), !common.IsSystemField(fieldSchema.GetFieldID())
+	})
+
+	// put updated meta back to store
+	err = m.putCollection(true, &Collection{
+		CollectionLoadInfo: collection,
+		LoadPercentage:     100,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // upgradeRecover recovers from old version <= 2.2.x for compatibility.
 func (m *CollectionManager) upgradeRecover(broker Broker) error {
+	// for loaded collection from 2.2, it only save a old version CollectionLoadInfo without LoadType.
+	// we should update the CollectionLoadInfo and save all PartitionLoadInfo to meta store
 	for _, collection := range m.GetAllCollections() {
-		// It's a workaround to check if it is old CollectionLoadInfo because there's no
-		// loadType in old version, maybe we should use version instead.
 		if collection.GetLoadType() == querypb.LoadType_UnKnownType {
 			partitionIDs, err := broker.GetPartitions(context.Background(), collection.GetCollectionID())
 			if err != nil {
@@ -212,8 +263,18 @@ func (m *CollectionManager) upgradeRecover(broker Broker) error {
 			if err != nil {
 				return err
 			}
+
+			newInfo := collection.Clone()
+			newInfo.LoadType = querypb.LoadType_LoadCollection
+			err = m.putCollection(true, newInfo)
+			if err != nil {
+				return err
+			}
 		}
 	}
+
+	// for loaded partition from 2.2, it only save load PartitionLoadInfo.
+	// we should save it's CollectionLoadInfo to meta store
 	for _, partition := range m.GetAllPartitions() {
 		// In old version, collection would NOT be stored if the partition existed.
 		if _, ok := m.collections[partition.GetCollectionID()]; !ok {
@@ -338,6 +399,17 @@ func (m *CollectionManager) GetFieldIndex(collectionID typeutil.UniqueID) map[in
 	return nil
 }
 
+func (m *CollectionManager) GetLoadFields(collectionID typeutil.UniqueID) []int64 {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
+
+	collection, ok := m.collections[collectionID]
+	if ok {
+		return collection.GetLoadFields()
+	}
+	return nil
+}
+
 func (m *CollectionManager) Exist(collectionID typeutil.UniqueID) bool {
 	m.rwmutex.RLock()
 	defer m.rwmutex.RUnlock()
@@ -380,13 +452,7 @@ func (m *CollectionManager) GetPartitionsByCollection(collectionID typeutil.Uniq
 }
 
 func (m *CollectionManager) getPartitionsByCollection(collectionID typeutil.UniqueID) []*Partition {
-	partitions := make([]*Partition, 0)
-	for _, partition := range m.partitions {
-		if partition.CollectionID == collectionID {
-			partitions = append(partitions, partition)
-		}
-	}
-	return partitions
+	return lo.Map(m.collectionPartitions[collectionID].Collect(), func(partitionID int64, _ int) *Partition { return m.partitions[partitionID] })
 }
 
 func (m *CollectionManager) PutCollection(collection *Collection, partitions ...*Partition) error {
@@ -416,6 +482,13 @@ func (m *CollectionManager) putCollection(withSave bool, collection *Collection,
 	for _, partition := range partitions {
 		partition.UpdatedAt = time.Now()
 		m.partitions[partition.GetPartitionID()] = partition
+
+		partitions := m.collectionPartitions[collection.CollectionID]
+		if partitions == nil {
+			partitions = make(typeutil.Set[int64])
+			m.collectionPartitions[collection.CollectionID] = partitions
+		}
+		partitions.Insert(partition.GetPartitionID())
 	}
 	collection.UpdatedAt = time.Now()
 	m.collections[collection.CollectionID] = collection
@@ -450,6 +523,14 @@ func (m *CollectionManager) putPartition(partitions []*Partition, withSave bool)
 	for _, partition := range partitions {
 		partition.UpdatedAt = time.Now()
 		m.partitions[partition.GetPartitionID()] = partition
+		collID := partition.GetCollectionID()
+
+		partitions := m.collectionPartitions[collID]
+		if partitions == nil {
+			partitions = make(typeutil.Set[int64])
+			m.collectionPartitions[collID] = partitions
+		}
+		partitions.Insert(partition.GetPartitionID())
 	}
 	return nil
 }
@@ -492,14 +573,16 @@ func (m *CollectionManager) UpdateLoadPercent(partitionID int64, loadPercent int
 	saveCollection := false
 	if collectionPercent == 100 {
 		saveCollection = true
+		if newCollection.LoadSpan != nil {
+			newCollection.LoadSpan.End()
+			newCollection.LoadSpan = nil
+		}
 		newCollection.Status = querypb.LoadStatus_Loaded
 
 		// if collection becomes loaded, clear it's recoverTimes in load info
 		newCollection.RecoverTimes = 0
 
-		// TODO: what if part of the collection has been unloaded? Now we decrease the metric only after
-		// 	`ReleaseCollection` is triggered. Maybe it's hard to make this metric really accurate.
-		metrics.QueryCoordNumCollections.WithLabelValues().Inc()
+		metrics.QueryCoordNumCollections.WithLabelValues().Set(float64(len(lo.Values(m.collections))))
 		elapsed := time.Since(newCollection.CreatedAt)
 		metrics.QueryCoordLoadLatency.WithLabelValues().Observe(float64(elapsed.Milliseconds()))
 		eventlog.Record(eventlog.NewRawEvt(eventlog.Level_Info, fmt.Sprintf("Collection %d loaded", newCollection.CollectionID)))
@@ -519,12 +602,12 @@ func (m *CollectionManager) RemoveCollection(collectionID typeutil.UniqueID) err
 			return err
 		}
 		delete(m.collections, collectionID)
-		for partID, partition := range m.partitions {
-			if partition.CollectionID == collectionID {
-				delete(m.partitions, partID)
-			}
+		for _, partition := range m.collectionPartitions[collectionID].Collect() {
+			delete(m.partitions, partition)
 		}
+		delete(m.collectionPartitions, collectionID)
 	}
+	metrics.CleanQueryCoordMetricsWithCollectionID(collectionID)
 	return nil
 }
 
@@ -544,9 +627,33 @@ func (m *CollectionManager) removePartition(collectionID typeutil.UniqueID, part
 	if err != nil {
 		return err
 	}
+	partitions := m.collectionPartitions[collectionID]
 	for _, id := range partitionIDs {
 		delete(m.partitions, id)
+		delete(partitions, id)
 	}
 
 	return nil
+}
+
+func (m *CollectionManager) UpdateReplicaNumber(collectionID typeutil.UniqueID, replicaNumber int32) error {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+
+	collection, ok := m.collections[collectionID]
+	if !ok {
+		return merr.WrapErrCollectionNotFound(collectionID)
+	}
+	newCollection := collection.Clone()
+	newCollection.ReplicaNumber = replicaNumber
+
+	partitions := m.getPartitionsByCollection(collectionID)
+	newPartitions := make([]*Partition, 0, len(partitions))
+	for _, partition := range partitions {
+		newPartition := partition.Clone()
+		newPartition.ReplicaNumber = replicaNumber
+		newPartitions = append(newPartitions, newPartition)
+	}
+
+	return m.putCollection(true, newCollection, newPartitions...)
 }

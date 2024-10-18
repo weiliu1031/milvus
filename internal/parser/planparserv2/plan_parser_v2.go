@@ -2,18 +2,46 @@ package planparserv2
 
 import (
 	"fmt"
+	"strings"
+	"time"
+	"unicode"
 
-	"github.com/antlr/antlr4/runtime/Go/antlr"
+	"github.com/antlr4-go/antlr/v4"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
+// exprParseKey is used to cache the parse result. Currently only collectionName is used besides expr string, which implies
+// that the same collectionName will have the same schema thus the same parse result. In the future, if there is case that the
+// schema changes without changing the collectionName, we need to change the cache key.
+type exprParseKey struct {
+	collectionName string
+	expr           string
+}
+
+var exprCache = expirable.NewLRU[exprParseKey, any](256, nil, time.Minute*10)
+
 func handleExpr(schema *typeutil.SchemaHelper, exprStr string) interface{} {
+	parseKey := exprParseKey{collectionName: schema.GetCollectionName(), expr: exprStr}
+	val, ok := exprCache.Get(parseKey)
+	if !ok {
+		exprStr = convertHanToASCII(exprStr)
+		val = handleExprWithErrorListener(schema, exprStr, &errorListenerImpl{})
+		// Note that the errors will be cached, too.
+		exprCache.Add(parseKey, val)
+	}
+
+	return val
+}
+
+func handleExprWithErrorListener(schema *typeutil.SchemaHelper, exprStr string, errorListener errorListener) interface{} {
 	if isEmptyExpression(exprStr) {
 		return &ExprWithType{
 			dataType: schemapb.DataType_Bool,
@@ -22,21 +50,19 @@ func handleExpr(schema *typeutil.SchemaHelper, exprStr string) interface{} {
 	}
 
 	inputStream := antlr.NewInputStream(exprStr)
-	errorListener := &errorListener{}
-
 	lexer := getLexer(inputStream, errorListener)
-	if errorListener.err != nil {
-		return errorListener.err
+	if errorListener.Error() != nil {
+		return errorListener.Error()
 	}
 
 	parser := getParser(lexer, errorListener)
-	if errorListener.err != nil {
-		return errorListener.err
+	if errorListener.Error() != nil {
+		return errorListener.Error()
 	}
 
 	ast := parser.Expr()
-	if errorListener.err != nil {
-		return errorListener.err
+	if errorListener.Error() != nil {
+		return errorListener.Error()
 	}
 
 	if parser.GetCurrentToken().GetTokenType() != antlr.TokenEOF {
@@ -88,12 +114,7 @@ func ParseIdentifier(schema *typeutil.SchemaHelper, identifier string, checkFunc
 	return checkFunc(predicate.expr)
 }
 
-func CreateRetrievePlan(schemaPb *schemapb.CollectionSchema, exprStr string) (*planpb.PlanNode, error) {
-	schema, err := typeutil.CreateSchemaHelper(schemaPb)
-	if err != nil {
-		return nil, err
-	}
-
+func CreateRetrievePlan(schema *typeutil.SchemaHelper, exprStr string) (*planpb.PlanNode, error) {
 	expr, err := ParseExpr(schema, exprStr)
 	if err != nil {
 		return nil, err
@@ -109,12 +130,37 @@ func CreateRetrievePlan(schemaPb *schemapb.CollectionSchema, exprStr string) (*p
 	return planNode, nil
 }
 
-func CreateSearchPlan(schemaPb *schemapb.CollectionSchema, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo) (*planpb.PlanNode, error) {
-	schema, err := typeutil.CreateSchemaHelper(schemaPb)
-	if err != nil {
-		return nil, err
+func convertHanToASCII(s string) string {
+	var builder strings.Builder
+	builder.Grow(len(s) * 6)
+	skipCur := false
+	n := len(s)
+	for i, r := range s {
+		if skipCur {
+			builder.WriteRune(r)
+			skipCur = false
+			continue
+		}
+		if r == '\\' {
+			if i+1 < n && !isEscapeCh(s[i+1]) {
+				return s
+			}
+			skipCur = true
+			builder.WriteRune(r)
+			continue
+		}
+
+		if unicode.Is(unicode.Han, r) {
+			builder.WriteString(formatUnicode(uint32(r)))
+		} else {
+			builder.WriteRune(r)
+		}
 	}
 
+	return builder.String()
+}
+
+func CreateSearchPlan(schema *typeutil.SchemaHelper, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo) (*planpb.PlanNode, error) {
 	parse := func() (*planpb.Expr, error) {
 		if len(exprStr) <= 0 {
 			return nil, nil
@@ -132,6 +178,10 @@ func CreateSearchPlan(schemaPb *schemapb.CollectionSchema, exprStr string, vecto
 		log.Info("CreateSearchPlan failed", zap.Error(err))
 		return nil, err
 	}
+	// plan ok with schema, check ann field
+	if !schema.IsFieldLoaded(vectorField.GetFieldID()) {
+		return nil, merr.WrapErrParameterInvalidMsg("ann field \"%s\" not loaded", vectorFieldName)
+	}
 	fieldID := vectorField.FieldID
 	dataType := vectorField.DataType
 
@@ -139,12 +189,20 @@ func CreateSearchPlan(schemaPb *schemapb.CollectionSchema, exprStr string, vecto
 	if !typeutil.IsVectorType(dataType) {
 		return nil, fmt.Errorf("field (%s) to search is not of vector data type", vectorFieldName)
 	}
-	if dataType == schemapb.DataType_FloatVector {
-		vectorType = planpb.VectorType_FloatVector
-	} else if dataType == schemapb.DataType_BinaryVector {
+	switch dataType {
+	case schemapb.DataType_BinaryVector:
 		vectorType = planpb.VectorType_BinaryVector
-	} else {
+	case schemapb.DataType_FloatVector:
+		vectorType = planpb.VectorType_FloatVector
+	case schemapb.DataType_Float16Vector:
 		vectorType = planpb.VectorType_Float16Vector
+	case schemapb.DataType_BFloat16Vector:
+		vectorType = planpb.VectorType_BFloat16Vector
+	case schemapb.DataType_SparseFloatVector:
+		vectorType = planpb.VectorType_SparseFloatVector
+	default:
+		log.Error("Invalid dataType", zap.Any("dataType", dataType))
+		return nil, err
 	}
 	planNode := &planpb.PlanNode{
 		Node: &planpb.PlanNode_VectorAnns{

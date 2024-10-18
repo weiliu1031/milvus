@@ -25,7 +25,17 @@ SearchOnSealedIndex(const Schema& schema,
                     const void* query_data,
                     int64_t num_queries,
                     const BitsetView& view,
-                    SearchResult& result);
+                    SearchResult& search_result);
+
+void
+SearchOnSealed(const Schema& schema,
+               std::shared_ptr<ChunkedColumnBase> column,
+               const SearchInfo& search_info,
+               const void* query_data,
+               int64_t num_queries,
+               int64_t row_count,
+               const BitsetView& bitset,
+               SearchResult& result);
 
 void
 SearchOnSealed(const Schema& schema,

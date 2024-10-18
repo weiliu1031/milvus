@@ -11,6 +11,9 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
+	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/testutils"
 )
 
 func TestInsertTask_CheckAligned(t *testing.T) {
@@ -19,7 +22,7 @@ func TestInsertTask_CheckAligned(t *testing.T) {
 	// passed NumRows is less than 0
 	case1 := insertTask{
 		insertMsg: &BaseInsertTask{
-			InsertRequest: msgpb.InsertRequest{
+			InsertRequest: &msgpb.InsertRequest{
 				Base: &commonpb.MsgBase{
 					MsgType: commonpb.MsgType_Insert,
 				},
@@ -30,7 +33,7 @@ func TestInsertTask_CheckAligned(t *testing.T) {
 	err = case1.insertMsg.CheckAligned()
 	assert.NoError(t, err)
 
-	// fillFieldsDataBySchema was already checked by TestInsertTask_fillFieldsDataBySchema
+	// checkFieldsDataBySchema was already checked by TestInsertTask_checkFieldsDataBySchema
 
 	boolFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_Bool}
 	int8FieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_Int8}
@@ -41,19 +44,21 @@ func TestInsertTask_CheckAligned(t *testing.T) {
 	doubleFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_Double}
 	floatVectorFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_FloatVector}
 	binaryVectorFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_BinaryVector}
+	float16VectorFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_Float16Vector}
+	bfloat16VectorFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_BFloat16Vector}
 	varCharFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_VarChar}
 
 	numRows := 20
 	dim := 128
 	case2 := insertTask{
 		insertMsg: &BaseInsertTask{
-			InsertRequest: msgpb.InsertRequest{
+			InsertRequest: &msgpb.InsertRequest{
 				Base: &commonpb.MsgBase{
 					MsgType: commonpb.MsgType_Insert,
 				},
 				Version:    msgpb.InsertDataVersion_ColumnBased,
-				RowIDs:     generateInt64Array(numRows),
-				Timestamps: generateUint64Array(numRows),
+				RowIDs:     testutils.GenerateInt64Array(numRows),
+				Timestamps: testutils.GenerateUint64Array(numRows),
 			},
 		},
 		schema: &schemapb.CollectionSchema{
@@ -70,6 +75,8 @@ func TestInsertTask_CheckAligned(t *testing.T) {
 				doubleFieldSchema,
 				floatVectorFieldSchema,
 				binaryVectorFieldSchema,
+				float16VectorFieldSchema,
+				bfloat16VectorFieldSchema,
 				varCharFieldSchema,
 			},
 		},
@@ -87,6 +94,8 @@ func TestInsertTask_CheckAligned(t *testing.T) {
 		newScalarFieldData(doubleFieldSchema, "Double", numRows),
 		newFloatVectorFieldData("FloatVector", numRows, dim),
 		newBinaryVectorFieldData("BinaryVector", numRows, dim),
+		newFloat16VectorFieldData("Float16Vector", numRows, dim),
+		newBFloat16VectorFieldData("BFloat16Vector", numRows, dim),
 		newScalarFieldData(varCharFieldSchema, "VarChar", numRows),
 	}
 	err = case2.insertMsg.CheckAligned()
@@ -221,6 +230,32 @@ func TestInsertTask_CheckAligned(t *testing.T) {
 	case2.insertMsg.FieldsData[8] = newScalarFieldData(varCharFieldSchema, "VarChar", numRows)
 	err = case2.insertMsg.CheckAligned()
 	assert.NoError(t, err)
+
+	// less float16 vectors
+	case2.insertMsg.FieldsData[9] = newFloat16VectorFieldData("Float16Vector", numRows/2, dim)
+	err = case2.insertMsg.CheckAligned()
+	assert.Error(t, err)
+	// more float16 vectors
+	case2.insertMsg.FieldsData[9] = newFloat16VectorFieldData("Float16Vector", numRows*2, dim)
+	err = case2.insertMsg.CheckAligned()
+	assert.Error(t, err)
+	// revert
+	case2.insertMsg.FieldsData[9] = newFloat16VectorFieldData("Float16Vector", numRows, dim)
+	err = case2.insertMsg.CheckAligned()
+	assert.NoError(t, err)
+
+	// less bfloat16 vectors
+	case2.insertMsg.FieldsData[10] = newBFloat16VectorFieldData("BFloat16Vector", numRows/2, dim)
+	err = case2.insertMsg.CheckAligned()
+	assert.Error(t, err)
+	// more bfloat16 vectors
+	case2.insertMsg.FieldsData[10] = newBFloat16VectorFieldData("BFloat16Vector", numRows*2, dim)
+	err = case2.insertMsg.CheckAligned()
+	assert.Error(t, err)
+	// revert
+	case2.insertMsg.FieldsData[10] = newBFloat16VectorFieldData("BFloat16Vector", numRows, dim)
+	err = case2.insertMsg.CheckAligned()
+	assert.NoError(t, err)
 }
 
 func TestInsertTask(t *testing.T) {
@@ -240,7 +275,7 @@ func TestInsertTask(t *testing.T) {
 		it := insertTask{
 			ctx: context.Background(),
 			insertMsg: &msgstream.InsertMsg{
-				InsertRequest: msgpb.InsertRequest{
+				InsertRequest: &msgpb.InsertRequest{
 					CollectionName: collectionName,
 				},
 			},
@@ -251,5 +286,25 @@ func TestInsertTask(t *testing.T) {
 		resChannels := it.getChannels()
 		assert.ElementsMatch(t, channels, resChannels)
 		assert.ElementsMatch(t, channels, it.pChannels)
+	})
+}
+
+func TestMaxInsertSize(t *testing.T) {
+	t.Run("test MaxInsertSize", func(t *testing.T) {
+		paramtable.Init()
+		Params.Save(Params.QuotaConfig.MaxInsertSize.Key, "1")
+		defer Params.Reset(Params.QuotaConfig.MaxInsertSize.Key)
+		it := insertTask{
+			ctx: context.Background(),
+			insertMsg: &msgstream.InsertMsg{
+				InsertRequest: &msgpb.InsertRequest{
+					DbName:         "hooooooo",
+					CollectionName: "fooooo",
+				},
+			},
+		}
+		err := it.PreExecute(context.Background())
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, merr.ErrParameterTooLarge)
 	})
 }

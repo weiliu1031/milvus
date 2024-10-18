@@ -98,10 +98,12 @@ CUDA_ARCH="DEFAULT"
 EMBEDDED_MILVUS="OFF"
 BUILD_DISK_ANN="OFF"
 USE_ASAN="OFF"
-USE_DYNAMIC_SIMD="OFF"
+USE_DYNAMIC_SIMD="ON"
+USE_OPENDAL="OFF"
 INDEX_ENGINE="KNOWHERE"
+: "${ENABLE_GCP_NATIVE:="OFF"}"
 
-while getopts "p:d:t:s:f:n:i:y:a:x:ulrcghzmebZ" arg; do
+while getopts "p:d:t:s:f:n:i:y:a:x:o:ulrcghzmebZ" arg; do
   case $arg in
   p)
     INSTALL_PREFIX=$OPTARG
@@ -148,6 +150,9 @@ while getopts "p:d:t:s:f:n:i:y:a:x:ulrcghzmebZ" arg; do
   x)
     INDEX_ENGINE=$OPTARG
     ;;
+  o)
+    USE_OPENDAL=$OPTARG
+    ;;
   h) # help
     echo "
 
@@ -164,10 +169,11 @@ parameter:
 -b: build embedded milvus(default: OFF)
 -a: build milvus with AddressSanitizer(default: false)
 -Z: build milvus without azure-sdk-for-cpp, so cannot use azure blob
+-o: build milvus with opendal(default: false)
 -h: help
 
 usage:
-./core_build.sh -p \${INSTALL_PREFIX} -t \${BUILD_TYPE} -s \${CUDA_ARCH} [-u] [-l] [-r] [-c] [-z] [-g] [-m] [-e] [-h] [-b]
+./core_build.sh -p \${INSTALL_PREFIX} -t \${BUILD_TYPE} -s \${CUDA_ARCH} [-u] [-l] [-r] [-c] [-z] [-g] [-m] [-e] [-h] [-b] [-o]
                 "
     exit 0
     ;;
@@ -186,7 +192,12 @@ if [ -z "$BUILD_WITHOUT_AZURE" ]; then
   pushd ${AZURE_BUILD_DIR}
   env bash ${ROOT_DIR}/scripts/azure_build.sh -p ${INSTALL_PREFIX} -s ${ROOT_DIR}/internal/core/src/storage/azure-blob-storage -t ${BUILD_UNITTEST}
   if [ ! -e libblob-chunk-manager* ]; then
+    echo "build blob-chunk-manager fail..."
     cat vcpkg-bootstrap.log
+    exit 1
+  fi
+  if [ ! -e ${INSTALL_PREFIX}/lib/libblob-chunk-manager* ]; then
+    echo "install blob-chunk-manager fail..."
     exit 1
   fi
   popd
@@ -212,8 +223,12 @@ source ${ROOT_DIR}/scripts/setenv.sh
 
 CMAKE_GENERATOR="Unix Makefiles"
 
-# UBUNTU system build diskann index
-if [ "$OS_NAME" == "ubuntu20.04" ] ; then
+# build with diskann index if OS is ubuntu or rocky or amzn
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+fi
+if [ "$OS" = "ubuntu" ] || [ "$OS" = "rocky" ] || [ "$OS" = "amzn" ]; then
   BUILD_DISK_ANN=ON
 fi
 
@@ -241,7 +256,9 @@ ${CMAKE_EXTRA_ARGS} \
 -DUSE_ASAN=${USE_ASAN} \
 -DUSE_DYNAMIC_SIMD=${USE_DYNAMIC_SIMD} \
 -DCPU_ARCH=${CPU_ARCH} \
--DINDEX_ENGINE=${INDEX_ENGINE} "
+-DUSE_OPENDAL=${USE_OPENDAL} \
+-DINDEX_ENGINE=${INDEX_ENGINE} \
+-DENABLE_GCP_NATIVE=${ENABLE_GCP_NATIVE} "
 if [ -z "$BUILD_WITHOUT_AZURE" ]; then
 CMAKE_CMD=${CMAKE_CMD}"-DAZURE_BUILD_DIR=${AZURE_BUILD_DIR} \
 -DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET} "

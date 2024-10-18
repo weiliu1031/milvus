@@ -66,17 +66,11 @@ func Test_NewClient(t *testing.T) {
 		r5, err := client.GetMetrics(ctx, nil)
 		retCheck(retNotNil, r5, err)
 
-		r6, err := client.Compaction(ctx, nil)
+		r6, err := client.CompactionV2(ctx, nil)
 		retCheck(retNotNil, r6, err)
-
-		r7, err := client.Import(ctx, nil)
-		retCheck(retNotNil, r7, err)
 
 		r8, err := client.ResendSegmentStats(ctx, nil)
 		retCheck(retNotNil, r8, err)
-
-		r9, err := client.AddImportSegment(ctx, nil)
-		retCheck(retNotNil, r9, err)
 
 		r10, err := client.ShowConfigurations(ctx, nil)
 		retCheck(retNotNil, r10, err)
@@ -89,20 +83,23 @@ func Test_NewClient(t *testing.T) {
 
 		r13, err := client.CheckChannelOperationProgress(ctx, nil)
 		retCheck(retNotNil, r13, err)
+
+		r14, err := client.DropCompactionPlan(ctx, nil)
+		retCheck(retNotNil, r14, err)
 	}
 
-	client.grpcClient = &mock.GRPCClientBase[datapb.DataNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[datapb.DataNodeClient]{
 		GetGrpcClientErr: errors.New("dummy"),
 	}
 
 	newFunc1 := func(cc *grpc.ClientConn) datapb.DataNodeClient {
 		return &mock.GrpcDataNodeClient{Err: nil}
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc1)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc1)
 
 	checkFunc(false)
 
-	client.grpcClient = &mock.GRPCClientBase[datapb.DataNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[datapb.DataNodeClient]{
 		GetGrpcClientErr: nil,
 	}
 
@@ -110,18 +107,18 @@ func Test_NewClient(t *testing.T) {
 		return &mock.GrpcDataNodeClient{Err: errors.New("dummy")}
 	}
 
-	client.grpcClient.SetNewGrpcClientFunc(newFunc2)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc2)
 
 	checkFunc(false)
 
-	client.grpcClient = &mock.GRPCClientBase[datapb.DataNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[datapb.DataNodeClient]{
 		GetGrpcClientErr: nil,
 	}
 
 	newFunc3 := func(cc *grpc.ClientConn) datapb.DataNodeClient {
 		return &mock.GrpcDataNodeClient{Err: nil}
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc3)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc3)
 
 	checkFunc(true)
 

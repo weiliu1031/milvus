@@ -24,9 +24,9 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus/pkg/mq/common"
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 )
 
 type StreamPipelineSuite struct {
@@ -46,7 +46,7 @@ func (suite *StreamPipelineSuite) SetupTest() {
 	suite.inChannel = make(chan *msgstream.MsgPack, 1)
 	suite.outChannel = make(chan msgstream.Timestamp)
 	suite.msgDispatcher = msgdispatcher.NewMockClient(suite.T())
-	suite.msgDispatcher.EXPECT().Register(mock.Anything, suite.channel, mock.Anything, mqwrapper.SubscriptionPositionUnknown).Return(suite.inChannel, nil)
+	suite.msgDispatcher.EXPECT().Register(mock.Anything, suite.channel, mock.Anything, common.SubscriptionPositionUnknown).Return(suite.inChannel, nil)
 	suite.msgDispatcher.EXPECT().Deregister(suite.channel)
 	suite.pipeline = NewPipelineWithStream(suite.msgDispatcher, 0, false, suite.channel)
 	suite.length = 4
@@ -68,11 +68,11 @@ func (suite *StreamPipelineSuite) TestBasic() {
 
 	suite.pipeline.Start()
 	defer suite.pipeline.Close()
-	suite.inChannel <- &msgstream.MsgPack{}
+	suite.inChannel <- &msgstream.MsgPack{BeginTs: 1001}
 
 	for i := 1; i <= suite.length; i++ {
 		output := <-suite.outChannel
-		suite.Equal(msgstream.Timestamp(i), output)
+		suite.Equal(int64(1001), int64(output))
 	}
 }
 

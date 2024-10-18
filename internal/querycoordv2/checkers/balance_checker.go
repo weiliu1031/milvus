@@ -30,37 +30,54 @@ import (
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 // BalanceChecker checks the cluster distribution and generates balance tasks.
 type BalanceChecker struct {
 	*checkerActivation
-	balance.Balance
 	meta                                 *meta.Meta
 	nodeManager                          *session.NodeManager
 	normalBalanceCollectionsCurrentRound typeutil.UniqueSet
 	scheduler                            task.Scheduler
+	targetMgr                            meta.TargetManagerInterface
+	getBalancerFunc                      GetBalancerFunc
 }
 
-func NewBalanceChecker(meta *meta.Meta, balancer balance.Balance, nodeMgr *session.NodeManager, scheduler task.Scheduler) *BalanceChecker {
+func NewBalanceChecker(meta *meta.Meta,
+	targetMgr meta.TargetManagerInterface,
+	nodeMgr *session.NodeManager,
+	scheduler task.Scheduler,
+	getBalancerFunc GetBalancerFunc,
+) *BalanceChecker {
 	return &BalanceChecker{
 		checkerActivation:                    newCheckerActivation(),
-		Balance:                              balancer,
 		meta:                                 meta,
+		targetMgr:                            targetMgr,
 		nodeManager:                          nodeMgr,
 		normalBalanceCollectionsCurrentRound: typeutil.NewUniqueSet(),
 		scheduler:                            scheduler,
+		getBalancerFunc:                      getBalancerFunc,
 	}
 }
 
-func (b *BalanceChecker) ID() CheckerType {
-	return balanceChecker
+func (b *BalanceChecker) ID() utils.CheckerType {
+	return utils.BalanceChecker
 }
 
 func (b *BalanceChecker) Description() string {
 	return "BalanceChecker checks the cluster distribution and generates balance tasks"
+}
+
+func (b *BalanceChecker) readyToCheck(collectionID int64) bool {
+	metaExist := (b.meta.GetCollection(collectionID) != nil)
+	targetExist := b.targetMgr.IsNextTargetExist(collectionID) || b.targetMgr.IsCurrentTargetExist(collectionID, common.AllPartitionsID)
+
+	return metaExist && targetExist
 }
 
 func (b *BalanceChecker) replicasToBalance() []int64 {
@@ -75,31 +92,30 @@ func (b *BalanceChecker) replicasToBalance() []int64 {
 		return loadedCollections[i] < loadedCollections[j]
 	})
 
-	// balance collections influenced by stopping nodes
-	stoppingReplicas := make([]int64, 0)
-	for _, cid := range loadedCollections {
-		replicas := b.meta.ReplicaManager.GetByCollection(cid)
-		for _, replica := range replicas {
-			for _, nodeID := range replica.GetNodes() {
-				isStopping, _ := b.nodeManager.IsStoppingNode(nodeID)
-				if isStopping {
+	if paramtable.Get().QueryCoordCfg.EnableStoppingBalance.GetAsBool() {
+		// balance collections influenced by stopping nodes
+		stoppingReplicas := make([]int64, 0)
+		for _, cid := range loadedCollections {
+			// if target and meta isn't ready, skip balance this collection
+			if !b.readyToCheck(cid) {
+				continue
+			}
+			replicas := b.meta.ReplicaManager.GetByCollection(cid)
+			for _, replica := range replicas {
+				if replica.RONodesCount() > 0 {
 					stoppingReplicas = append(stoppingReplicas, replica.GetID())
-					break
 				}
 			}
 		}
-	}
-	// do stopping balance only in this round
-	if len(stoppingReplicas) > 0 {
-		return stoppingReplicas
+		// do stopping balance only in this round
+		if len(stoppingReplicas) > 0 {
+			return stoppingReplicas
+		}
 	}
 
-	// no stopping balance and auto balance is disabled, return empty collections for balance
-	if !Params.QueryCoordCfg.AutoBalance.GetAsBool() {
-		return nil
-	}
-	// scheduler is handling segment task, skip
-	if b.scheduler.GetSegmentTaskNum() != 0 {
+	// 1. no stopping balance and auto balance is disabled, return empty collections for balance
+	// 2. when balancer isn't active, skip auto balance
+	if !Params.QueryCoordCfg.AutoBalance.GetAsBool() || !b.IsActive() {
 		return nil
 	}
 
@@ -108,7 +124,7 @@ func (b *BalanceChecker) replicasToBalance() []int64 {
 	hasUnbalancedCollection := false
 	for _, cid := range loadedCollections {
 		if b.normalBalanceCollectionsCurrentRound.Contain(cid) {
-			log.Debug("ScoreBasedBalancer has balanced collection, skip balancing in this round",
+			log.RatedDebug(10, "ScoreBasedBalancer is balancing this collection, skip balancing in this round",
 				zap.Int64("collectionID", cid))
 			continue
 		}
@@ -135,7 +151,7 @@ func (b *BalanceChecker) balanceReplicas(replicaIDs []int64) ([]balance.SegmentA
 		if replica == nil {
 			continue
 		}
-		sPlans, cPlans := b.Balance.BalanceReplica(replica)
+		sPlans, cPlans := b.getBalancerFunc().BalanceReplica(replica)
 		segmentPlans = append(segmentPlans, sPlans...)
 		channelPlans = append(channelPlans, cPlans...)
 		if len(segmentPlans) != 0 || len(channelPlans) != 0 {
@@ -146,13 +162,15 @@ func (b *BalanceChecker) balanceReplicas(replicaIDs []int64) ([]balance.SegmentA
 }
 
 func (b *BalanceChecker) Check(ctx context.Context) []task.Task {
-	if !b.IsActive() {
-		return nil
-	}
 	ret := make([]task.Task, 0)
 
 	replicasToBalance := b.replicasToBalance()
 	segmentPlans, channelPlans := b.balanceReplicas(replicasToBalance)
+	// iterate all collection to find a collection to balance
+	for len(segmentPlans) == 0 && len(channelPlans) == 0 && b.normalBalanceCollectionsCurrentRound.Len() > 0 {
+		replicasToBalance := b.replicasToBalance()
+		segmentPlans, channelPlans = b.balanceReplicas(replicasToBalance)
+	}
 
 	tasks := balance.CreateSegmentTasksFromPlans(ctx, b.ID(), Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond), segmentPlans)
 	task.SetPriority(task.TaskPriorityLow, tasks...)

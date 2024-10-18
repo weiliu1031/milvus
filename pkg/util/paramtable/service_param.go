@@ -27,17 +27,16 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 )
 
 const (
-	// SuggestPulsarMaxMessageSize defines the maximum size of Pulsar message.
-	SuggestPulsarMaxMessageSize = 5 * 1024 * 1024
-	defaultEtcdLogLevel         = "info"
-	defaultEtcdLogPath          = "stdout"
-	KafkaProducerConfigPrefix   = "kafka.producer."
-	KafkaConsumerConfigPrefix   = "kafka.consumer."
+	defaultEtcdLogLevel       = "info"
+	defaultEtcdLogPath        = "stdout"
+	KafkaProducerConfigPrefix = "kafka.producer."
+	KafkaConsumerConfigPrefix = "kafka.consumer."
 )
 
 // ServiceParam is used to quickly and easily access all basic service configurations.
@@ -107,6 +106,11 @@ type EtcdConfig struct {
 	UseEmbedEtcd ParamItem `refreshable:"false"`
 	ConfigPath   ParamItem `refreshable:"false"`
 	DataDir      ParamItem `refreshable:"false"`
+
+	// --- ETCD Authentication ---
+	EtcdEnableAuth   ParamItem `refreshable:"false"`
+	EtcdAuthUserName ParamItem `refreshable:"false"`
+	EtcdAuthPassword ParamItem `refreshable:"false"`
 }
 
 func (p *EtcdConfig) Init(base *BaseTable) {
@@ -115,7 +119,10 @@ func (p *EtcdConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "localhost:2379",
 		PanicIfEmpty: true,
-		Export:       true,
+		Doc: `Endpoints used to access etcd service. You can change this parameter as the endpoints of your own etcd cluster.
+Environment variable: ETCD_ENDPOINTS
+etcd preferentially acquires valid address from environment variable ETCD_ENDPOINTS when Milvus is started.`,
+		Export: true,
 	}
 	p.Endpoints.Init(base.mgr)
 
@@ -153,8 +160,12 @@ func (p *EtcdConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "by-dev",
 		PanicIfEmpty: true,
-		Doc:          "The root path where data is stored in etcd",
-		Export:       true,
+		Doc: `Root prefix of the key to where Milvus stores data in etcd.
+It is recommended to change this parameter before starting Milvus for the first time.
+To share an etcd instance among multiple Milvus instances, consider changing this to a different value for each Milvus instance before you start them.
+Set an easy-to-identify root path for Milvus if etcd service already exists.
+Changing this for an already running Milvus instance may result in failures to read legacy data.`,
+		Export: true,
 	}
 	p.RootPath.Init(base.mgr)
 
@@ -163,8 +174,10 @@ func (p *EtcdConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "meta",
 		PanicIfEmpty: true,
-		Doc:          "metaRootPath = rootPath + '/' + metaSubPath",
-		Export:       true,
+		Doc: `Sub-prefix of the key to where Milvus stores metadata-related information in etcd.
+Caution: Changing this parameter after using Milvus for a period of time will affect your access to old data.
+It is recommended to change this parameter before starting Milvus for the first time.`,
+		Export: true,
 	}
 	p.MetaSubPath.Init(base.mgr)
 
@@ -180,8 +193,10 @@ func (p *EtcdConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "kv",
 		PanicIfEmpty: true,
-		Doc:          "kvRootPath = rootPath + '/' + kvSubPath",
-		Export:       true,
+		Doc: `Sub-prefix of the key to where Milvus stores timestamps in etcd.
+Caution: Changing this parameter after using Milvus for a period of time will affect your access to old data.
+It is recommended not to change this parameter if there is no specific reason.`,
+		Export: true,
 	}
 	p.KvSubPath.Init(base.mgr)
 
@@ -267,6 +282,35 @@ We recommend using version 1.2 and above.`,
 		Export:       true,
 	}
 	p.RequestTimeout.Init(base.mgr)
+
+	p.EtcdEnableAuth = ParamItem{
+		Key:          "etcd.auth.enabled",
+		DefaultValue: "false",
+		Version:      "2.3.7",
+		Doc:          "Whether to enable authentication",
+		Export:       true,
+	}
+	p.EtcdEnableAuth.Init(base.mgr)
+
+	if p.UseEmbedEtcd.GetAsBool() && p.EtcdEnableAuth.GetAsBool() {
+		panic("embedded etcd can not enable auth")
+	}
+
+	p.EtcdAuthUserName = ParamItem{
+		Key:     "etcd.auth.userName",
+		Version: "2.3.7",
+		Doc:     "username for etcd authentication",
+		Export:  true,
+	}
+	p.EtcdAuthUserName.Init(base.mgr)
+
+	p.EtcdAuthPassword = ParamItem{
+		Key:     "etcd.auth.password",
+		Version: "2.3.7",
+		Doc:     "password for etcd authentication",
+		Export:  true,
+	}
+	p.EtcdAuthPassword.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -290,8 +334,9 @@ func (p *TiKVConfig) Init(base *BaseTable) {
 	p.Endpoints = ParamItem{
 		Key:          "tikv.endpoints",
 		Version:      "2.3.0",
-		DefaultValue: "localhost:2379",
+		DefaultValue: "localhost:2389",
 		PanicIfEmpty: true,
+		Doc:          "Note that the default pd port of tikv is 2379, which conflicts with etcd.",
 		Export:       true,
 	}
 	p.Endpoints.Init(base.mgr)
@@ -401,14 +446,18 @@ func (p *LocalStorageConfig) Init(base *BaseTable) {
 		Key:          "localStorage.path",
 		Version:      "2.0.0",
 		DefaultValue: "/var/lib/milvus/data",
-		Doc:          "please adjust in embedded Milvus: /tmp/milvus/data/",
-		Export:       true,
+		Doc: `Local path to where vector data are stored during a search or a query to avoid repetitve access to MinIO or S3 service.
+Caution: Changing this parameter after using Milvus for a period of time will affect your access to old data.
+It is recommended to change this parameter before starting Milvus for the first time.`,
+		Export: true,
 	}
 	p.Path.Init(base.mgr)
 }
 
 type MetaStoreConfig struct {
-	MetaStoreType ParamItem `refreshable:"false"`
+	MetaStoreType              ParamItem `refreshable:"false"`
+	SnapshotTTLSeconds         ParamItem `refreshable:"true"`
+	SnapshotReserveTimeSeconds ParamItem `refreshable:"true"`
 }
 
 func (p *MetaStoreConfig) Init(base *BaseTable) {
@@ -420,6 +469,28 @@ func (p *MetaStoreConfig) Init(base *BaseTable) {
 		Export:       true,
 	}
 	p.MetaStoreType.Init(base.mgr)
+
+	p.SnapshotTTLSeconds = ParamItem{
+		Key:          "metastore.snapshot.ttl",
+		Version:      "2.4.14",
+		DefaultValue: "86400",
+		Doc:          `snapshot ttl in seconds`,
+		Export:       true,
+	}
+	p.SnapshotTTLSeconds.Init(base.mgr)
+
+	p.SnapshotReserveTimeSeconds = ParamItem{
+		Key:          "metastore.snapshot.reserveTime",
+		Version:      "2.4.14",
+		DefaultValue: "3600",
+		Doc:          `snapshot reserve time in seconds`,
+		Export:       true,
+	}
+	p.SnapshotReserveTimeSeconds.Init(base.mgr)
+
+	// TODO: The initialization operation of metadata storage is called in the initialization phase of every node.
+	// There should be a single initialization operation for meta store, then move the metrics registration to there.
+	metrics.RegisterMetaType(p.MetaStoreType.GetValue())
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -431,9 +502,16 @@ type MQConfig struct {
 	EnablePursuitMode ParamItem `refreshable:"true"`
 	PursuitLag        ParamItem `refreshable:"true"`
 	PursuitBufferSize ParamItem `refreshable:"true"`
+	PursuitBufferTime ParamItem `refreshable:"true"`
 
-	MQBufSize      ParamItem `refreshable:"false"`
-	ReceiveBufSize ParamItem `refreshable:"false"`
+	MQBufSize         ParamItem `refreshable:"false"`
+	ReceiveBufSize    ParamItem `refreshable:"false"`
+	IgnoreBadPosition ParamItem `refreshable:"true"`
+
+	// msgdispatcher
+	MergeCheckInterval ParamItem `refreshable:"false"`
+	TargetBufSize      ParamItem `refreshable:"false"`
+	MaxTolerantLag     ParamItem `refreshable:"true"`
 }
 
 // Init initializes the MQConfig object with a BaseTable.
@@ -447,6 +525,33 @@ Valid values: [default, pulsar, kafka, rocksmq, natsmq]`,
 		Export: true,
 	}
 	p.Type.Init(base.mgr)
+
+	p.MaxTolerantLag = ParamItem{
+		Key:          "mq.dispatcher.maxTolerantLag",
+		Version:      "2.4.4",
+		DefaultValue: "3",
+		Doc:          `Default value: "3", the timeout(in seconds) that target sends msgPack`,
+		Export:       true,
+	}
+	p.MaxTolerantLag.Init(base.mgr)
+
+	p.TargetBufSize = ParamItem{
+		Key:          "mq.dispatcher.targetBufSize",
+		Version:      "2.4.4",
+		DefaultValue: "16",
+		Doc:          `the lenth of channel buffer for targe`,
+		Export:       true,
+	}
+	p.TargetBufSize.Init(base.mgr)
+
+	p.MergeCheckInterval = ParamItem{
+		Key:          "mq.dispatcher.mergeCheckInterval",
+		Version:      "2.4.4",
+		DefaultValue: "1",
+		Doc:          `the interval time(in seconds) for dispatcher to check whether to merge`,
+		Export:       true,
+	}
+	p.MergeCheckInterval.Init(base.mgr)
 
 	p.EnablePursuitMode = ParamItem{
 		Key:          "mq.enablePursuitMode",
@@ -475,6 +580,15 @@ Valid values: [default, pulsar, kafka, rocksmq, natsmq]`,
 	}
 	p.PursuitBufferSize.Init(base.mgr)
 
+	p.PursuitBufferTime = ParamItem{
+		Key:          "mq.pursuitBufferTime",
+		Version:      "2.4.12",
+		DefaultValue: "60", // 60 s
+		Doc:          `pursuit mode buffer time in seconds`,
+		Export:       true,
+	}
+	p.PursuitBufferTime.Init(base.mgr)
+
 	p.MQBufSize = ParamItem{
 		Key:          "mq.mqBufSize",
 		Version:      "2.3.0",
@@ -491,6 +605,14 @@ Valid values: [default, pulsar, kafka, rocksmq, natsmq]`,
 		Doc:          "MQ consumer chan buffer length",
 	}
 	p.ReceiveBufSize.Init(base.mgr)
+
+	p.IgnoreBadPosition = ParamItem{
+		Key:          "mq.ignoreBadPosition",
+		Version:      "2.3.16",
+		DefaultValue: "false",
+		Doc:          "A switch for ignoring message queue failing to parse message ID from checkpoint position. Usually caused by switching among different mq implementations. May caused data loss when used by mistake",
+	}
+	p.IgnoreBadPosition.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -522,7 +644,7 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Key:          "pulsar.port",
 		Version:      "2.0.0",
 		DefaultValue: "6650",
-		Doc:          "Port of Pulsar",
+		Doc:          "Port of Pulsar service.",
 		Export:       true,
 	}
 	p.Port.Init(base.mgr)
@@ -542,7 +664,11 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 			port, _ := p.Port.get()
 			return "pulsar://" + addr + ":" + port
 		},
-		Doc:    "Address of pulsar",
+		Doc: `IP address of Pulsar service.
+Environment variable: PULSAR_ADDRESS
+pulsar.address and pulsar.port together generate the valid access to Pulsar.
+Pulsar preferentially acquires the valid IP address from the environment variable PULSAR_ADDRESS when Milvus is started.
+Default value applies when Pulsar is running on the same network with Milvus.`,
 		Export: true,
 	}
 	p.Address.Init(base.mgr)
@@ -551,7 +677,7 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Key:          "pulsar.webport",
 		Version:      "2.0.0",
 		DefaultValue: "80",
-		Doc:          "Web port of pulsar, if you connect direcly without proxy, should use 8080",
+		Doc:          "Web port of of Pulsar service. If you connect direcly without proxy, should use 8080.",
 		Export:       true,
 	}
 	p.WebPort.Init(base.mgr)
@@ -574,9 +700,11 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 	p.MaxMessageSize = ParamItem{
 		Key:          "pulsar.maxMessageSize",
 		Version:      "2.0.0",
-		DefaultValue: strconv.Itoa(SuggestPulsarMaxMessageSize),
-		Doc:          "5 * 1024 * 1024 Bytes, Maximum size of each message in pulsar.",
-		Export:       true,
+		DefaultValue: "2097152",
+		Doc: `The maximum size of each message in Pulsar. Unit: Byte.
+By default, Pulsar can transmit at most 2MB of data in a single message. When the size of inserted data is greater than this value, proxy fragments the data into multiple messages to ensure that they can be transmitted correctly.
+If the corresponding parameter in Pulsar remains unchanged, increasing this configuration will cause Milvus to fail, and reducing it produces no advantage.`,
+		Export: true,
 	}
 	p.MaxMessageSize.Init(base.mgr)
 
@@ -584,7 +712,9 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Key:          "pulsar.tenant",
 		Version:      "2.2.0",
 		DefaultValue: "public",
-		Export:       true,
+		Doc: `Pulsar can be provisioned for specific tenants with appropriate capacity allocated to the tenant.
+To share a Pulsar instance among multiple Milvus instances, you can change this to an Pulsar tenant rather than the default one for each Milvus instance before you start them. However, if you do not want Pulsar multi-tenancy, you are advised to change msgChannel.chanNamePrefix.cluster to the different value.`,
+		Export: true,
 	}
 	p.Tenant.Init(base.mgr)
 
@@ -592,6 +722,7 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Key:          "pulsar.namespace",
 		Version:      "2.2.0",
 		DefaultValue: "default",
+		Doc:          "A Pulsar namespace is the administrative unit nomenclature within a tenant.",
 		Export:       true,
 	}
 	p.Namespace.Init(base.mgr)
@@ -625,6 +756,7 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Key:          "pulsar.requestTimeout",
 		Version:      "2.3.0",
 		DefaultValue: "60",
+		Doc:          "pulsar client global request timeout in seconds",
 		Export:       true,
 	}
 	p.RequestTimeout.Init(base.mgr)
@@ -633,6 +765,7 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Key:          "pulsar.enableClientMetrics",
 		Version:      "2.3.0",
 		DefaultValue: "false",
+		Doc:          "Whether to register pulsar client metrics into milvus metrics path.",
 		Export:       true,
 	}
 	p.EnableClientMetrics.Init(base.mgr)
@@ -645,6 +778,11 @@ type KafkaConfig struct {
 	SaslPassword        ParamItem  `refreshable:"false"`
 	SaslMechanisms      ParamItem  `refreshable:"false"`
 	SecurityProtocol    ParamItem  `refreshable:"false"`
+	KafkaUseSSL         ParamItem  `refreshable:"false"`
+	KafkaTLSCert        ParamItem  `refreshable:"false"`
+	KafkaTLSKey         ParamItem  `refreshable:"false"`
+	KafkaTLSCACert      ParamItem  `refreshable:"false"`
+	KafkaTLSKeyPassword ParamItem  `refreshable:"false"`
 	ConsumerExtraConfig ParamGroup `refreshable:"false"`
 	ProducerExtraConfig ParamGroup `refreshable:"false"`
 	ReadTimeout         ParamItem  `refreshable:"true"`
@@ -678,7 +816,7 @@ func (k *KafkaConfig) Init(base *BaseTable) {
 
 	k.SaslMechanisms = ParamItem{
 		Key:          "kafka.saslMechanisms",
-		DefaultValue: "PLAIN",
+		DefaultValue: "",
 		Version:      "2.1.0",
 		Export:       true,
 	}
@@ -686,11 +824,52 @@ func (k *KafkaConfig) Init(base *BaseTable) {
 
 	k.SecurityProtocol = ParamItem{
 		Key:          "kafka.securityProtocol",
-		DefaultValue: "SASL_SSL",
+		DefaultValue: "",
 		Version:      "2.1.0",
 		Export:       true,
 	}
 	k.SecurityProtocol.Init(base.mgr)
+
+	k.KafkaUseSSL = ParamItem{
+		Key:          "kafka.ssl.enabled",
+		DefaultValue: "false",
+		Version:      "2.3.11",
+		Doc:          "whether to enable ssl mode",
+		Export:       true,
+	}
+	k.KafkaUseSSL.Init(base.mgr)
+
+	k.KafkaTLSCert = ParamItem{
+		Key:     "kafka.ssl.tlsCert",
+		Version: "2.3.11",
+		Doc:     "path to client's public key (PEM) used for authentication",
+		Export:  true,
+	}
+	k.KafkaTLSCert.Init(base.mgr)
+
+	k.KafkaTLSKey = ParamItem{
+		Key:     "kafka.ssl.tlsKey",
+		Version: "2.3.11",
+		Doc:     "path to client's private key (PEM) used for authentication",
+		Export:  true,
+	}
+	k.KafkaTLSKey.Init(base.mgr)
+
+	k.KafkaTLSCACert = ParamItem{
+		Key:     "kafka.ssl.tlsCaCert",
+		Version: "2.3.11",
+		Doc:     "file or directory path to CA certificate(s) for verifying the broker's key",
+		Export:  true,
+	}
+	k.KafkaTLSCACert.Init(base.mgr)
+
+	k.KafkaTLSKeyPassword = ParamItem{
+		Key:     "kafka.ssl.tlsKeyPassword",
+		Version: "2.3.11",
+		Doc:     "private key passphrase for use with ssl.key.location and set_ssl_cert(), if any",
+		Export:  true,
+	}
+	k.KafkaTLSKeyPassword.Init(base.mgr)
 
 	k.ConsumerExtraConfig = ParamGroup{
 		KeyPrefix: "kafka.consumer.",
@@ -738,8 +917,10 @@ func (r *RocksmqConfig) Init(base *BaseTable) {
 	r.Path = ParamItem{
 		Key:     "rocksmq.path",
 		Version: "2.0.0",
-		Doc: `The path where the message is stored in rocksmq
-please adjust in embedded Milvus: /tmp/milvus/rdb_data`,
+		Doc: `Prefix of the key to where Milvus stores data in RocksMQ.
+Caution: Changing this parameter after using Milvus for a period of time will affect your access to old data.
+It is recommended to change this parameter before starting Milvus for the first time.
+Set an easy-to-identify root key prefix for Milvus if etcd service already exists.`,
 		Export: true,
 	}
 	r.Path.Init(base.mgr)
@@ -757,7 +938,7 @@ please adjust in embedded Milvus: /tmp/milvus/rdb_data`,
 		Key:          "rocksmq.rocksmqPageSize",
 		DefaultValue: strconv.FormatInt(64<<20, 10),
 		Version:      "2.0.0",
-		Doc:          "64 MB, 64 * 1024 * 1024 bytes, The size of each page of messages in rocksmq",
+		Doc:          "The maximum size of messages in each page in RocksMQ. Messages in RocksMQ are checked and cleared (when expired) in batch based on this parameters. Unit: Byte.",
 		Export:       true,
 	}
 	r.PageSize.Init(base.mgr)
@@ -766,7 +947,7 @@ please adjust in embedded Milvus: /tmp/milvus/rdb_data`,
 		Key:          "rocksmq.retentionTimeInMinutes",
 		DefaultValue: "4320",
 		Version:      "2.0.0",
-		Doc:          "3 days, 3 * 24 * 60 minutes, The retention time of the message in rocksmq.",
+		Doc:          "The maximum retention time of acked messages in RocksMQ. Acked messages in RocksMQ are retained for the specified period of time and then cleared. Unit: Minute.",
 		Export:       true,
 	}
 	r.RetentionTimeInMinutes.Init(base.mgr)
@@ -775,7 +956,7 @@ please adjust in embedded Milvus: /tmp/milvus/rdb_data`,
 		Key:          "rocksmq.retentionSizeInMB",
 		DefaultValue: "7200",
 		Version:      "2.0.0",
-		Doc:          "8 GB, 8 * 1024 MB, The retention size of the message in rocksmq.",
+		Doc:          "The maximum retention size of acked messages of each topic in RocksMQ. Acked messages in each topic are cleared if their size exceed this parameter. Unit: MB.",
 		Export:       true,
 	}
 	r.RetentionSizeInMB.Init(base.mgr)
@@ -784,7 +965,7 @@ please adjust in embedded Milvus: /tmp/milvus/rdb_data`,
 		Key:          "rocksmq.compactionInterval",
 		DefaultValue: "86400",
 		Version:      "2.0.0",
-		Doc:          "1 day, trigger rocksdb compaction every day to remove deleted data",
+		Doc:          "Time interval to trigger rocksdb compaction to remove deleted data. Unit: Second",
 		Export:       true,
 	}
 	r.CompactionInterval.Init(base.mgr)
@@ -800,6 +981,8 @@ please adjust in embedded Milvus: /tmp/milvus/rdb_data`,
 		Key:          "rocksmq.compressionTypes",
 		DefaultValue: "0,0,7,7,7",
 		Version:      "2.2.12",
+		Doc:          "compaction compression type, only support use 0,7. 0 means not compress, 7 will use zstd. Length of types means num of rocksdb level.",
+		Export:       true,
 	}
 	r.CompressionTypes.Init(base.mgr)
 }
@@ -828,7 +1011,7 @@ func (r *NatsmqConfig) Init(base *BaseTable) {
 		Key:          "natsmq.server.port",
 		Version:      "2.3.0",
 		DefaultValue: "4222",
-		Doc:          `Port for nats server listening`,
+		Doc:          "Listening port of the NATS server.",
 		Export:       true,
 	}
 	r.ServerPort.Init(base.mgr)
@@ -942,20 +1125,23 @@ func (r *NatsmqConfig) Init(base *BaseTable) {
 // /////////////////////////////////////////////////////////////////////////////
 // --- minio ---
 type MinioConfig struct {
-	Address          ParamItem `refreshable:"false"`
-	Port             ParamItem `refreshable:"false"`
-	AccessKeyID      ParamItem `refreshable:"false"`
-	SecretAccessKey  ParamItem `refreshable:"false"`
-	UseSSL           ParamItem `refreshable:"false"`
-	BucketName       ParamItem `refreshable:"false"`
-	RootPath         ParamItem `refreshable:"false"`
-	UseIAM           ParamItem `refreshable:"false"`
-	CloudProvider    ParamItem `refreshable:"false"`
-	IAMEndpoint      ParamItem `refreshable:"false"`
-	LogLevel         ParamItem `refreshable:"false"`
-	Region           ParamItem `refreshable:"false"`
-	UseVirtualHost   ParamItem `refreshable:"false"`
-	RequestTimeoutMs ParamItem `refreshable:"false"`
+	Address            ParamItem `refreshable:"false"`
+	Port               ParamItem `refreshable:"false"`
+	AccessKeyID        ParamItem `refreshable:"false"`
+	SecretAccessKey    ParamItem `refreshable:"false"`
+	UseSSL             ParamItem `refreshable:"false"`
+	SslCACert          ParamItem `refreshable:"false"`
+	BucketName         ParamItem `refreshable:"false"`
+	RootPath           ParamItem `refreshable:"false"`
+	UseIAM             ParamItem `refreshable:"false"`
+	CloudProvider      ParamItem `refreshable:"false"`
+	GcpCredentialJSON  ParamItem `refreshable:"false"`
+	IAMEndpoint        ParamItem `refreshable:"false"`
+	LogLevel           ParamItem `refreshable:"false"`
+	Region             ParamItem `refreshable:"false"`
+	UseVirtualHost     ParamItem `refreshable:"false"`
+	RequestTimeoutMs   ParamItem `refreshable:"false"`
+	ListObjectsMaxKeys ParamItem `refreshable:"true"`
 }
 
 func (p *MinioConfig) Init(base *BaseTable) {
@@ -963,7 +1149,7 @@ func (p *MinioConfig) Init(base *BaseTable) {
 		Key:          "minio.port",
 		DefaultValue: "9000",
 		Version:      "2.0.0",
-		Doc:          "Port of MinIO/S3",
+		Doc:          "Port of MinIO or S3 service.",
 		PanicIfEmpty: true,
 		Export:       true,
 	}
@@ -983,7 +1169,11 @@ func (p *MinioConfig) Init(base *BaseTable) {
 			port, _ := p.Port.get()
 			return addr + ":" + port
 		},
-		Doc:    "Address of MinIO/S3",
+		Doc: `IP address of MinIO or S3 service.
+Environment variable: MINIO_ADDRESS
+minio.address and minio.port together generate the valid access to MinIO or S3 service.
+MinIO preferentially acquires the valid IP address from the environment variable MINIO_ADDRESS when Milvus is started.
+Default value applies when MinIO or S3 is running on the same network with Milvus.`,
 		Export: true,
 	}
 	p.Address.Init(base.mgr)
@@ -993,8 +1183,12 @@ func (p *MinioConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "minioadmin",
 		PanicIfEmpty: false, // tmp fix, need to be conditional
-		Doc:          "accessKeyID of MinIO/S3",
-		Export:       true,
+		Doc: `Access key ID that MinIO or S3 issues to user for authorized access.
+Environment variable: MINIO_ACCESS_KEY_ID or minio.accessKeyID
+minio.accessKeyID and minio.secretAccessKey together are used for identity authentication to access the MinIO or S3 service.
+This configuration must be set identical to the environment variable MINIO_ACCESS_KEY_ID, which is necessary for starting MinIO or S3.
+The default value applies to MinIO or S3 service that started with the default docker-compose.yml file.`,
+		Export: true,
 	}
 	p.AccessKeyID.Init(base.mgr)
 
@@ -1003,8 +1197,12 @@ func (p *MinioConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "minioadmin",
 		PanicIfEmpty: false, // tmp fix, need to be conditional
-		Doc:          "MinIO/S3 encryption string",
-		Export:       true,
+		Doc: `Secret key used to encrypt the signature string and verify the signature string on server. It must be kept strictly confidential and accessible only to the MinIO or S3 server and users.
+Environment variable: MINIO_SECRET_ACCESS_KEY or minio.secretAccessKey
+minio.accessKeyID and minio.secretAccessKey together are used for identity authentication to access the MinIO or S3 service.
+This configuration must be set identical to the environment variable MINIO_SECRET_ACCESS_KEY, which is necessary for starting MinIO or S3.
+The default value applies to MinIO or S3 service that started with the default docker-compose.yml file.`,
+		Export: true,
 	}
 	p.SecretAccessKey.Init(base.mgr)
 
@@ -1013,18 +1211,31 @@ func (p *MinioConfig) Init(base *BaseTable) {
 		Version:      "2.0.0",
 		DefaultValue: "false",
 		PanicIfEmpty: true,
-		Doc:          "Access to MinIO/S3 with SSL",
+		Doc:          "Switch value to control if to access the MinIO or S3 service through SSL.",
 		Export:       true,
 	}
 	p.UseSSL.Init(base.mgr)
+
+	p.SslCACert = ParamItem{
+		Key:     "minio.ssl.tlsCACert",
+		Version: "2.3.12",
+		Doc:     "path to your CACert file",
+		Export:  true,
+	}
+	p.SslCACert.Init(base.mgr)
 
 	p.BucketName = ParamItem{
 		Key:          "minio.bucketName",
 		Version:      "2.0.0",
 		DefaultValue: "a-bucket",
 		PanicIfEmpty: true,
-		Doc:          "Bucket name in MinIO/S3",
-		Export:       true,
+		Doc: `Name of the bucket where Milvus stores data in MinIO or S3.
+Milvus 2.0.0 does not support storing data in multiple buckets.
+Bucket with this name will be created if it does not exist. If the bucket already exists and is accessible, it will be used directly. Otherwise, there will be an error.
+To share an MinIO instance among multiple Milvus instances, consider changing this to a different value for each Milvus instance before you start them. For details, see Operation FAQs.
+The data will be stored in the local Docker if Docker is used to start the MinIO service locally. Ensure that there is sufficient storage space.
+A bucket name is globally unique in one MinIO or S3 instance.`,
+		Export: true,
 	}
 	p.BucketName.Init(base.mgr)
 
@@ -1039,8 +1250,12 @@ func (p *MinioConfig) Init(base *BaseTable) {
 			return path.Clean(rootPath)
 		},
 		PanicIfEmpty: false,
-		Doc:          "The root path where the message is stored in MinIO/S3",
-		Export:       true,
+		Doc: `Root prefix of the key to where Milvus stores data in MinIO or S3.
+It is recommended to change this parameter before starting Milvus for the first time.
+To share an MinIO instance among multiple Milvus instances, consider changing this to a different value for each Milvus instance before you start them. For details, see Operation FAQs.
+Set an easy-to-identify root key prefix for Milvus if etcd service already exists.
+Changing this for an already running Milvus instance may result in failures to read legacy data.`,
+		Export: true,
 	}
 	p.RootPath.Init(base.mgr)
 
@@ -1061,15 +1276,28 @@ aliyun (ecs): https://www.alibabacloud.com/help/en/elastic-compute-service/lates
 	p.CloudProvider = ParamItem{
 		Key:          "minio.cloudProvider",
 		DefaultValue: DefaultMinioCloudProvider,
-		Version:      "2.2.0",
+		Version:      "2.4.1",
 		Doc: `Cloud Provider of S3. Supports: "aws", "gcp", "aliyun".
+Cloud Provider of Google Cloud Storage. Supports: "gcpnative".
 You can use "aws" for other cloud provider supports S3 API with signature v4, e.g.: minio
 You can use "gcp" for other cloud provider supports S3 API with signature v2
 You can use "aliyun" for other cloud provider uses virtual host style bucket
+You can use "gcpnative" for the Google Cloud Platform provider. Uses service account credentials
+for authentication.
 When useIAM enabled, only "aws", "gcp", "aliyun" is supported for now`,
 		Export: true,
 	}
 	p.CloudProvider.Init(base.mgr)
+
+	p.GcpCredentialJSON = ParamItem{
+		Key:          "minio.gcpCredentialJSON",
+		Version:      "2.4.1",
+		DefaultValue: "",
+		Doc: `The JSON content contains the gcs service account credentials.
+Used only for the "gcpnative" cloud provider.`,
+		Export: true,
+	}
+	p.GcpCredentialJSON.Init(base.mgr)
 
 	p.IAMEndpoint = ParamItem{
 		Key:          "minio.iamEndpoint",
@@ -1101,7 +1329,7 @@ Leave it empty if you want to use AWS default endpoint`,
 		Key:          "minio.useVirtualHost",
 		Version:      "2.3.0",
 		DefaultValue: DefaultMinioUseVirtualHost,
-		PanicIfEmpty: true,
+		PanicIfEmpty: false,
 		Doc:          "Whether use virtual host mode for bucket",
 		Export:       true,
 	}
@@ -1115,4 +1343,14 @@ Leave it empty if you want to use AWS default endpoint`,
 		Export:       true,
 	}
 	p.RequestTimeoutMs.Init(base.mgr)
+
+	p.ListObjectsMaxKeys = ParamItem{
+		Key:          "minio.listObjectsMaxKeys",
+		Version:      "2.4.1",
+		DefaultValue: "0",
+		Doc: `The maximum number of objects requested per batch in minio ListObjects rpc, 
+0 means using oss client by default, decrease these configration if ListObjects timeout`,
+		Export: true,
+	}
+	p.ListObjectsMaxKeys.Init(base.mgr)
 }

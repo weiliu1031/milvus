@@ -16,12 +16,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Skip the installation and compilation of third-party code, 
+# if the developer is certain that it has already been done.
+if [[ ${SKIP_3RDPARTY} -eq 1 ]]; then
+  exit 0
+fi
+
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
   DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
   SOURCE="$(readlink "$SOURCE")"
   [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
 done
+
+BUILD_OPENDAL="OFF"
+while getopts "o:" arg; do
+  case $arg in
+  o)
+    BUILD_OPENDAL=$OPTARG
+    ;;
+ esac
+done
+
 ROOT_DIR="$( cd -P "$( dirname "$SOURCE" )/.." && pwd )"
 CPP_SRC_DIR="${ROOT_DIR}/internal/core"
 BUILD_OUTPUT_DIR="${ROOT_DIR}/cmake_build"
@@ -42,16 +58,16 @@ fi
 unameOut="$(uname -s)"
 case "${unameOut}" in
   Darwin*)
-    conan install ${CPP_SRC_DIR} --install-folder conan --build=missing -s compiler=clang -s compiler.version=${llvm_version} -s compiler.libcxx=libc++ -s compiler.cppstd=17 || { echo 'conan install failed'; exit 1; }
+    conan install ${CPP_SRC_DIR} --install-folder conan --build=missing -s compiler=clang -s compiler.version=${llvm_version} -s compiler.libcxx=libc++ -s compiler.cppstd=17 -r default-conan-local -u || { echo 'conan install failed'; exit 1; }
     ;;
   Linux*)
     echo "Running on ${OS_NAME}"
     export CPU_TARGET=avx
     GCC_VERSION=`gcc -dumpversion`
     if [[ `gcc -v 2>&1 | sed -n 's/.*\(--with-default-libstdcxx-abi\)=\(\w*\).*/\2/p'` == "gcc4" ]]; then
-      conan install ${CPP_SRC_DIR} --install-folder conan --build=missing -s compiler.version=${GCC_VERSION} || { echo 'conan install failed'; exit 1; }
+      conan install ${CPP_SRC_DIR} --install-folder conan --build=missing -s compiler.version=${GCC_VERSION} -r default-conan-local -u || { echo 'conan install failed'; exit 1; }
     else
-      conan install ${CPP_SRC_DIR} --install-folder conan --build=missing -s compiler.version=${GCC_VERSION} -s compiler.libcxx=libstdc++11 || { echo 'conan install failed'; exit 1; }
+      conan install ${CPP_SRC_DIR} --install-folder conan --build=missing -s compiler.version=${GCC_VERSION} -s compiler.libcxx=libstdc++11 -r default-conan-local -u || { echo 'conan install failed'; exit 1; }
     fi
     ;;
   *)
@@ -61,22 +77,24 @@ esac
 
 popd
 
-pushd ${ROOT_DIR}/cmake_build/thirdparty
-
-git clone --depth=1 --branch v0.43.0-rc.2 https://github.com/apache/incubator-opendal.git opendal
-cd opendal
-if command -v cargo >/dev/null 2>&1; then
-    echo "cargo exists"
-else
-    bash -c "curl https://sh.rustup.rs -sSf | sh -s -- -y" || { echo 'rustup install failed'; exit 1;}
-    source $HOME/.cargo/env
-fi
-pushd bindings/c
-cargo build --release --verbose || { echo 'opendal_c build failed'; exit 1; }
-popd
 mkdir -p ${ROOT_DIR}/internal/core/output/lib
 mkdir -p ${ROOT_DIR}/internal/core/output/include
-cp target/release/libopendal_c.a ${ROOT_DIR}/internal/core/output/lib/libopendal_c.a
-cp bindings/c/include/opendal.h ${ROOT_DIR}/internal/core/output/include/opendal.h
 
-popd
+pushd ${ROOT_DIR}/cmake_build/thirdparty
+if command -v cargo >/dev/null 2>&1; then
+    echo "cargo exists"
+    unameOut="$(uname -s)"
+    case "${unameOut}" in
+        Darwin*)
+          echo "running on mac os, reinstall rust 1.73"
+          # github will install rust 1.74 by default.
+          # https://github.com/actions/runner-images/blob/main/images/macos/macos-12-Readme.md
+          rustup install 1.73
+          rustup default 1.73;;
+        *)
+          echo "not running on mac os, no need to reinstall rust";;
+    esac
+else
+    bash -c "curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=1.73 -y" || { echo 'rustup install failed'; exit 1;}
+    source $HOME/.cargo/env
+fi

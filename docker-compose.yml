@@ -31,6 +31,7 @@ services:
       MINIO_ADDRESS: ${MINIO_ADDRESS}
       CONAN_USER_HOME: /home/milvus
       AZURE_STORAGE_CONNECTION_STRING: ${AZURITE_CONNECTION_STRING}
+      ENABLE_GCP_NATIVE: ${ENABLE_GCP_NATIVE}
     volumes: &builder-volumes
       - .:/go/src/github.com/milvus-io/milvus:delegated
       - ${DOCKER_VOLUME_DIRECTORY:-.docker}/${IMAGE_ARCH}-${OS_NAME}-ccache:/ccache:delegated
@@ -43,6 +44,7 @@ services:
       - minio
       - pulsar
       - azurite
+      - gcpnative
     # Command
     command: &builder-command >
       /bin/bash -c "
@@ -71,6 +73,7 @@ services:
       MINIO_ADDRESS: ${MINIO_ADDRESS}
       CONAN_USER_HOME: /home/milvus
       AZURE_STORAGE_CONNECTION_STRING: ${AZURITE_CONNECTION_STRING}
+      ENABLE_GCP_NATIVE: ${ENABLE_GCP_NATIVE}
     volumes: &builder-volumes-gpu
       - .:/go/src/github.com/milvus-io/milvus:delegated
       - ${DOCKER_VOLUME_DIRECTORY:-.docker-gpu}/${OS_NAME}-ccache:/ccache:delegated
@@ -83,6 +86,7 @@ services:
       - minio
       - pulsar
       - azurite
+      - gcpnative
     # Command
     command: &builder-command-gpu >
       /bin/bash -c "
@@ -97,14 +101,23 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     healthcheck:
-      test: ['CMD', '/opt/bitnami/scripts/etcd/healthcheck.sh']
+      test: [ 'CMD', '/opt/bitnami/scripts/etcd/healthcheck.sh' ]
       interval: 30s
       timeout: 20s
       retries: 3
 
   pulsar:
     image: apachepulsar/pulsar:2.8.2
-    command: bin/pulsar standalone --no-functions-worker --no-stream-storage
+    command: |
+      /bin/bash -c \
+      "bin/apply-config-from-env.py conf/standalone.conf && \
+      exec bin/pulsar standalone --no-functions-worker --no-stream-storage"
+    environment:
+      # 10MB
+      - PULSAR_PREFIX_maxMessageSize=10485760
+      # this is 104857600 + 10240 (padding)
+      - nettyMaxFrameSizeBytes=104867840
+      - PULSAR_GC=-XX:+UseG1GC
 
   minio:
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
@@ -113,7 +126,7 @@ services:
       MINIO_SECRET_KEY: minioadmin
     command: minio server /minio_data
     healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      test: [ 'CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live' ]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -124,6 +137,13 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:latest
+
+  gcpnative:
+    image: fsouza/fake-gcs-server
+    command: -scheme http -public-host storage.gcs.127.0.0.1.nip.io:4443 -external-url "http://storage.gcs.127.0.0.1.nip.io:4443"
+    hostname: storage.gcs.127.0.0.1.nip.io
+    ports:
+      - "4443:4443"
 
 networks:
   default:

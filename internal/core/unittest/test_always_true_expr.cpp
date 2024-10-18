@@ -16,18 +16,31 @@
 #include <chrono>
 
 #include "common/Types.h"
-#include "query/Expr.h"
-#include "query/generated/ExecExprVisitor.h"
 #include "segcore/SegmentGrowingImpl.h"
 #include "test_utils/DataGen.h"
+#include "test_utils/GenExprProto.h"
+#include "expr/ITypeExpr.h"
+#include "plan/PlanNode.h"
+#include "query/ExecPlanNodeVisitor.h"
 
-TEST(Expr, AlwaysTrue) {
+class ExprAlwaysTrueTest : public ::testing::TestWithParam<milvus::DataType> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    ExprAlwaysTrueParameters,
+    ExprAlwaysTrueTest,
+    ::testing::Values(milvus::DataType::VECTOR_FLOAT,
+                      milvus::DataType::VECTOR_SPARSE_FLOAT));
+
+TEST_P(ExprAlwaysTrueTest, AlwaysTrue) {
     using namespace milvus;
     using namespace milvus::query;
     using namespace milvus::segcore;
+    auto data_type = GetParam();
+    auto metric_type = data_type == DataType::VECTOR_FLOAT
+                           ? knowhere::metric::L2
+                           : knowhere::metric::IP;
     auto schema = std::make_shared<Schema>();
-    auto vec_fid = schema->AddDebugField(
-        "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
+    auto vec_fid = schema->AddDebugField("fakevec", data_type, 16, metric_type);
     auto i64_fid = schema->AddDebugField("age", DataType::INT64);
     schema->set_primary_field_id(i64_fid);
 
@@ -48,10 +61,10 @@ TEST(Expr, AlwaysTrue) {
     }
 
     auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
-    ExecExprVisitor visitor(
-        *seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
-    auto expr = CreateAlwaysTrueExpr();
-    auto final = visitor.call_child(*expr);
+    auto expr = std::make_shared<milvus::expr::AlwaysTrueExpr>();
+    BitsetType final;
+    auto plan = milvus::test::CreateRetrievePlanByExpr(expr);
+    final = ExecuteQueryExpr(plan, seg_promote, N * num_iters, MAX_TIMESTAMP);
     EXPECT_EQ(final.size(), N * num_iters);
 
     for (int i = 0; i < N * num_iters; ++i) {

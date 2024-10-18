@@ -17,8 +17,12 @@
 package accesslog
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,7 +40,7 @@ func getText(size int) []byte {
 	return text
 }
 
-func TestRotateLogger_Basic(t *testing.T) {
+func TestRotateWriter_Basic(t *testing.T) {
 	var Params paramtable.ComponentParam
 	Params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
 	testPath := "/tmp/accesstest"
@@ -47,7 +51,7 @@ func TestRotateLogger_Basic(t *testing.T) {
 	Params.Save(Params.ProxyCfg.AccessLog.RemotePath.Key, "access_log/")
 	defer os.RemoveAll(testPath)
 
-	logger, err := NewRotateLogger(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
+	logger, err := NewRotateWriter(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
 	assert.NoError(t, err)
 	defer logger.handler.Clean()
 	defer logger.Close()
@@ -67,7 +71,7 @@ func TestRotateLogger_Basic(t *testing.T) {
 	assert.Equal(t, 1, len(logfiles))
 }
 
-func TestRotateLogger_TimeRotate(t *testing.T) {
+func TestRotateWriter_TimeRotate(t *testing.T) {
 	var Params paramtable.ComponentParam
 	Params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
 	testPath := "/tmp/accesstest"
@@ -80,7 +84,7 @@ func TestRotateLogger_TimeRotate(t *testing.T) {
 	Params.Save(Params.ProxyCfg.AccessLog.MaxBackups.Key, "0")
 	defer os.RemoveAll(testPath)
 
-	logger, err := NewRotateLogger(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
+	logger, err := NewRotateWriter(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
 	assert.NoError(t, err)
 	defer logger.handler.Clean()
 	defer logger.Close()
@@ -97,7 +101,7 @@ func TestRotateLogger_TimeRotate(t *testing.T) {
 	assert.GreaterOrEqual(t, len(logfiles), 1)
 }
 
-func TestRotateLogger_SizeRotate(t *testing.T) {
+func TestRotateWriter_SizeRotate(t *testing.T) {
 	var Params paramtable.ComponentParam
 	Params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
 	testPath := "/tmp/accesstest"
@@ -109,7 +113,7 @@ func TestRotateLogger_SizeRotate(t *testing.T) {
 	Params.Save(Params.ProxyCfg.AccessLog.MaxSize.Key, "1")
 	defer os.RemoveAll(testPath)
 
-	logger, err := NewRotateLogger(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
+	logger, err := NewRotateWriter(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
 	assert.NoError(t, err)
 	defer logger.handler.Clean()
 	defer logger.Close()
@@ -132,7 +136,7 @@ func TestRotateLogger_SizeRotate(t *testing.T) {
 	assert.Equal(t, 1, len(logfiles))
 }
 
-func TestRotateLogger_LocalRetention(t *testing.T) {
+func TestRotateWriter_LocalRetention(t *testing.T) {
 	var Params paramtable.ComponentParam
 	Params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
 	testPath := "/tmp/accesstest"
@@ -142,7 +146,7 @@ func TestRotateLogger_LocalRetention(t *testing.T) {
 	Params.Save(Params.ProxyCfg.AccessLog.MaxBackups.Key, "1")
 	defer os.RemoveAll(testPath)
 
-	logger, err := NewRotateLogger(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
+	logger, err := NewRotateWriter(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
 	assert.NoError(t, err)
 	defer logger.Close()
 
@@ -154,7 +158,7 @@ func TestRotateLogger_LocalRetention(t *testing.T) {
 	assert.Equal(t, 1, len(logFiles))
 }
 
-func TestRotateLogger_BasicError(t *testing.T) {
+func TestRotateWriter_BasicError(t *testing.T) {
 	var Params paramtable.ComponentParam
 	Params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
 	testPath := ""
@@ -162,7 +166,7 @@ func TestRotateLogger_BasicError(t *testing.T) {
 	Params.Save(Params.ProxyCfg.AccessLog.Filename.Key, "test_access")
 	Params.Save(Params.ProxyCfg.AccessLog.LocalPath.Key, testPath)
 
-	logger, err := NewRotateLogger(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
+	logger, err := NewRotateWriter(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
 	assert.NoError(t, err)
 	defer os.RemoveAll(logger.dir())
 	defer logger.Close()
@@ -180,16 +184,115 @@ func TestRotateLogger_BasicError(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestRotateLogger_InitError(t *testing.T) {
+func TestRotateWriter_InitError(t *testing.T) {
 	var params paramtable.ComponentParam
 	params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
-	testPath := ""
+	testPath := "/tmp/test"
 	params.Save(params.ProxyCfg.AccessLog.Enable.Key, "true")
 	params.Save(params.ProxyCfg.AccessLog.Filename.Key, "test_access")
 	params.Save(params.ProxyCfg.AccessLog.LocalPath.Key, testPath)
 	params.Save(params.ProxyCfg.AccessLog.MinioEnable.Key, "true")
 	params.Save(params.MinioCfg.Address.Key, "")
 	// init err with invalid minio address
-	_, err := NewRotateLogger(&params.ProxyCfg.AccessLog, &params.MinioCfg)
+	_, err := NewRotateWriter(&params.ProxyCfg.AccessLog, &params.MinioCfg)
 	assert.Error(t, err)
+}
+
+func TestRotateWriter_Close(t *testing.T) {
+	var Params paramtable.ComponentParam
+
+	Params.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
+	testPath := "/tmp/accesstest"
+	Params.Save(Params.ProxyCfg.AccessLog.Enable.Key, "true")
+	Params.Save(Params.ProxyCfg.AccessLog.Filename.Key, "test_access")
+	Params.Save(Params.ProxyCfg.AccessLog.LocalPath.Key, testPath)
+	Params.Save(Params.ProxyCfg.AccessLog.CacheSize.Key, "0")
+
+	logger, err := NewRotateWriter(&Params.ProxyCfg.AccessLog, &Params.MinioCfg)
+	assert.NoError(t, err)
+	defer os.RemoveAll(logger.dir())
+
+	_, err = logger.Write([]byte("test"))
+	assert.NoError(t, err)
+
+	logger.Close()
+
+	_, err = logger.Write([]byte("test"))
+	assert.Error(t, err)
+}
+
+func TestCacheWriter_Normal(t *testing.T) {
+	buffer := bytes.NewBuffer(make([]byte, 0))
+	writer := NewCacheWriter(buffer, 512, 0)
+
+	writer.Write([]byte("111\n"))
+	_, err := buffer.ReadByte()
+	assert.Error(t, err, io.EOF)
+
+	writer.Flush()
+	b, err := buffer.ReadBytes('\n')
+	assert.Equal(t, 4, len(b))
+	assert.NoError(t, err)
+
+	writer.Write([]byte(strings.Repeat("1", 512) + "\n"))
+	b, err = buffer.ReadBytes('\n')
+	assert.Equal(t, 513, len(b))
+	assert.NoError(t, err)
+
+	writer.Close()
+	// writer to closed writer
+	_, err = writer.Write([]byte(strings.Repeat("1", 512) + "\n"))
+	assert.Error(t, err)
+}
+
+type TestWriter struct {
+	closed bool
+	buffer *bytes.Buffer
+	mu     sync.Mutex
+}
+
+func (w *TestWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.buffer.Write(p)
+}
+
+func (w *TestWriter) ReadBytes(delim byte) (line []byte, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.buffer.ReadBytes(delim)
+}
+
+func (w *TestWriter) ReadByte() (byte, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.buffer.ReadByte()
+}
+
+func (w *TestWriter) Close() error {
+	w.closed = true
+	return nil
+}
+
+func TestCacheWriter_WithAutoFlush(t *testing.T) {
+	buffer := &TestWriter{buffer: bytes.NewBuffer(make([]byte, 0))}
+	writer := NewCacheWriterWithCloser(buffer, buffer, 512, 1*time.Second)
+	writer.Write([]byte("111\n"))
+	_, err := buffer.ReadByte()
+	assert.Error(t, err, io.EOF)
+
+	assert.Eventually(t, func() bool {
+		b, err := buffer.ReadBytes('\n')
+		if err != nil {
+			return false
+		}
+		assert.Equal(t, 4, len(b))
+		return true
+	}, 3*time.Second, 1*time.Second)
+
+	writer.Close()
+	assert.True(t, buffer.closed)
 }

@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -34,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metric"
 	"github.com/milvus-io/milvus/tests/integration"
 )
@@ -206,8 +207,8 @@ func (s *JSONExprSuite) TestJSON_InsertWithoutDynamicData() {
 	// search
 	expr = `$meta["A"] > 90`
 	checkFunc := func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{common.MetaFieldName}, expr, dim, checkFunc)
@@ -364,9 +365,6 @@ func (s *JSONExprSuite) TestJSON_DynamicSchemaWithJSON() {
 	}
 	s.doSearch(collectionName, []string{integration.JSONField}, expr, dim, checkFunc)
 	log.Info("nested path expression run successfully")
-
-	expr = `jsonField == ""`
-	s.doSearchWithInvalidExpr(collectionName, []string{integration.JSONField}, expr, dim)
 }
 
 func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
@@ -564,8 +562,8 @@ func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
 
 	expr = `exists AAA`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
@@ -613,8 +611,8 @@ func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
 
 	expr = `A like "10"`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
@@ -632,8 +630,8 @@ func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
 
 	expr = `str1 like 'abc"def-%'`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
@@ -641,8 +639,8 @@ func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
 
 	expr = `str2 like 'abc\\"def-%'`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
@@ -658,10 +656,30 @@ func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
 	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
 	log.Info("like expression run successfully")
 
+	expr = `D like "%name-%"`
+	checkFunc = func(result *milvuspb.SearchResults) {
+		s.Equal(1, len(result.Results.FieldsData))
+		s.Equal(fieldName, result.Results.FieldsData[0].GetFieldName())
+		s.Equal(schemapb.DataType_JSON, result.Results.FieldsData[0].GetType())
+		s.Equal(10, len(result.Results.FieldsData[0].GetScalars().GetJsonData().GetData()))
+	}
+	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
+	log.Info("like expression run successfully")
+
+	expr = `D like "na%me"`
+	checkFunc = func(result *milvuspb.SearchResults) {
+		s.Equal(1, len(result.Results.FieldsData))
+		s.Equal(fieldName, result.Results.FieldsData[0].GetFieldName())
+		s.Equal(schemapb.DataType_JSON, result.Results.FieldsData[0].GetType())
+		s.Equal(0, len(result.Results.FieldsData[0].GetScalars().GetJsonData().GetData()))
+	}
+	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
+	log.Info("like expression run successfully")
+
 	expr = `A in []`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{fieldName}, expr, dim, checkFunc)
@@ -699,16 +717,7 @@ func (s *JSONExprSuite) checkSearch(collectionName, fieldName string, dim int) {
 	expr = `A like abc`
 	s.doSearchWithInvalidExpr(collectionName, []string{fieldName}, expr, dim)
 
-	expr = `D like "%name-%"`
-	s.doSearchWithInvalidExpr(collectionName, []string{fieldName}, expr, dim)
-
-	expr = `D like "na%me"`
-	s.doSearchWithInvalidExpr(collectionName, []string{fieldName}, expr, dim)
-
 	expr = `1+5 <= A+1 < 5+10`
-	s.doSearchWithInvalidExpr(collectionName, []string{fieldName}, expr, dim)
-
-	expr = `$meta == ""`
 	s.doSearchWithInvalidExpr(collectionName, []string{fieldName}, expr, dim)
 }
 
@@ -722,7 +731,7 @@ func (s *JSONExprSuite) insertFlushIndexLoad(ctx context.Context, dbName, collec
 		NumRows:        uint32(rowNum),
 	})
 	s.NoError(err)
-	s.Equal(insertResult.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+	s.NoError(merr.Error(insertResult.GetStatus()))
 
 	// flush
 	flushResp, err := s.Cluster.Proxy.Flush(ctx, &milvuspb.FlushRequest{
@@ -769,34 +778,37 @@ func (s *JSONExprSuite) insertFlushIndexLoad(ctx context.Context, dbName, collec
 			},
 		},
 	})
-	if createIndexStatus.GetErrorCode() != commonpb.ErrorCode_Success {
-		log.Warn("createIndexStatus fail reason", zap.String("reason", createIndexStatus.GetReason()))
+	s.NoError(err)
+
+	if err = merr.Error(createIndexStatus); err != nil {
+		log.Warn("createIndexStatus failed", zap.Error(err))
 	}
 	s.NoError(err)
-	s.Equal(commonpb.ErrorCode_Success, createIndexStatus.GetErrorCode())
-	s.WaitForIndexBuilt(ctx, collectionName, integration.FloatVecField)
 
+	s.WaitForIndexBuilt(ctx, collectionName, integration.FloatVecField)
 	// load
 	loadStatus, err := s.Cluster.Proxy.LoadCollection(ctx, &milvuspb.LoadCollectionRequest{
 		DbName:         dbName,
 		CollectionName: collectionName,
 	})
-	s.NoError(err)
-	if loadStatus.GetErrorCode() != commonpb.ErrorCode_Success {
-		log.Warn("loadStatus fail reason", zap.String("reason", loadStatus.GetReason()))
+	s.Require().NoError(err)
+
+	if err = merr.Error(loadStatus); err != nil {
+		log.Warn("loadStatus failed", zap.Error(err))
 	}
-	s.Equal(commonpb.ErrorCode_Success, loadStatus.GetErrorCode())
+	s.Require().NoError(err)
+
 	for {
 		loadProgress, err := s.Cluster.Proxy.GetLoadingProgress(ctx, &milvuspb.GetLoadingProgressRequest{
 			CollectionName: collectionName,
 		})
-		if err != nil {
-			panic("GetLoadingProgress fail")
-		}
+
+		s.Require().NoError(err)
+		s.Require().NoError(merr.Error(loadProgress.GetStatus()))
 		if loadProgress.GetProgress() == 100 {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -1116,8 +1128,8 @@ func (s *JSONExprSuite) TestJsonContains() {
 
 	expr = `json_contains_all(C, [0, 99])`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{"A"}, expr, dim, checkFunc)
@@ -1133,8 +1145,8 @@ func (s *JSONExprSuite) TestJsonContains() {
 
 	expr = `json_contains_any(C, [101, 102])`
 	checkFunc = func(result *milvuspb.SearchResults) {
-		for _, f := range result.Results.GetFieldsData() {
-			s.Nil(f)
+		for _, topk := range result.GetResults().GetTopks() {
+			s.Zero(topk)
 		}
 	}
 	s.doSearch(collectionName, []string{"A"}, expr, dim, checkFunc)

@@ -22,6 +22,7 @@ import (
 
 	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -31,13 +32,15 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/internal/proto/workerpb"
 )
 
 // Limiter defines the interface to perform request rate limiting.
 // If Limit function return true, the request will be rejected.
 // Otherwise, the request will pass. Limit also returns limit of limiter.
 type Limiter interface {
-	Check(collectionID int64, rt internalpb.RateType, n int) error
+	Check(dbID int64, collectionIDToPartIDs map[int64][]int64, rt internalpb.RateType, n int) error
+	Alloc(ctx context.Context, dbID int64, collectionIDToPartIDs map[int64][]int64, rt internalpb.RateType, n int) error
 }
 
 // Component is the interface all services implement
@@ -75,6 +78,7 @@ type DataNodeComponent interface {
 
 	SetAddress(address string)
 	GetAddress() string
+	GetNodeID() int64
 
 	// SetEtcdClient set etcd client for DataNode
 	SetEtcdClient(etcdClient *clientv3.Client)
@@ -102,6 +106,7 @@ type DataNodeComponent interface {
 type DataCoordClient interface {
 	io.Closer
 	datapb.DataCoordClient
+	indexpb.IndexCoordClient
 }
 
 // DataCoord is the interface `datacoord` package implements
@@ -115,6 +120,8 @@ type DataCoord interface {
 //go:generate mockery --name=DataCoordComponent --structname=MockDataCoord --output=../mocks  --filename=mock_datacoord.go --with-expecter
 type DataCoordComponent interface {
 	DataCoord
+
+	RegisterStreamingCoordGRPCService(s *grpc.Server)
 
 	SetAddress(address string)
 	// SetEtcdClient set EtcdClient for DataCoord
@@ -136,13 +143,13 @@ type DataCoordComponent interface {
 // IndexNodeClient is the client interface for indexnode server
 type IndexNodeClient interface {
 	io.Closer
-	indexpb.IndexNodeClient
+	workerpb.IndexNodeClient
 }
 
 // IndexNode is the interface `indexnode` package implements
 type IndexNode interface {
 	Component
-	indexpb.IndexNodeServer
+	workerpb.IndexNodeServer
 }
 
 // IndexNodeComponent is used by grpc server of IndexNode
@@ -219,6 +226,10 @@ type Proxy interface {
 	Component
 	proxypb.ProxyServer
 	milvuspb.MilvusServiceServer
+
+	ImportV2(context.Context, *internalpb.ImportRequest) (*internalpb.ImportResponse, error)
+	GetImportProgress(context.Context, *internalpb.GetImportProgressRequest) (*internalpb.GetImportProgressResponse, error)
+	ListImports(context.Context, *internalpb.ListImportsRequest) (*internalpb.ListImportsResponse, error)
 }
 
 // ProxyComponent defines the interface of proxy component.
@@ -283,6 +294,7 @@ type QueryNodeComponent interface {
 
 	SetAddress(address string)
 	GetAddress() string
+	GetNodeID() int64
 
 	// SetEtcdClient set etcd client for QueryNode
 	SetEtcdClient(etcdClient *clientv3.Client)

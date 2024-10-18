@@ -30,12 +30,22 @@ constexpr const char* PREFIX_VALUE = "prefix_value";
 constexpr const char* MARISA_TRIE_INDEX = "marisa_trie_index";
 constexpr const char* MARISA_STR_IDS = "marisa_trie_str_ids";
 
+// below meta key of store bitmap indexes
+constexpr const char* BITMAP_INDEX_DATA = "bitmap_index_data";
+constexpr const char* BITMAP_INDEX_META = "bitmap_index_meta";
+constexpr const char* BITMAP_INDEX_LENGTH = "bitmap_index_length";
+constexpr const char* BITMAP_INDEX_NUM_ROWS = "bitmap_index_num_rows";
+
 constexpr const char* INDEX_TYPE = "index_type";
 constexpr const char* METRIC_TYPE = "metric_type";
 
 // scalar index type
 constexpr const char* ASCENDING_SORT = "STL_SORT";
 constexpr const char* MARISA_TRIE = "Trie";
+constexpr const char* MARISA_TRIE_UPPER = "TRIE";
+constexpr const char* INVERTED_INDEX_TYPE = "INVERTED";
+constexpr const char* BITMAP_INDEX_TYPE = "BITMAP";
+constexpr const char* HYBRID_INDEX_TYPE = "HYBRID";
 
 // index meta
 constexpr const char* COLLECTION_ID = "collection_id";
@@ -46,10 +56,21 @@ constexpr const char* INDEX_BUILD_ID = "index_build_id";
 constexpr const char* INDEX_ID = "index_id";
 constexpr const char* INDEX_VERSION = "index_version";
 constexpr const char* INDEX_ENGINE_VERSION = "index_engine_version";
+constexpr const char* BITMAP_INDEX_CARDINALITY_LIMIT =
+    "bitmap_cardinality_limit";
+
+// index config key
+constexpr const char* MMAP_FILE_PATH = "mmap_filepath";
+constexpr const char* ENABLE_MMAP = "enable_mmap";
+constexpr const char* INDEX_FILES = "index_files";
+constexpr const char* ENABLE_OFFSET_CACHE = "indexoffsetcache.enabled";
 
 // VecIndex file metas
 constexpr const char* DISK_ANN_PREFIX_PATH = "index_prefix";
 constexpr const char* DISK_ANN_RAW_DATA_PATH = "data_path";
+
+// VecIndex node filtering
+constexpr const char* VEC_OPT_FIELDS_PATH = "opt_fields_path";
 
 // DiskAnn build params
 constexpr const char* DISK_ANN_MAX_DEGREE = "max_degree";

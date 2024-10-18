@@ -27,7 +27,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -36,20 +35,28 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
-	"github.com/milvus-io/milvus/internal/datanode/broker"
-	"github.com/milvus-io/milvus/internal/datanode/syncmgr"
-	"github.com/milvus-io/milvus/internal/datanode/writebuffer"
-	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus/internal/datanode/channel"
+	"github.com/milvus-io/milvus/internal/datanode/compaction"
+	"github.com/milvus-io/milvus/internal/datanode/importv2"
+	"github.com/milvus-io/milvus/internal/datanode/util"
+	"github.com/milvus-io/milvus/internal/flushcommon/broker"
+	"github.com/milvus-io/milvus/internal/flushcommon/pipeline"
+	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
+	util2 "github.com/milvus-io/milvus/internal/flushcommon/util"
+	"github.com/milvus-io/milvus/internal/flushcommon/writebuffer"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/streamingutil"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
+	"github.com/milvus-io/milvus/pkg/util/conc"
+	"github.com/milvus-io/milvus/pkg/util/expr"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
-	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -59,8 +66,6 @@ const (
 	// ConnectEtcdMaxRetryTime is used to limit the max retry time for connection etcd
 	ConnectEtcdMaxRetryTime = 100
 )
-
-var getFlowGraphServiceAttempts = uint(50)
 
 // makes sure DataNode implements types.DataNode
 var _ types.DataNode = (*DataNode)(nil)
@@ -85,16 +90,19 @@ type DataNode struct {
 	cancel           context.CancelFunc
 	Role             string
 	stateCode        atomic.Value // commonpb.StateCode_Initializing
-	flowgraphManager FlowgraphManager
-	eventManagerMap  *typeutil.ConcurrentMap[string, *channelEventManager]
+	flowgraphManager pipeline.FlowgraphManager
+
+	channelManager channel.ChannelManager
 
 	syncMgr            syncmgr.SyncManager
 	writeBufferManager writebuffer.BufferManager
+	importTaskMgr      importv2.TaskManager
+	importScheduler    importv2.Scheduler
 
-	clearSignal        chan string // vchannel name
-	segmentCache       *Cache
-	compactionExecutor *compactionExecutor
-	timeTickSender     *timeTickSender
+	segmentCache             *util.Cache
+	compactionExecutor       compaction.Executor
+	timeTickSender           *util2.TimeTickSender
+	channelCheckpointUpdater *util2.ChannelCheckpointUpdater
 
 	etcdCli   *clientv3.Client
 	address   string
@@ -106,7 +114,6 @@ type DataNode struct {
 	initOnce     sync.Once
 	startOnce    sync.Once
 	stopOnce     sync.Once
-	stopWaiter   sync.WaitGroup
 	sessionMu    sync.Mutex // to fix data race
 	session      *sessionutil.Session
 	watchKv      kv.WatchKV
@@ -119,6 +126,7 @@ type DataNode struct {
 	factory    dependency.Factory
 
 	reportImportRetryTimes uint // unitest set this value to 1 to save time, default is 10
+	pool                   *conc.Pool[any]
 }
 
 // NewDataNode will return a DataNode with abnormal state.
@@ -130,19 +138,15 @@ func NewDataNode(ctx context.Context, factory dependency.Factory) *DataNode {
 		cancel: cancel2,
 		Role:   typeutil.DataNodeRole,
 
-		rootCoord:          nil,
-		dataCoord:          nil,
-		factory:            factory,
-		segmentCache:       newCache(),
-		compactionExecutor: newCompactionExecutor(),
-
-		eventManagerMap:  typeutil.NewConcurrentMap[string, *channelEventManager](),
-		flowgraphManager: newFlowgraphManager(),
-		clearSignal:      make(chan string, 100),
-
+		rootCoord:              nil,
+		dataCoord:              nil,
+		factory:                factory,
+		segmentCache:           util.NewCache(),
+		compactionExecutor:     compaction.NewExecutor(),
 		reportImportRetryTimes: 10,
 	}
 	node.UpdateStateCode(commonpb.StateCode_Abnormal)
+	expr.Register("datanode", node)
 	return node
 }
 
@@ -183,23 +187,15 @@ func (node *DataNode) SetDataCoordClient(ds types.DataCoordClient) error {
 
 // Register register datanode to etcd
 func (node *DataNode) Register() error {
+	log.Debug("node begin to register to etcd", zap.String("serverName", node.session.ServerName), zap.Int64("ServerID", node.session.ServerID))
 	node.session.Register()
 
-	metrics.NumNodes.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), typeutil.DataNodeRole).Inc()
+	metrics.NumNodes.WithLabelValues(fmt.Sprint(node.GetNodeID()), typeutil.DataNodeRole).Inc()
 	log.Info("DataNode Register Finished")
 	// Start liveness check
 	node.session.LivenessCheck(node.ctx, func() {
 		log.Error("Data Node disconnected from etcd, process will exit", zap.Int64("Server Id", node.GetSession().ServerID))
-		if err := node.Stop(); err != nil {
-			log.Fatal("failed to stop server", zap.Error(err))
-		}
-		metrics.NumNodes.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), typeutil.DataNodeRole).Dec()
-		// manually send signal to starter goroutine
-		if node.session.TriggerKill {
-			if p, err := os.FindProcess(os.Getpid()); err == nil {
-				p.Signal(syscall.SIGINT)
-			}
-		}
+		os.Exit(1)
 	})
 
 	return nil
@@ -215,15 +211,11 @@ func (node *DataNode) initSession() error {
 	return nil
 }
 
-// initRateCollector creates and starts rateCollector in QueryNode.
-func (node *DataNode) initRateCollector() error {
-	err := initGlobalRateCollector()
-	if err != nil {
-		return err
+func (node *DataNode) GetNodeID() int64 {
+	if node.session != nil {
+		return node.session.ServerID
 	}
-	rateCol.Register(metricsinfo.InsertConsumeThroughput)
-	rateCol.Register(metricsinfo.DeleteConsumeThroughput)
-	return nil
+	return paramtable.GetNodeID()
 }
 
 func (node *DataNode) Init() error {
@@ -238,24 +230,17 @@ func (node *DataNode) Init() error {
 			return
 		}
 
-		node.broker = broker.NewCoordBroker(node.rootCoord, node.dataCoord)
+		serverID := node.GetNodeID()
+		log := log.Ctx(node.ctx).With(zap.String("role", typeutil.DataNodeRole), zap.Int64("nodeID", serverID))
 
-		err := node.initRateCollector()
+		node.broker = broker.NewCoordBroker(node.dataCoord, serverID)
+
+		node.dispClient = msgdispatcher.NewClient(node.factory, typeutil.DataNodeRole, serverID)
+		log.Info("DataNode server init dispatcher client done")
+
+		alloc, err := allocator.New(context.Background(), node.rootCoord, serverID)
 		if err != nil {
-			log.Error("DataNode server init rateCollector failed", zap.Int64("node ID", paramtable.GetNodeID()), zap.Error(err))
-			initError = err
-			return
-		}
-		log.Info("DataNode server init rateCollector done", zap.Int64("node ID", paramtable.GetNodeID()))
-
-		node.dispClient = msgdispatcher.NewClient(node.factory, typeutil.DataNodeRole, paramtable.GetNodeID())
-		log.Info("DataNode server init dispatcher client done", zap.Int64("node ID", paramtable.GetNodeID()))
-
-		alloc, err := allocator.New(context.Background(), node.rootCoord, paramtable.GetNodeID())
-		if err != nil {
-			log.Error("failed to create id allocator",
-				zap.Error(err),
-				zap.String("role", typeutil.DataNodeRole), zap.Int64("DataNode ID", paramtable.GetNodeID()))
+			log.Error("failed to create id allocator", zap.Error(err))
 			initError = err
 			return
 		}
@@ -272,60 +257,32 @@ func (node *DataNode) Init() error {
 		}
 
 		node.chunkManager = chunkManager
-		syncMgr, err := syncmgr.NewSyncManager(paramtable.Get().DataNodeCfg.MaxParallelSyncTaskNum.GetAsInt(),
-			node.chunkManager, node.allocator)
-		if err != nil {
-			initError = err
-			log.Error("failed to create sync manager", zap.Error(err))
-			return
-		}
+		syncMgr := syncmgr.NewSyncManager(node.chunkManager)
 		node.syncMgr = syncMgr
 
 		node.writeBufferManager = writebuffer.NewManager(syncMgr)
 
-		log.Info("init datanode done", zap.Int64("nodeID", paramtable.GetNodeID()), zap.String("Address", node.address))
+		node.importTaskMgr = importv2.NewTaskManager()
+		node.importScheduler = importv2.NewScheduler(node.importTaskMgr)
+		node.channelCheckpointUpdater = util2.NewChannelCheckpointUpdater(node.broker)
+		node.flowgraphManager = pipeline.NewFlowgraphManager()
+
+		log.Info("init datanode done", zap.String("Address", node.address))
 	})
 	return initError
 }
 
-// handleChannelEvt handles event from kv watch event
-func (node *DataNode) handleChannelEvt(evt *clientv3.Event) {
-	var e *event
-	switch evt.Type {
-	case clientv3.EventTypePut: // datacoord shall put channels needs to be watched here
-		e = &event{
-			eventType: putEventType,
-			version:   evt.Kv.Version,
-		}
-
-	case clientv3.EventTypeDelete:
-		e = &event{
-			eventType: deleteEventType,
-			version:   evt.Kv.Version,
-		}
-	}
-	node.handleWatchInfo(e, string(evt.Kv.Key), evt.Kv.Value)
-}
-
 // tryToReleaseFlowgraph tries to release a flowgraph
-func (node *DataNode) tryToReleaseFlowgraph(vChanName string) {
-	log.Info("try to release flowgraph", zap.String("vChanName", vChanName))
-	node.flowgraphManager.RemoveFlowgraph(vChanName)
-}
-
-// BackGroundGC runs in background to release datanode resources
-// GOOSE TODO: remove background GC, using ToRelease for drop-collection after #15846
-func (node *DataNode) BackGroundGC(vChannelCh <-chan string) {
-	defer node.stopWaiter.Done()
-	log.Info("DataNode Background GC Start")
-	for {
-		select {
-		case vchanName := <-vChannelCh:
-			node.tryToReleaseFlowgraph(vchanName)
-		case <-node.ctx.Done():
-			log.Warn("DataNode context done, exiting background GC")
-			return
-		}
+func (node *DataNode) tryToReleaseFlowgraph(channel string) {
+	log.Info("try to release flowgraph", zap.String("channel", channel))
+	if node.compactionExecutor != nil {
+		node.compactionExecutor.DiscardPlan(channel)
+	}
+	if node.flowgraphManager != nil {
+		node.flowgraphManager.RemoveFlowgraph(channel)
+	}
+	if node.writeBufferManager != nil {
+		node.writeBufferManager.RemoveChannel(channel)
 	}
 }
 
@@ -340,21 +297,6 @@ func (node *DataNode) Start() error {
 		}
 		log.Info("start id allocator done", zap.String("role", typeutil.DataNodeRole))
 
-		/*
-			rep, err := node.rootCoord.AllocTimestamp(node.ctx, &rootcoordpb.AllocTimestampRequest{
-				Base: commonpbutil.NewMsgBase(
-					commonpbutil.WithMsgType(commonpb.MsgType_RequestTSO),
-					commonpbutil.WithMsgID(0),
-					commonpbutil.WithSourceID(paramtable.GetNodeID()),
-				),
-				Count: 1,
-			})
-			if err != nil || rep.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-				log.Warn("fail to alloc timestamp", zap.Any("rep", rep), zap.Error(err))
-				startErr = errors.New("DataNode fail to alloc timestamp")
-				return
-			}*/
-
 		connectEtcdFn := func() error {
 			etcdKV := etcdkv.NewEtcdKV(node.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue(),
 				etcdkv.WithRequestTimeout(paramtable.Get().ServiceParam.EtcdCfg.RequestTimeout.GetAsDuration(time.Millisecond)))
@@ -367,20 +309,22 @@ func (node *DataNode) Start() error {
 			return
 		}
 
-		node.stopWaiter.Add(1)
-		go node.BackGroundGC(node.clearSignal)
+		if !streamingutil.IsStreamingServiceEnabled() {
+			node.writeBufferManager.Start()
 
-		go node.compactionExecutor.start(node.ctx)
-
-		if Params.DataNodeCfg.DataNodeTimeTickByRPC.GetAsBool() {
-			node.timeTickSender = newTimeTickSender(node.broker, node.session.ServerID,
+			node.timeTickSender = util2.NewTimeTickSender(node.broker, node.session.ServerID,
 				retry.Attempts(20), retry.Sleep(time.Millisecond*100))
-			node.timeTickSender.start()
+			node.timeTickSender.Start()
+
+			node.channelManager = channel.NewChannelManager(getPipelineParams(node), node.flowgraphManager)
+			node.channelManager.Start()
+
+			go node.channelCheckpointUpdater.Start()
 		}
 
-		node.stopWaiter.Add(1)
-		// Start node watch node
-		go node.StartWatchChannels(node.ctx)
+		go node.compactionExecutor.Start(node.ctx)
+
+		go node.importScheduler.Start()
 
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
 	})
@@ -414,13 +358,18 @@ func (node *DataNode) Stop() error {
 	node.stopOnce.Do(func() {
 		// https://github.com/milvus-io/milvus/issues/12282
 		node.UpdateStateCode(commonpb.StateCode_Abnormal)
-		// Delay the cancellation of ctx to ensure that the session is automatically recycled after closed the flow graph
-		node.cancel()
+		if node.channelManager != nil {
+			node.channelManager.Close()
+		}
 
-		node.eventManagerMap.Range(func(_ string, m *channelEventManager) bool {
-			m.Close()
-			return true
-		})
+		if node.flowgraphManager != nil {
+			node.flowgraphManager.ClearFlowgraphs()
+			node.flowgraphManager.Close()
+		}
+
+		if node.writeBufferManager != nil {
+			node.writeBufferManager.Stop()
+		}
 
 		if node.allocator != nil {
 			log.Info("close id allocator", zap.String("role", typeutil.DataNodeRole))
@@ -439,21 +388,47 @@ func (node *DataNode) Stop() error {
 			node.timeTickSender.Stop()
 		}
 
-		node.stopWaiter.Wait()
+		if node.channelCheckpointUpdater != nil {
+			node.channelCheckpointUpdater.Close()
+		}
+
+		if node.importScheduler != nil {
+			node.importScheduler.Close()
+		}
+
+		// Delay the cancellation of ctx to ensure that the session is automatically recycled after closed the flow graph
+		node.cancel()
 	})
 	return nil
 }
 
-// to fix data race
+// SetSession to fix data race
 func (node *DataNode) SetSession(session *sessionutil.Session) {
 	node.sessionMu.Lock()
 	defer node.sessionMu.Unlock()
 	node.session = session
 }
 
-// to fix data race
+// GetSession to fix data race
 func (node *DataNode) GetSession() *sessionutil.Session {
 	node.sessionMu.Lock()
 	defer node.sessionMu.Unlock()
 	return node.session
+}
+
+func getPipelineParams(node *DataNode) *util2.PipelineParams {
+	return &util2.PipelineParams{
+		Ctx:                node.ctx,
+		Broker:             node.broker,
+		SyncMgr:            node.syncMgr,
+		TimeTickSender:     node.timeTickSender,
+		CompactionExecutor: node.compactionExecutor,
+		MsgStreamFactory:   node.factory,
+		DispClient:         node.dispClient,
+		ChunkManager:       node.chunkManager,
+		Session:            node.session,
+		WriteBufferManager: node.writeBufferManager,
+		CheckpointUpdater:  node.channelCheckpointUpdater,
+		Allocator:          node.allocator,
+	}
 }

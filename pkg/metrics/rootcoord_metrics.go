@@ -93,13 +93,13 @@ var (
 		})
 
 	// RootCoordNumOfCollections counts the number of collections.
-	RootCoordNumOfCollections = prometheus.NewGauge(
+	RootCoordNumOfCollections = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: milvusNamespace,
 			Subsystem: typeutil.RootCoordRole,
 			Name:      "collection_num",
 			Help:      "number of collections",
-		})
+		}, []string{databaseLabelName})
 
 	// RootCoordNumOfPartitions counts the number of partitions per collection.
 	RootCoordNumOfPartitions = prometheus.NewGaugeVec(
@@ -167,6 +167,16 @@ var (
 			Help:      "The quota states of cluster",
 		}, []string{
 			"quota_states",
+			"name",
+		})
+
+	// RootCoordForceDenyWritingCounter records the number of times that milvus turns into force-deny-writing states.
+	RootCoordForceDenyWritingCounter = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.RootCoordRole,
+			Name:      "force_deny_writing_counter",
+			Help:      "The number of times milvus turns into force-deny-writing states",
 		})
 
 	// RootCoordRateLimitRatio reflects the ratio of rate limit.
@@ -185,6 +195,45 @@ var (
 			Name:      "ddl_req_latency_in_queue",
 			Help:      "latency of each DDL operations in queue",
 		}, []string{functionLabelName})
+
+	RootCoordNumEntities = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.RootCoordRole,
+			Name:      "entity_num",
+			Help:      "number of entities, clustered by collection and their status(loaded/total)",
+		}, []string{
+			collectionName,
+			statusLabelName,
+		})
+
+	RootCoordIndexedNumEntities = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.RootCoordRole,
+			Name:      "indexed_entity_num",
+			Help:      "indexed number of entities, clustered by collection, index name and whether it's a vector index",
+		}, []string{
+			collectionName,
+			indexName,
+			isVectorIndex,
+		})
+
+	QueryNodeMemoryHighWaterLevel = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.RootCoordRole,
+			Name:      "qn_mem_high_water_level",
+			Help:      "querynode memory high water level",
+		})
+
+	DiskQuota = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.RootCoordRole,
+			Name:      "disk_quota",
+			Help:      "disk quota",
+		}, []string{"node_id", "scope"})
 )
 
 // RegisterRootCoord registers RootCoord metrics
@@ -217,6 +266,21 @@ func RegisterRootCoord(registry *prometheus.Registry) {
 	registry.MustRegister(RootCoordNumOfRoles)
 	registry.MustRegister(RootCoordTtDelay)
 	registry.MustRegister(RootCoordQuotaStates)
+	registry.MustRegister(RootCoordForceDenyWritingCounter)
 	registry.MustRegister(RootCoordRateLimitRatio)
 	registry.MustRegister(RootCoordDDLReqLatencyInQueue)
+
+	registry.MustRegister(RootCoordNumEntities)
+	registry.MustRegister(RootCoordIndexedNumEntities)
+
+	registry.MustRegister(QueryNodeMemoryHighWaterLevel)
+	registry.MustRegister(DiskQuota)
+
+	RegisterStreamingServiceClient(registry)
+}
+
+func CleanupRootCoordDBMetrics(dbName string) {
+	RootCoordNumOfCollections.Delete(prometheus.Labels{
+		databaseLabelName: dbName,
+	})
 }

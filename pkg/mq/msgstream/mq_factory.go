@@ -30,10 +30,12 @@ import (
 
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
+	"github.com/milvus-io/milvus/pkg/mq/common"
+	"github.com/milvus-io/milvus/pkg/mq/mqimpl/rocksmq/server"
 	kafkawrapper "github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/kafka"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/nmq"
 	pulsarmqwrapper "github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/pulsar"
+	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/rmq"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 )
@@ -100,7 +102,7 @@ func (f *PmsFactory) NewMsgStream(ctx context.Context) (MsgStream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewMqMsgStream(ctx, f.ReceiveBufSize, f.MQBufSize, pulsarClient, f.dispatcherFactory.NewUnmarshalDispatcher())
+	return NewMqMsgStream(context.Background(), f.ReceiveBufSize, f.MQBufSize, pulsarClient, f.dispatcherFactory.NewUnmarshalDispatcher())
 }
 
 // NewTtMsgStream is used to generate a new TtMsgstream object
@@ -127,7 +129,8 @@ func (f *PmsFactory) NewTtMsgStream(ctx context.Context) (MsgStream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewMqTtMsgStream(ctx, f.ReceiveBufSize, f.MQBufSize, pulsarClient, f.dispatcherFactory.NewUnmarshalDispatcher())
+
+	return NewMqTtMsgStream(context.Background(), f.ReceiveBufSize, f.MQBufSize, pulsarClient, f.dispatcherFactory.NewUnmarshalDispatcher())
 }
 
 func (f *PmsFactory) getAuthentication() (pulsar.Authentication, error) {
@@ -168,7 +171,7 @@ func (f *PmsFactory) NewMsgStreamDisposer(ctx context.Context) func([]string, st
 					}
 				}
 				log.Warn("failed to clean up subscriptions", zap.String("pulsar web", f.PulsarWebAddress),
-					zap.String("topic", channel), zap.Any("subname", subname), zap.Error(err))
+					zap.String("topic", channel), zap.String("subname", subname), zap.Error(err))
 			}
 		}
 		return nil
@@ -187,7 +190,7 @@ func (f *KmsFactory) NewMsgStream(ctx context.Context) (MsgStream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewMqMsgStream(ctx, f.ReceiveBufSize, f.MQBufSize, kafkaClient, f.dispatcherFactory.NewUnmarshalDispatcher())
+	return NewMqMsgStream(context.Background(), f.ReceiveBufSize, f.MQBufSize, kafkaClient, f.dispatcherFactory.NewUnmarshalDispatcher())
 }
 
 func (f *KmsFactory) NewTtMsgStream(ctx context.Context) (MsgStream, error) {
@@ -195,7 +198,7 @@ func (f *KmsFactory) NewTtMsgStream(ctx context.Context) (MsgStream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewMqTtMsgStream(ctx, f.ReceiveBufSize, f.MQBufSize, kafkaClient, f.dispatcherFactory.NewUnmarshalDispatcher())
+	return NewMqTtMsgStream(context.Background(), f.ReceiveBufSize, f.MQBufSize, kafkaClient, f.dispatcherFactory.NewUnmarshalDispatcher())
 }
 
 func (f *KmsFactory) NewMsgStreamDisposer(ctx context.Context) func([]string, string) error {
@@ -204,7 +207,7 @@ func (f *KmsFactory) NewMsgStreamDisposer(ctx context.Context) func([]string, st
 		if err != nil {
 			return err
 		}
-		msgstream.AsConsumer(ctx, channels, subname, mqwrapper.SubscriptionPositionUnknown)
+		msgstream.AsConsumer(ctx, channels, subname, common.SubscriptionPositionUnknown)
 		msgstream.Close()
 		return nil
 	}
@@ -230,5 +233,20 @@ func NewNatsmqFactory() Factory {
 		DispatcherFactory: ProtoUDFactory{},
 		ReceiveBufSize:    paramtable.MQCfg.ReceiveBufSize.GetAsInt64(),
 		MQBufSize:         paramtable.MQCfg.MQBufSize.GetAsInt64(),
+	}
+}
+
+// NewRocksmqFactory creates a new message stream factory based on rocksmq.
+func NewRocksmqFactory(path string, cfg *paramtable.ServiceParam) Factory {
+	if err := server.InitRocksMQ(path); err != nil {
+		log.Fatal("fail to init rocksmq", zap.Error(err))
+	}
+	log.Info("init rocksmq msgstream success", zap.String("path", path))
+
+	return &CommonFactory{
+		Newer:             rmq.NewClientWithDefaultOptions,
+		DispatcherFactory: ProtoUDFactory{},
+		ReceiveBufSize:    cfg.MQCfg.ReceiveBufSize.GetAsInt64(),
+		MQBufSize:         cfg.MQCfg.MQBufSize.GetAsInt64(),
 	}
 }

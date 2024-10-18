@@ -17,39 +17,17 @@
 package accesslog
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/milvus-io/milvus/internal/proxy/accesslog/info"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 const (
-	unknownString = "Unknown"
-	fomaterkey    = "format"
-	methodKey     = "methods"
+	fomaterkey = "format"
+	methodKey  = "methods"
 )
-
-type getMetricFunc func(i *GrpcAccessInfo) string
-
-// supported metrics
-var metricFuncMap = map[string]getMetricFunc{
-	"$method_name":     getMethodName,
-	"$method_status":   getMethodStatus,
-	"$trace_id":        getTraceID,
-	"$user_addr":       getAddr,
-	"$user_name":       getUserName,
-	"$response_size":   getResponseSize,
-	"$error_code":      getErrorCode,
-	"$error_msg":       getErrorMsg,
-	"$database_name":   getDbName,
-	"$collection_name": getCollectionName,
-	"$partition_name":  getPartitionName,
-	"$time_cost":       getTimeCost,
-	"$time_now":        getTimeNow,
-	"$time_start":      getTimeStart,
-	"$time_end":        getTimeEnd,
-	"$method_expr":     getExpr,
-	"$sdk_version":     getSdkVersion,
-}
 
 var BaseFormatterKey = "base"
 
@@ -91,23 +69,23 @@ func (m *FormatterManger) GetByMethod(method string) (*Formatter, bool) {
 }
 
 type Formatter struct {
-	fmt     string
-	fields  []string
-	prefixs []string
+	base   string
+	fmt    string
+	fields []string
 }
 
 func NewFormatter(base string) *Formatter {
 	formatter := &Formatter{
-		fmt: base,
+		base: base,
 	}
 	formatter.build()
 	return formatter
 }
 
-func (f *Formatter) buildMetric(metric string) ([]string, []string) {
+func (f *Formatter) buildMetric(metric string, prefixs []string) ([]string, []string) {
 	newFields := []string{}
 	newPrefixs := []string{}
-	for id, prefix := range f.prefixs {
+	for id, prefix := range prefixs {
 		prefixs := strings.Split(prefix, metric)
 		newPrefixs = append(newPrefixs, prefixs...)
 
@@ -123,27 +101,27 @@ func (f *Formatter) buildMetric(metric string) ([]string, []string) {
 }
 
 func (f *Formatter) build() {
-	f.prefixs = []string{f.fmt}
+	prefixs := []string{f.base}
 	f.fields = []string{}
-	for mertric := range metricFuncMap {
-		if strings.Contains(f.fmt, mertric) {
-			f.fields, f.prefixs = f.buildMetric(mertric)
+	for metric := range info.MetricFuncMap {
+		if strings.Contains(f.base, metric) {
+			f.fields, prefixs = f.buildMetric(metric, prefixs)
 		}
 	}
+
+	f.fmt = ""
+	for id, prefix := range prefixs {
+		f.fmt += prefix
+		if id < len(f.fields) {
+			f.fmt += "%s"
+		}
+	}
+	f.fmt += "\n"
 }
 
-func (f *Formatter) Format(info AccessInfo) string {
-	fieldValues := info.Get(f.fields...)
-
-	result := ""
-	for id, prefix := range f.prefixs {
-		result += prefix
-		if id < len(fieldValues) {
-			result += fieldValues[id]
-		}
-	}
-	result += "\n"
-	return result
+func (f *Formatter) Format(i info.AccessInfo) string {
+	fieldValues := info.Get(i, f.fields...)
+	return fmt.Sprintf(f.fmt, fieldValues...)
 }
 
 func parseConfigKey(k string) (string, string, error) {

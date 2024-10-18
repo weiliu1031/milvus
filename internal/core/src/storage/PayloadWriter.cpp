@@ -14,23 +14,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "storage/PayloadWriter.h"
 #include "common/EasyAssert.h"
 #include "common/FieldMeta.h"
+#include "common/Types.h"
+#include "storage/PayloadWriter.h"
 #include "storage/Util.h"
 
 namespace milvus::storage {
 
 // create payload writer for numeric data type
-PayloadWriter::PayloadWriter(const DataType column_type)
-    : column_type_(column_type) {
+PayloadWriter::PayloadWriter(const DataType column_type, bool nullable)
+    : column_type_(column_type), nullable_(nullable) {
     builder_ = CreateArrowBuilder(column_type);
-    schema_ = CreateArrowSchema(column_type);
+    schema_ = CreateArrowSchema(column_type, nullable);
 }
 
 // create payload writer for vector data type
-PayloadWriter::PayloadWriter(const DataType column_type, int dim)
-    : column_type_(column_type) {
+PayloadWriter::PayloadWriter(const DataType column_type, int dim, bool nullable)
+    : column_type_(column_type), nullable_(nullable) {
+    AssertInfo(column_type != DataType::VECTOR_SPARSE_FLOAT,
+               "PayloadWriter for Sparse Float Vector should be created "
+               "using the constructor without dimension");
+    AssertInfo(nullable == false, "only scalcar type support null now");
     init_dimension(dim);
 }
 
@@ -44,13 +49,13 @@ PayloadWriter::init_dimension(int dim) {
 
     dimension_ = dim;
     builder_ = CreateArrowBuilder(column_type_, dim);
-    schema_ = CreateArrowSchema(column_type_, dim);
+    schema_ = CreateArrowSchema(column_type_, dim, nullable_);
 }
 
 void
 PayloadWriter::add_one_string_payload(const char* str, int str_size) {
     AssertInfo(output_ == nullptr, "payload writer has been finished");
-    AssertInfo(milvus::datatype_is_string(column_type_), "mismatch data type");
+    AssertInfo(milvus::IsStringDataType(column_type_), "mismatch data type");
     AddOneStringToArrowBuilder(builder_, str, str_size);
     rows_.fetch_add(1);
 }
@@ -58,7 +63,9 @@ PayloadWriter::add_one_string_payload(const char* str, int str_size) {
 void
 PayloadWriter::add_one_binary_payload(const uint8_t* data, int length) {
     AssertInfo(output_ == nullptr, "payload writer has been finished");
-    AssertInfo(milvus::datatype_is_binary(column_type_), "mismatch data type");
+    AssertInfo(milvus::IsBinaryDataType(column_type_) ||
+                   milvus::IsSparseFloatVectorDataType(column_type_),
+               "mismatch data type");
     AddOneBinaryToArrowBuilder(builder_, data, length);
     rows_.fetch_add(1);
 }
@@ -68,7 +75,7 @@ PayloadWriter::add_payload(const Payload& raw_data) {
     AssertInfo(output_ == nullptr, "payload writer has been finished");
     AssertInfo(column_type_ == raw_data.data_type, "mismatch data type");
     AssertInfo(builder_ != nullptr, "empty arrow builder");
-    if (milvus::datatype_is_vector(column_type_)) {
+    if (milvus::IsVectorDataType(column_type_)) {
         AssertInfo(dimension_.has_value(), "dimension has not been inited");
         AssertInfo(dimension_ == raw_data.dimension, "inconsistent dimension");
     }

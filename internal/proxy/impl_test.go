@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,23 +29,29 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	mqcommon "github.com/milvus-io/milvus/pkg/mq/common"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/ratelimitutil"
 	"github.com/milvus-io/milvus/pkg/util/resource"
 )
 
@@ -58,6 +65,7 @@ func TestProxy_InvalidateCollectionMetaCache_remove_stream(t *testing.T) {
 	chMgr.EXPECT().removeDMLStream(mock.Anything).Return()
 
 	node := &Proxy{chMgr: chMgr}
+	_ = node.initRateCollector()
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
 	ctx := context.Background()
@@ -73,7 +81,7 @@ func TestProxy_InvalidateCollectionMetaCache_remove_stream(t *testing.T) {
 func TestProxy_CheckHealth(t *testing.T) {
 	t.Run("not healthy", func(t *testing.T) {
 		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
-		node.multiRateLimiter = NewMultiRateLimiter()
+		node.simpleLimiter = NewSimpleLimiter(0, 0)
 		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		ctx := context.Background()
 		resp, err := node.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
@@ -91,7 +99,7 @@ func TestProxy_CheckHealth(t *testing.T) {
 			dataCoord:  NewDataCoordMock(),
 			session:    &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}},
 		}
-		node.multiRateLimiter = NewMultiRateLimiter()
+		node.simpleLimiter = NewSimpleLimiter(0, 0)
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 		resp, err := node.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
@@ -124,7 +132,7 @@ func TestProxy_CheckHealth(t *testing.T) {
 			queryCoord: qc,
 			dataCoord:  dataCoordMock,
 		}
-		node.multiRateLimiter = NewMultiRateLimiter()
+		node.simpleLimiter = NewSimpleLimiter(0, 0)
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 		resp, err := node.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
@@ -141,7 +149,7 @@ func TestProxy_CheckHealth(t *testing.T) {
 			dataCoord:  NewDataCoordMock(),
 			queryCoord: qc,
 		}
-		node.multiRateLimiter = NewMultiRateLimiter()
+		node.simpleLimiter = NewSimpleLimiter(0, 0)
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		resp, err := node.CheckHealth(context.Background(), &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
@@ -151,18 +159,30 @@ func TestProxy_CheckHealth(t *testing.T) {
 
 		states := []milvuspb.QuotaState{milvuspb.QuotaState_DenyToWrite, milvuspb.QuotaState_DenyToRead}
 		codes := []commonpb.ErrorCode{commonpb.ErrorCode_MemoryQuotaExhausted, commonpb.ErrorCode_ForceDeny}
-		node.multiRateLimiter.SetRates([]*proxypb.CollectionRate{
-			{
-				Collection: 1,
-				States:     states,
-				Codes:      codes,
+		err = node.simpleLimiter.SetRates(&proxypb.LimiterNode{
+			Limiter: &proxypb.Limiter{},
+			// db level
+			Children: map[int64]*proxypb.LimiterNode{
+				1: {
+					Limiter: &proxypb.Limiter{},
+					// collection level
+					Children: map[int64]*proxypb.LimiterNode{
+						100: {
+							Limiter: &proxypb.Limiter{
+								States: states,
+								Codes:  codes,
+							},
+							Children: make(map[int64]*proxypb.LimiterNode),
+						},
+					},
+				},
 			},
 		})
+		assert.NoError(t, err)
+
 		resp, err = node.CheckHealth(context.Background(), &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, true, resp.IsHealthy)
-		assert.Equal(t, 2, len(resp.GetQuotaStates()))
-		assert.Equal(t, 2, len(resp.GetReasons()))
 	})
 }
 
@@ -224,11 +244,13 @@ func TestProxy_ResourceGroup(t *testing.T) {
 
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
-	node.multiRateLimiter = NewMultiRateLimiter()
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
 	qc := mocks.NewMockQueryCoordClient(t)
 	node.SetQueryCoordClient(qc)
+
+	qc.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{}, nil).Maybe()
 
 	tsoAllocatorIns := newMockTsoAllocator()
 	node.sched, err = newTaskScheduler(node.ctx, tsoAllocatorIns, node.factory)
@@ -316,7 +338,7 @@ func TestProxy_InvalidResourceGroupName(t *testing.T) {
 
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
-	node.multiRateLimiter = NewMultiRateLimiter()
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
 	qc := mocks.NewMockQueryCoordClient(t)
@@ -917,7 +939,7 @@ func TestProxyCreateDatabase(t *testing.T) {
 	node.tsoAllocator = &timestampAllocator{
 		tso: newMockTimestampAllocatorInterface(),
 	}
-	node.multiRateLimiter = NewMultiRateLimiter()
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
 	node.sched.ddQueue.setMaxTaskNum(10)
@@ -972,11 +994,12 @@ func TestProxyDropDatabase(t *testing.T) {
 	ctx := context.Background()
 
 	node, err := NewProxy(ctx, factory)
+	node.initRateCollector()
 	assert.NoError(t, err)
 	node.tsoAllocator = &timestampAllocator{
 		tso: newMockTimestampAllocatorInterface(),
 	}
-	node.multiRateLimiter = NewMultiRateLimiter()
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
 	node.sched.ddQueue.setMaxTaskNum(10)
@@ -1035,7 +1058,7 @@ func TestProxyListDatabase(t *testing.T) {
 	node.tsoAllocator = &timestampAllocator{
 		tso: newMockTimestampAllocatorInterface(),
 	}
-	node.multiRateLimiter = NewMultiRateLimiter()
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
 	node.sched.ddQueue.setMaxTaskNum(10)
@@ -1066,6 +1089,111 @@ func TestProxyListDatabase(t *testing.T) {
 		ctx := context.Background()
 
 		resp, err := node.ListDatabases(ctx, &milvuspb.ListDatabasesRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+	})
+}
+
+func TestProxyAlterDatabase(t *testing.T) {
+	paramtable.Init()
+
+	t.Run("not healthy", func(t *testing.T) {
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+		ctx := context.Background()
+		resp, err := node.AlterDatabase(ctx, &milvuspb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrServiceNotReady)
+	})
+
+	factory := dependency.NewDefaultFactory(true)
+	ctx := context.Background()
+
+	node, err := NewProxy(ctx, factory)
+	assert.NoError(t, err)
+	node.tsoAllocator = &timestampAllocator{
+		tso: newMockTimestampAllocatorInterface(),
+	}
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
+	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
+	node.sched.ddQueue.setMaxTaskNum(10)
+	assert.NoError(t, err)
+	err = node.sched.Start()
+	assert.NoError(t, err)
+	defer node.sched.Close()
+
+	t.Run("alter database fail", func(t *testing.T) {
+		rc := mocks.NewMockRootCoordClient(t)
+		rc.On("AlterDatabase", mock.Anything, mock.Anything).Return(nil, errors.New("fail"))
+		node.rootCoord = rc
+		ctx := context.Background()
+		resp, err := node.AlterDatabase(ctx, &milvuspb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
+	})
+
+	t.Run("alter database ok", func(t *testing.T) {
+		rc := mocks.NewMockRootCoordClient(t)
+		rc.On("AlterDatabase", mock.Anything, mock.Anything).
+			Return(merr.Success(), nil)
+		node.rootCoord = rc
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		ctx := context.Background()
+
+		resp, err := node.AlterDatabase(ctx, &milvuspb.AlterDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
+	})
+}
+
+func TestProxyDescribeDatabase(t *testing.T) {
+	paramtable.Init()
+
+	t.Run("not healthy", func(t *testing.T) {
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+		ctx := context.Background()
+		resp, err := node.DescribeDatabase(ctx, &milvuspb.DescribeDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
+	})
+
+	factory := dependency.NewDefaultFactory(true)
+	ctx := context.Background()
+
+	node, err := NewProxy(ctx, factory)
+	assert.NoError(t, err)
+	node.tsoAllocator = &timestampAllocator{
+		tso: newMockTimestampAllocatorInterface(),
+	}
+	node.simpleLimiter = NewSimpleLimiter(0, 0)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
+	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
+	node.sched.ddQueue.setMaxTaskNum(10)
+	assert.NoError(t, err)
+	err = node.sched.Start()
+	assert.NoError(t, err)
+	defer node.sched.Close()
+
+	t.Run("describe database fail", func(t *testing.T) {
+		rc := mocks.NewMockRootCoordClient(t)
+		rc.On("DescribeDatabase", mock.Anything, mock.Anything).Return(nil, errors.New("fail"))
+		node.rootCoord = rc
+		ctx := context.Background()
+		resp, err := node.DescribeDatabase(ctx, &milvuspb.DescribeDatabaseRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
+	})
+
+	t.Run("describe database ok", func(t *testing.T) {
+		rc := mocks.NewMockRootCoordClient(t)
+		rc.On("DescribeDatabase", mock.Anything, mock.Anything).Return(&rootcoordpb.DescribeDatabaseResponse{Status: merr.Success()}, nil)
+		node.rootCoord = rc
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		ctx := context.Background()
+
+		resp, err := node.DescribeDatabase(ctx, &milvuspb.DescribeDatabaseRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
@@ -1120,6 +1248,84 @@ func TestProxy_AllocTimestamp(t *testing.T) {
 	})
 }
 
+func TestProxy_Delete(t *testing.T) {
+	collectionName := "test_delete"
+	collectionID := int64(111)
+	partitionName := "default"
+	partitionID := int64(222)
+	channels := []string{"test_vchannel"}
+	dbName := "test_1"
+	collSchema := &schemapb.CollectionSchema{
+		Name:        collectionName,
+		Description: "",
+		AutoID:      false,
+		Fields: []*schemapb.FieldSchema{
+			{
+				FieldID:      common.StartOfUserFieldID,
+				Name:         "pk",
+				IsPrimaryKey: true,
+				DataType:     schemapb.DataType_Int64,
+			},
+			{
+				FieldID:      common.StartOfUserFieldID + 1,
+				Name:         "non_pk",
+				IsPrimaryKey: false,
+				DataType:     schemapb.DataType_Int64,
+			},
+		},
+	}
+	schema := newSchemaInfo(collSchema)
+	paramtable.Init()
+
+	t.Run("delete run failed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		chMgr := NewMockChannelsMgr(t)
+
+		req := &milvuspb.DeleteRequest{
+			CollectionName: collectionName,
+			DbName:         dbName,
+			PartitionName:  partitionName,
+			Expr:           "pk in [1, 2, 3]",
+		}
+		cache := NewMockCache(t)
+		cache.EXPECT().GetDatabaseInfo(mock.Anything, mock.Anything).Return(&databaseInfo{dbID: 0}, nil)
+		cache.On("GetCollectionID",
+			mock.Anything, // context.Context
+			mock.AnythingOfType("string"),
+			mock.AnythingOfType("string"),
+		).Return(collectionID, nil)
+		cache.On("GetCollectionSchema",
+			mock.Anything, // context.Context
+			mock.AnythingOfType("string"),
+			mock.AnythingOfType("string"),
+		).Return(schema, nil)
+		cache.On("GetPartitionID",
+			mock.Anything, // context.Context
+			mock.AnythingOfType("string"),
+			mock.AnythingOfType("string"),
+			mock.AnythingOfType("string"),
+		).Return(partitionID, nil)
+		chMgr.On("getVChannels", mock.Anything).Return(channels, nil)
+		chMgr.On("getChannels", mock.Anything).Return(nil, fmt.Errorf("mock error"))
+		globalMetaCache = cache
+		rc := mocks.NewMockRootCoordClient(t)
+		tsoAllocator := &mockTsoAllocator{}
+		idAllocator, err := allocator.NewIDAllocator(ctx, rc, 0)
+		assert.NoError(t, err)
+
+		queue, err := newTaskScheduler(ctx, tsoAllocator, nil)
+		assert.NoError(t, err)
+
+		node := &Proxy{chMgr: chMgr, rowIDAllocator: idAllocator, sched: queue}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		resp, err := node.Delete(ctx, req)
+		assert.NoError(t, err)
+		assert.Error(t, merr.Error(resp.GetStatus()))
+	})
+}
+
 func TestProxy_ReplicateMessage(t *testing.T) {
 	paramtable.Init()
 	defer paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "true")
@@ -1171,12 +1377,27 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 	})
 
 	t.Run("get latest position", func(t *testing.T) {
+		base64DecodeMsgPosition := func(position string) (*msgstream.MsgPosition, error) {
+			decodeBytes, err := base64.StdEncoding.DecodeString(position)
+			if err != nil {
+				log.Warn("fail to decode the position", zap.Error(err))
+				return nil, err
+			}
+			msgPosition := &msgstream.MsgPosition{}
+			err = proto.Unmarshal(decodeBytes, msgPosition)
+			if err != nil {
+				log.Warn("fail to unmarshal the position", zap.Error(err))
+				return nil, err
+			}
+			return msgPosition, nil
+		}
+
 		paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
 		defer paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "true")
 
 		factory := dependency.NewMockFactory(t)
 		stream := msgstream.NewMockMsgStream(t)
-		mockMsgID := mqwrapper.NewMockMessageID(t)
+		mockMsgID := mqcommon.NewMockMessageID(t)
 
 		factory.EXPECT().NewMsgStream(mock.Anything).Return(stream, nil).Once()
 		mockMsgID.EXPECT().Serialize().Return([]byte("mock")).Once()
@@ -1192,7 +1413,11 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.EqualValues(t, 0, resp.GetStatus().GetCode())
-		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("mock")), resp.GetPosition())
+		{
+			p, err := base64DecodeMsgPosition(resp.GetPosition())
+			assert.NoError(t, err)
+			assert.Equal(t, []byte("mock"), p.MsgID)
+		}
 
 		factory.EXPECT().NewMsgStream(mock.Anything).Return(nil, errors.New("mock")).Once()
 		resp, err = node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
@@ -1218,14 +1443,13 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		}
 
 		{
-			timeTickResult := msgpb.TimeTickMsg{}
 			timeTickMsg := &msgstream.TimeTickMsg{
 				BaseMsg: msgstream.BaseMsg{
 					BeginTimestamp: 1,
 					EndTimestamp:   10,
 					HashValues:     []uint32{0},
 				},
-				TimeTickMsg: timeTickResult,
+				TimeTickMsg: &msgpb.TimeTickMsg{},
 			}
 			msgBytes, _ := timeTickMsg.Marshal(timeTickMsg)
 			resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
@@ -1238,20 +1462,19 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		}
 
 		{
-			timeTickResult := msgpb.TimeTickMsg{
-				Base: commonpbutil.NewMsgBase(
-					commonpbutil.WithMsgType(commonpb.MsgType(-1)),
-					commonpbutil.WithTimeStamp(10),
-					commonpbutil.WithSourceID(-1),
-				),
-			}
 			timeTickMsg := &msgstream.TimeTickMsg{
 				BaseMsg: msgstream.BaseMsg{
 					BeginTimestamp: 1,
 					EndTimestamp:   10,
 					HashValues:     []uint32{0},
 				},
-				TimeTickMsg: timeTickResult,
+				TimeTickMsg: &msgpb.TimeTickMsg{
+					Base: commonpbutil.NewMsgBase(
+						commonpbutil.WithMsgType(commonpb.MsgType(-1)),
+						commonpbutil.WithTimeStamp(10),
+						commonpbutil.WithSourceID(-1),
+					),
+				},
 			}
 			msgBytes, _ := timeTickMsg.Marshal(timeTickMsg)
 			resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
@@ -1272,10 +1495,10 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		msgStreamObj.EXPECT().AsProducer(mock.Anything).Return()
 		msgStreamObj.EXPECT().EnableProduce(mock.Anything).Return()
 		msgStreamObj.EXPECT().Close().Return()
-		mockMsgID1 := mqwrapper.NewMockMessageID(t)
-		mockMsgID2 := mqwrapper.NewMockMessageID(t)
+		mockMsgID1 := mqcommon.NewMockMessageID(t)
+		mockMsgID2 := mqcommon.NewMockMessageID(t)
 		mockMsgID2.EXPECT().Serialize().Return([]byte("mock message id 2"))
-		broadcastMock := msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqwrapper.MessageID{
+		broadcastMock := msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqcommon.MessageID{
 			"unit_test_replicate_message": {mockMsgID1, mockMsgID2},
 		}, nil)
 
@@ -1309,7 +1532,7 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 					MsgID:       []byte("mock message id 2"),
 				},
 			},
-			InsertRequest: msgpb.InsertRequest{
+			InsertRequest: &msgpb.InsertRequest{
 				Base: &commonpb.MsgBase{
 					MsgType:   commonpb.MsgType_Insert,
 					MsgID:     10001,
@@ -1363,7 +1586,7 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		}
 		{
 			broadcastMock.Unset()
-			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqwrapper.MessageID{
+			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqcommon.MessageID{
 				"unit_test_replicate_message": {},
 			}, nil)
 			resp, err := node.ReplicateMessage(context.TODO(), replicateRequest)
@@ -1374,5 +1597,226 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 			time.Sleep(2 * time.Second)
 			broadcastMock.Unset()
 		}
+	})
+}
+
+func TestProxy_ImportV2(t *testing.T) {
+	ctx := context.Background()
+	mockErr := errors.New("mock error")
+
+	cache := globalMetaCache
+	defer func() { globalMetaCache = cache }()
+
+	t.Run("ImportV2", func(t *testing.T) {
+		// server is not healthy
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+		rsp, err := node.ImportV2(ctx, nil)
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+
+		// no such collection
+		mc := NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, mockErr)
+		globalMetaCache = mc
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// get schema failed
+		mc = NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		mc.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything, mock.Anything).Return(nil, mockErr)
+		globalMetaCache = mc
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// get channel failed
+		mc = NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		mc.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything, mock.Anything).Return(&schemaInfo{
+			CollectionSchema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+				{IsPartitionKey: true},
+			}},
+		}, nil)
+		globalMetaCache = mc
+		chMgr := NewMockChannelsMgr(t)
+		chMgr.EXPECT().getVChannels(mock.Anything).Return(nil, mockErr)
+		node.chMgr = chMgr
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// set partition name and with partition key
+		chMgr = NewMockChannelsMgr(t)
+		chMgr.EXPECT().getVChannels(mock.Anything).Return([]string{"ch0"}, nil)
+		node.chMgr = chMgr
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa", PartitionName: "bbb"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// get partitions failed
+		mc = NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		mc.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything, mock.Anything).Return(&schemaInfo{
+			CollectionSchema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+				{IsPartitionKey: true},
+			}},
+		}, nil)
+		mc.EXPECT().GetPartitions(mock.Anything, mock.Anything, mock.Anything).Return(nil, mockErr)
+		globalMetaCache = mc
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// get partitionID failed
+		mc = NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		mc.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything, mock.Anything).Return(&schemaInfo{
+			CollectionSchema: &schemapb.CollectionSchema{},
+		}, nil)
+		mc.EXPECT().GetPartitionID(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(0, mockErr)
+		globalMetaCache = mc
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa", PartitionName: "bbb"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// no file
+		mc = NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		mc.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything, mock.Anything).Return(&schemaInfo{
+			CollectionSchema: &schemapb.CollectionSchema{},
+		}, nil)
+		mc.EXPECT().GetPartitionID(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		globalMetaCache = mc
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{CollectionName: "aaa", PartitionName: "bbb"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// illegal file type
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{
+			CollectionName: "aaa",
+			PartitionName:  "bbb",
+			Files: []*internalpb.ImportFile{{
+				Id:    1,
+				Paths: []string{"a.cpp"},
+			}},
+		})
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+
+		// normal case
+		dataCoord := mocks.NewMockDataCoordClient(t)
+		dataCoord.EXPECT().ImportV2(mock.Anything, mock.Anything).Return(nil, nil)
+		node.dataCoord = dataCoord
+		rsp, err = node.ImportV2(ctx, &internalpb.ImportRequest{
+			CollectionName: "aaa",
+			Files: []*internalpb.ImportFile{{
+				Id:    1,
+				Paths: []string{"a.json"},
+			}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, int32(0), rsp.GetStatus().GetCode())
+	})
+
+	t.Run("GetImportProgress", func(t *testing.T) {
+		// server is not healthy
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+		rsp, err := node.GetImportProgress(ctx, nil)
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+
+		// normal case
+		dataCoord := mocks.NewMockDataCoordClient(t)
+		dataCoord.EXPECT().GetImportProgress(mock.Anything, mock.Anything).Return(nil, nil)
+		node.dataCoord = dataCoord
+		rsp, err = node.GetImportProgress(ctx, &internalpb.GetImportProgressRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, int32(0), rsp.GetStatus().GetCode())
+	})
+
+	t.Run("ListImports", func(t *testing.T) {
+		// server is not healthy
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+		rsp, err := node.ListImports(ctx, nil)
+		assert.NoError(t, err)
+		assert.NotEqual(t, int32(0), rsp.GetStatus().GetCode())
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+
+		// normal case
+		mc := NewMockCache(t)
+		mc.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(0, nil)
+		globalMetaCache = mc
+		dataCoord := mocks.NewMockDataCoordClient(t)
+		dataCoord.EXPECT().ListImports(mock.Anything, mock.Anything).Return(nil, nil)
+		node.dataCoord = dataCoord
+		rsp, err = node.ListImports(ctx, &internalpb.ListImportsRequest{
+			CollectionName: "col",
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, int32(0), rsp.GetStatus().GetCode())
+	})
+}
+
+func TestGetCollectionRateSubLabel(t *testing.T) {
+	d := "db1"
+	collectionName := "test1"
+
+	t.Run("normal", func(t *testing.T) {
+		subLabel := GetCollectionRateSubLabel(&milvuspb.QueryRequest{
+			DbName:         d,
+			CollectionName: collectionName,
+		})
+		assert.Equal(t, ratelimitutil.GetCollectionSubLabel(d, collectionName), subLabel)
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		{
+			subLabel := GetCollectionRateSubLabel(&milvuspb.QueryRequest{
+				DbName:         "",
+				CollectionName: collectionName,
+			})
+			assert.Equal(t, "", subLabel)
+		}
+		{
+			subLabel := GetCollectionRateSubLabel(&milvuspb.QueryRequest{
+				DbName:         d,
+				CollectionName: "",
+			})
+			assert.Equal(t, "", subLabel)
+		}
+	})
+}
+
+func TestProxy_InvalidateShardLeaderCache(t *testing.T) {
+	t.Run("proxy unhealthy", func(t *testing.T) {
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+
+		resp, err := node.InvalidateShardLeaderCache(context.TODO(), nil)
+		assert.NoError(t, err)
+		assert.False(t, merr.Ok(resp))
+	})
+
+	t.Run("success", func(t *testing.T) {
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+
+		cacheBak := globalMetaCache
+		defer func() { globalMetaCache = cacheBak }()
+		// set expectations
+		cache := NewMockCache(t)
+		cache.EXPECT().InvalidateShardLeaderCache(mock.Anything)
+		globalMetaCache = cache
+
+		resp, err := node.InvalidateShardLeaderCache(context.TODO(), &proxypb.InvalidateShardLeaderCacheRequest{})
+		assert.NoError(t, err)
+		assert.True(t, merr.Ok(resp))
 	})
 }

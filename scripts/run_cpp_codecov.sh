@@ -26,6 +26,7 @@ while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symli
   [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
 done
 ROOT_DIR="$( cd -P "$( dirname "$SOURCE" )/.." && pwd )"
+source ${ROOT_DIR}/scripts/setenv.sh
 
 MILVUS_CORE_DIR="${ROOT_DIR}/internal/core"
 MILVUS_CORE_UNITTEST_DIR="${MILVUS_CORE_DIR}/output/unittest"
@@ -67,7 +68,7 @@ for test in `ls ${MILVUS_CORE_UNITTEST_DIR}`; do
     ${MILVUS_CORE_UNITTEST_DIR}/${test}
     if [ $? -ne 0 ]; then
         echo ${args}
-        echo ${${MILVUS_CORE_UNITTEST_DIR}/}/${test} "run failed"
+        echo "${MILVUS_CORE_UNITTEST_DIR}/${test} run failed"
         exit -1
     fi
 done

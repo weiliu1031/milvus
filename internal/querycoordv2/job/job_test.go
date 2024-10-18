@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus-proto/go-api/v2/rgpb"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
@@ -38,6 +38,8 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/observers"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/internal/util/proxyutil"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -59,16 +61,18 @@ type JobSuite struct {
 	loadTypes   map[int64]querypb.LoadType
 
 	// Dependencies
-	kv                kv.MetaKv
-	store             metastore.QueryCoordCatalog
-	dist              *meta.DistributionManager
-	meta              *meta.Meta
-	cluster           *session.MockCluster
-	targetMgr         *meta.TargetManager
-	targetObserver    *observers.TargetObserver
-	broker            *meta.MockBroker
-	nodeMgr           *session.NodeManager
-	checkerController *checkers.CheckerController
+	kv                 kv.MetaKv
+	store              metastore.QueryCoordCatalog
+	dist               *meta.DistributionManager
+	meta               *meta.Meta
+	cluster            *session.MockCluster
+	targetMgr          *meta.TargetManager
+	targetObserver     *observers.TargetObserver
+	collectionObserver *observers.CollectionObserver
+	broker             *meta.MockBroker
+	nodeMgr            *session.NodeManager
+	checkerController  *checkers.CheckerController
+	proxyManager       *proxyutil.MockProxyClientManager
 
 	// Test objects
 	scheduler *Scheduler
@@ -128,7 +132,7 @@ func (suite *JobSuite) SetupSuite() {
 
 	suite.broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything).
 		Return(nil, nil)
-	suite.broker.EXPECT().DescribeIndex(mock.Anything, mock.Anything).
+	suite.broker.EXPECT().ListIndexes(mock.Anything, mock.Anything).
 		Return(nil, nil)
 
 	suite.cluster = session.NewMockCluster(suite.T())
@@ -138,6 +142,9 @@ func (suite *JobSuite) SetupSuite() {
 	suite.cluster.EXPECT().
 		ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).
 		Return(merr.Success(), nil).Maybe()
+
+	suite.proxyManager = proxyutil.NewMockProxyClientManager(suite.T())
+	suite.proxyManager.EXPECT().InvalidateCollectionMetaCache(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 }
 
 func (suite *JobSuite) SetupTest() {
@@ -170,18 +177,35 @@ func (suite *JobSuite) SetupTest() {
 	suite.scheduler.Start()
 	meta.GlobalFailedLoadCache = meta.NewFailedLoadCache()
 
-	suite.nodeMgr.Add(session.NewNodeInfo(1000, "localhost"))
-	suite.nodeMgr.Add(session.NewNodeInfo(2000, "localhost"))
-	suite.nodeMgr.Add(session.NewNodeInfo(3000, "localhost"))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   1000,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   2000,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   3000,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
 
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 1000)
-	suite.NoError(err)
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 2000)
-	suite.NoError(err)
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 3000)
-	suite.NoError(err)
+	suite.meta.HandleNodeUp(1000)
+	suite.meta.HandleNodeUp(2000)
+	suite.meta.HandleNodeUp(3000)
 
 	suite.checkerController = &checkers.CheckerController{}
+	suite.collectionObserver = observers.NewCollectionObserver(
+		suite.dist,
+		suite.meta,
+		suite.targetMgr,
+		suite.targetObserver,
+		suite.checkerController,
+		suite.proxyManager,
+	)
 }
 
 func (suite *JobSuite) TearDownTest() {
@@ -221,6 +245,7 @@ func (suite *JobSuite) TestLoadCollection() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -248,6 +273,7 @@ func (suite *JobSuite) TestLoadCollection() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -273,6 +299,33 @@ func (suite *JobSuite) TestLoadCollection() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
+			suite.nodeMgr,
+		)
+		suite.scheduler.Add(job)
+		err := job.Wait()
+		suite.ErrorIs(err, merr.ErrParameterInvalid)
+	}
+
+	// Test load existed collection with different load fields
+	for _, collection := range suite.collections {
+		if suite.loadTypes[collection] != querypb.LoadType_LoadCollection {
+			continue
+		}
+		req := &querypb.LoadCollectionRequest{
+			CollectionID: collection,
+			LoadFields:   []int64{100, 101},
+		}
+		job := NewLoadCollectionJob(
+			ctx,
+			req,
+			suite.dist,
+			suite.meta,
+			suite.broker,
+			suite.cluster,
+			suite.targetMgr,
+			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -300,6 +353,7 @@ func (suite *JobSuite) TestLoadCollection() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -307,9 +361,18 @@ func (suite *JobSuite) TestLoadCollection() {
 		suite.NoError(err)
 	}
 
-	suite.meta.ResourceManager.AddResourceGroup("rg1")
-	suite.meta.ResourceManager.AddResourceGroup("rg2")
-	suite.meta.ResourceManager.AddResourceGroup("rg3")
+	cfg := &rgpb.ResourceGroupConfig{
+		Requests: &rgpb.ResourceGroupLimit{
+			NodeNum: 0,
+		},
+		Limits: &rgpb.ResourceGroupLimit{
+			NodeNum: 0,
+		},
+	}
+
+	suite.meta.ResourceManager.AddResourceGroup("rg1", cfg)
+	suite.meta.ResourceManager.AddResourceGroup("rg2", cfg)
+	suite.meta.ResourceManager.AddResourceGroup("rg3", cfg)
 
 	// Load with 3 replica on 1 rg
 	req := &querypb.LoadCollectionRequest{
@@ -326,11 +389,12 @@ func (suite *JobSuite) TestLoadCollection() {
 		suite.cluster,
 		suite.targetMgr,
 		suite.targetObserver,
+		suite.collectionObserver,
 		suite.nodeMgr,
 	)
 	suite.scheduler.Add(job)
 	err := job.Wait()
-	suite.ErrorContains(err, meta.ErrNodeNotEnough.Error())
+	suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 
 	// Load with 3 replica on 3 rg
 	req = &querypb.LoadCollectionRequest{
@@ -347,11 +411,12 @@ func (suite *JobSuite) TestLoadCollection() {
 		suite.cluster,
 		suite.targetMgr,
 		suite.targetObserver,
+		suite.collectionObserver,
 		suite.nodeMgr,
 	)
 	suite.scheduler.Add(job)
 	err = job.Wait()
-	suite.ErrorContains(err, meta.ErrNodeNotEnough.Error())
+	suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 }
 
 func (suite *JobSuite) TestLoadCollectionWithReplicas() {
@@ -376,73 +441,12 @@ func (suite *JobSuite) TestLoadCollectionWithReplicas() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
 		err := job.Wait()
-		suite.ErrorContains(err, meta.ErrNodeNotEnough.Error())
-	}
-}
-
-func (suite *JobSuite) TestLoadCollectionWithDiffIndex() {
-	ctx := context.Background()
-
-	// Test load collection
-	for _, collection := range suite.collections {
-		if suite.loadTypes[collection] != querypb.LoadType_LoadCollection {
-			continue
-		}
-		// Load with 1 replica
-		req := &querypb.LoadCollectionRequest{
-			CollectionID: collection,
-			FieldIndexID: map[int64]int64{
-				defaultVecFieldID: defaultIndexID,
-			},
-		}
-		job := NewLoadCollectionJob(
-			ctx,
-			req,
-			suite.dist,
-			suite.meta,
-			suite.broker,
-			suite.cluster,
-			suite.targetMgr,
-			suite.targetObserver,
-			suite.nodeMgr,
-		)
-		suite.scheduler.Add(job)
-		err := job.Wait()
-		suite.NoError(err)
-		suite.EqualValues(1, suite.meta.GetReplicaNumber(collection))
-		suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-		suite.assertCollectionLoaded(collection)
-	}
-
-	// Test load with different index
-	for _, collection := range suite.collections {
-		if suite.loadTypes[collection] != querypb.LoadType_LoadCollection {
-			continue
-		}
-		req := &querypb.LoadCollectionRequest{
-			CollectionID: collection,
-			FieldIndexID: map[int64]int64{
-				defaultVecFieldID: -defaultIndexID,
-			},
-		}
-		job := NewLoadCollectionJob(
-			ctx,
-			req,
-			suite.dist,
-			suite.meta,
-			suite.broker,
-			suite.cluster,
-			suite.targetMgr,
-			suite.targetObserver,
-			suite.nodeMgr,
-		)
-		suite.scheduler.Add(job)
-		err := job.Wait()
-		suite.ErrorIs(err, merr.ErrParameterInvalid)
+		suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 	}
 }
 
@@ -469,6 +473,7 @@ func (suite *JobSuite) TestLoadPartition() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -499,6 +504,7 @@ func (suite *JobSuite) TestLoadPartition() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -526,6 +532,35 @@ func (suite *JobSuite) TestLoadPartition() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
+			suite.nodeMgr,
+		)
+		suite.scheduler.Add(job)
+		err := job.Wait()
+		suite.ErrorIs(err, merr.ErrParameterInvalid)
+	}
+
+	// Test load partition with different load fields
+	for _, collection := range suite.collections {
+		if suite.loadTypes[collection] != querypb.LoadType_LoadPartition {
+			continue
+		}
+
+		req := &querypb.LoadPartitionsRequest{
+			CollectionID: collection,
+			PartitionIDs: suite.partitions[collection],
+			LoadFields:   []int64{100, 101},
+		}
+		job := NewLoadPartitionJob(
+			ctx,
+			req,
+			suite.dist,
+			suite.meta,
+			suite.broker,
+			suite.cluster,
+			suite.targetMgr,
+			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -553,6 +588,7 @@ func (suite *JobSuite) TestLoadPartition() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -579,6 +615,7 @@ func (suite *JobSuite) TestLoadPartition() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -586,9 +623,17 @@ func (suite *JobSuite) TestLoadPartition() {
 		suite.NoError(err)
 	}
 
-	suite.meta.ResourceManager.AddResourceGroup("rg1")
-	suite.meta.ResourceManager.AddResourceGroup("rg2")
-	suite.meta.ResourceManager.AddResourceGroup("rg3")
+	cfg := &rgpb.ResourceGroupConfig{
+		Requests: &rgpb.ResourceGroupLimit{
+			NodeNum: 1,
+		},
+		Limits: &rgpb.ResourceGroupLimit{
+			NodeNum: 1,
+		},
+	}
+	suite.meta.ResourceManager.AddResourceGroup("rg1", cfg)
+	suite.meta.ResourceManager.AddResourceGroup("rg2", cfg)
+	suite.meta.ResourceManager.AddResourceGroup("rg3", cfg)
 
 	// test load 3 replica in 1 rg, should pass rg check
 	req := &querypb.LoadPartitionsRequest{
@@ -606,11 +651,12 @@ func (suite *JobSuite) TestLoadPartition() {
 		suite.cluster,
 		suite.targetMgr,
 		suite.targetObserver,
+		suite.collectionObserver,
 		suite.nodeMgr,
 	)
 	suite.scheduler.Add(job)
 	err := job.Wait()
-	suite.Contains(err.Error(), meta.ErrNodeNotEnough.Error())
+	suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 
 	// test load 3 replica in 3 rg, should pass rg check
 	req = &querypb.LoadPartitionsRequest{
@@ -628,11 +674,12 @@ func (suite *JobSuite) TestLoadPartition() {
 		suite.cluster,
 		suite.targetMgr,
 		suite.targetObserver,
+		suite.collectionObserver,
 		suite.nodeMgr,
 	)
 	suite.scheduler.Add(job)
 	err = job.Wait()
-	suite.Contains(err.Error(), meta.ErrNodeNotEnough.Error())
+	suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 }
 
 func (suite *JobSuite) TestDynamicLoad() {
@@ -655,6 +702,7 @@ func (suite *JobSuite) TestDynamicLoad() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		return job
@@ -673,6 +721,7 @@ func (suite *JobSuite) TestDynamicLoad() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		return job
@@ -772,76 +821,12 @@ func (suite *JobSuite) TestLoadPartitionWithReplicas() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
 		err := job.Wait()
-		suite.ErrorContains(err, meta.ErrNodeNotEnough.Error())
-	}
-}
-
-func (suite *JobSuite) TestLoadPartitionWithDiffIndex() {
-	ctx := context.Background()
-
-	// Test load partition
-	for _, collection := range suite.collections {
-		if suite.loadTypes[collection] != querypb.LoadType_LoadPartition {
-			continue
-		}
-		// Load with 1 replica
-		req := &querypb.LoadPartitionsRequest{
-			CollectionID: collection,
-			PartitionIDs: suite.partitions[collection],
-			FieldIndexID: map[int64]int64{
-				defaultVecFieldID: defaultIndexID,
-			},
-		}
-		job := NewLoadPartitionJob(
-			ctx,
-			req,
-			suite.dist,
-			suite.meta,
-			suite.broker,
-			suite.cluster,
-			suite.targetMgr,
-			suite.targetObserver,
-			suite.nodeMgr,
-		)
-		suite.scheduler.Add(job)
-		err := job.Wait()
-		suite.NoError(err)
-		suite.EqualValues(1, suite.meta.GetReplicaNumber(collection))
-		suite.targetMgr.UpdateCollectionCurrentTarget(collection)
-		suite.assertCollectionLoaded(collection)
-	}
-
-	// Test load partition with different index
-	for _, collection := range suite.collections {
-		if suite.loadTypes[collection] != querypb.LoadType_LoadPartition {
-			continue
-		}
-		// Load with 1 replica
-		req := &querypb.LoadPartitionsRequest{
-			CollectionID: collection,
-			PartitionIDs: suite.partitions[collection],
-			FieldIndexID: map[int64]int64{
-				defaultVecFieldID: -defaultIndexID,
-			},
-		}
-		job := NewLoadPartitionJob(
-			ctx,
-			req,
-			suite.dist,
-			suite.meta,
-			suite.broker,
-			suite.cluster,
-			suite.targetMgr,
-			suite.targetObserver,
-			suite.nodeMgr,
-		)
-		suite.scheduler.Add(job)
-		err := job.Wait()
-		suite.ErrorIs(err, merr.ErrParameterInvalid)
+		suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 	}
 }
 
@@ -864,6 +849,7 @@ func (suite *JobSuite) TestReleaseCollection() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+
 			suite.checkerController,
 		)
 		suite.scheduler.Add(job)
@@ -1080,12 +1066,9 @@ func (suite *JobSuite) TestLoadCollectionStoreFailed() {
 	suite.meta = meta.NewMeta(RandomIncrementIDAllocator(), store, suite.nodeMgr)
 
 	store.EXPECT().SaveResourceGroup(mock.Anything, mock.Anything).Return(nil)
-	err := suite.meta.AssignNode(meta.DefaultResourceGroupName, 1000)
-	suite.NoError(err)
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 2000)
-	suite.NoError(err)
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 3000)
-	suite.NoError(err)
+	suite.meta.HandleNodeUp(1000)
+	suite.meta.HandleNodeUp(2000)
+	suite.meta.HandleNodeUp(3000)
 
 	for _, collection := range suite.collections {
 		if suite.loadTypes[collection] != querypb.LoadType_LoadCollection {
@@ -1109,6 +1092,7 @@ func (suite *JobSuite) TestLoadCollectionStoreFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -1123,14 +1107,11 @@ func (suite *JobSuite) TestLoadPartitionStoreFailed() {
 	suite.meta = meta.NewMeta(RandomIncrementIDAllocator(), store, suite.nodeMgr)
 
 	store.EXPECT().SaveResourceGroup(mock.Anything, mock.Anything).Return(nil)
-	err := suite.meta.AssignNode(meta.DefaultResourceGroupName, 1000)
-	suite.NoError(err)
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 2000)
-	suite.NoError(err)
-	err = suite.meta.AssignNode(meta.DefaultResourceGroupName, 3000)
-	suite.NoError(err)
+	suite.meta.HandleNodeUp(1000)
+	suite.meta.HandleNodeUp(2000)
+	suite.meta.HandleNodeUp(3000)
 
-	err = errors.New("failed to store collection")
+	err := errors.New("failed to store collection")
 	for _, collection := range suite.collections {
 		if suite.loadTypes[collection] != querypb.LoadType_LoadPartition {
 			continue
@@ -1153,6 +1134,7 @@ func (suite *JobSuite) TestLoadPartitionStoreFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
@@ -1180,11 +1162,12 @@ func (suite *JobSuite) TestLoadCreateReplicaFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(job)
 		err := job.Wait()
-		suite.ErrorIs(err, ErrFailedAllocateID)
+		suite.ErrorIs(err, merr.ErrResourceGroupNodeNotEnough)
 	}
 }
 
@@ -1192,10 +1175,10 @@ func (suite *JobSuite) TestCallLoadPartitionFailed() {
 	// call LoadPartitions failed at get index info
 	getIndexErr := fmt.Errorf("mock get index error")
 	suite.broker.ExpectedCalls = lo.Filter(suite.broker.ExpectedCalls, func(call *mock.Call, _ int) bool {
-		return call.Method != "DescribeIndex"
+		return call.Method != "ListIndexes"
 	})
 	for _, collection := range suite.collections {
-		suite.broker.EXPECT().DescribeIndex(mock.Anything, collection).Return(nil, getIndexErr)
+		suite.broker.EXPECT().ListIndexes(mock.Anything, collection).Return(nil, getIndexErr)
 		loadCollectionReq := &querypb.LoadCollectionRequest{
 			CollectionID: collection,
 		}
@@ -1208,6 +1191,7 @@ func (suite *JobSuite) TestCallLoadPartitionFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(loadCollectionJob)
@@ -1228,6 +1212,7 @@ func (suite *JobSuite) TestCallLoadPartitionFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(loadPartitionJob)
@@ -1254,6 +1239,7 @@ func (suite *JobSuite) TestCallLoadPartitionFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(loadCollectionJob)
@@ -1273,6 +1259,7 @@ func (suite *JobSuite) TestCallLoadPartitionFailed() {
 			suite.cluster,
 			suite.targetMgr,
 			suite.targetObserver,
+			suite.collectionObserver,
 			suite.nodeMgr,
 		)
 		suite.scheduler.Add(loadPartitionJob)
@@ -1281,10 +1268,10 @@ func (suite *JobSuite) TestCallLoadPartitionFailed() {
 	}
 
 	suite.broker.ExpectedCalls = lo.Filter(suite.broker.ExpectedCalls, func(call *mock.Call, _ int) bool {
-		return call.Method != "DescribeIndex" && call.Method != "DescribeCollection"
+		return call.Method != "ListIndexes" && call.Method != "DescribeCollection"
 	})
 	suite.broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(nil, nil)
-	suite.broker.EXPECT().DescribeIndex(mock.Anything, mock.Anything).Return(nil, nil)
+	suite.broker.EXPECT().ListIndexes(mock.Anything, mock.Anything).Return(nil, nil)
 }
 
 func (suite *JobSuite) TestCallReleasePartitionFailed() {
@@ -1415,6 +1402,7 @@ func (suite *JobSuite) loadAll() {
 				suite.cluster,
 				suite.targetMgr,
 				suite.targetObserver,
+				suite.collectionObserver,
 				suite.nodeMgr,
 			)
 			suite.scheduler.Add(job)
@@ -1439,6 +1427,7 @@ func (suite *JobSuite) loadAll() {
 				suite.cluster,
 				suite.targetMgr,
 				suite.targetObserver,
+				suite.collectionObserver,
 				suite.nodeMgr,
 			)
 			suite.scheduler.Add(job)

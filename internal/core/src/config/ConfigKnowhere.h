@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #pragma once
+#include <cstdint>
 #include <string>
 
 namespace milvus::config {
@@ -24,6 +25,9 @@ KnowhereInitImpl(const char*);
 
 std::string
 KnowhereSetSimdType(const char*);
+
+void
+EnableKnowhereScoreConsistency();
 
 void
 KnowhereInitBuildThreadPool(const uint32_t);
@@ -36,5 +40,8 @@ GetMinimalIndexVersion();
 
 int32_t
 GetCurrentIndexVersion();
+
+void
+KnowhereInitGPUMemoryPool(const uint32_t init_size, const uint32_t max_size);
 
 }  // namespace milvus::config

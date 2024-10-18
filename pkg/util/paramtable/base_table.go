@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package paramtable
 
@@ -19,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samber/lo"
 	"go.uber.org/zap"
 
 	config "github.com/milvus-io/milvus/pkg/config"
@@ -44,22 +48,25 @@ const (
 	DefaultMinioIAMEndpoint     = ""
 	DefaultEtcdEndpoints        = "localhost:2379"
 
-	DefaultLogFormat                         = "text"
-	DefaultLogLevelForBase                   = "debug"
-	DefaultRootPath                          = ""
-	DefaultMinioLogLevel                     = "fatal"
-	DefaultKnowhereThreadPoolNumRatioInBuild = 1
-	DefaultMinioRegion                       = ""
-	DefaultMinioUseVirtualHost               = "false"
-	DefaultMinioRequestTimeout               = "10000"
+	DefaultLogFormat                                     = "text"
+	DefaultLogLevelForBase                               = "debug"
+	DefaultRootPath                                      = ""
+	DefaultMinioLogLevel                                 = "fatal"
+	DefaultKnowhereThreadPoolNumRatioInBuild             = 1
+	DefaultKnowhereThreadPoolNumRatioInBuildOfStandalone = 0.75
+	DefaultMinioRegion                                   = ""
+	DefaultMinioUseVirtualHost                           = "false"
+	DefaultMinioRequestTimeout                           = "10000"
 )
 
 // Const of Global Config List
 func globalConfigPrefixs() []string {
-	return []string{"metastore", "localStorage", "etcd", "tikv", "minio", "pulsar", "kafka", "rocksmq", "log", "grpc", "common", "quotaAndLimits"}
+	return []string{"metastore", "localStorage", "etcd", "tikv", "minio", "pulsar", "kafka", "rocksmq", "log", "grpc", "common", "quotaAndLimits", "trace"}
 }
 
-var defaultYaml = []string{"milvus.yaml"}
+// support read "milvus.yaml", "default.yaml", "user.yaml" as this order.
+// order: milvus.yaml < default.yaml < user.yaml, do not change the order below
+var defaultYaml = []string{"milvus.yaml", "default.yaml", "user.yaml"}
 
 // BaseTable the basics of paramtable
 type BaseTable struct {
@@ -96,7 +103,7 @@ func SkipRemote(skip bool) Option {
 	}
 }
 
-func skipEnv(skip bool) Option {
+func SkipEnv(skip bool) Option {
 	return func(bt *baseTableConfig) {
 		bt.skipEnv = skip
 	}
@@ -105,7 +112,7 @@ func skipEnv(skip bool) Option {
 // NewBaseTableFromYamlOnly only used in migration tool.
 // Maybe we shouldn't limit the configDir internally.
 func NewBaseTableFromYamlOnly(yaml string) *BaseTable {
-	return NewBaseTable(Files([]string{yaml}), SkipRemote(true), skipEnv(true))
+	return NewBaseTable(Files([]string{yaml}), SkipRemote(true), SkipEnv(true))
 }
 
 func NewBaseTable(opts ...Option) *BaseTable {
@@ -151,10 +158,22 @@ func (bt *BaseTable) init() {
 
 func (bt *BaseTable) initConfigsFromLocal() {
 	refreshInterval := bt.config.refreshInterval
+	var files []string
+	for _, file := range bt.config.yamlFiles {
+		_, err := os.Stat(path.Join(bt.config.configDir, file))
+		// not found
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			log.Warn("failed to check file", zap.String("file", file), zap.Error(err))
+			panic(err)
+		}
+		files = append(files, path.Join(bt.config.configDir, file))
+	}
+
 	err := bt.mgr.AddSource(config.NewFileSource(&config.FileInfo{
-		Files: lo.Map(bt.config.yamlFiles, func(file string, _ int) string {
-			return path.Join(bt.config.configDir, file)
-		}),
+		Files:           files,
 		RefreshInterval: time.Duration(refreshInterval) * time.Second,
 	}))
 	if err != nil {
@@ -177,6 +196,9 @@ func (bt *BaseTable) initConfigsFromRemote() {
 	}
 	info := &config.EtcdInfo{
 		UseEmbed:        etcdConfig.UseEmbedEtcd.GetAsBool(),
+		EnableAuth:      etcdConfig.EtcdEnableAuth.GetAsBool(),
+		UserName:        etcdConfig.EtcdAuthUserName.GetValue(),
+		PassWord:        etcdConfig.EtcdAuthPassword.GetValue(),
 		UseSSL:          etcdConfig.EtcdUseSSL.GetAsBool(),
 		Endpoints:       etcdConfig.Endpoints.GetAsStrings(),
 		CertFile:        etcdConfig.EtcdTLSCert.GetValue(),
@@ -252,12 +274,14 @@ func (bt *BaseTable) GetWithDefault(key, defaultValue string) string {
 // Remove Config by key
 func (bt *BaseTable) Remove(key string) error {
 	bt.mgr.DeleteConfig(key)
+	bt.mgr.EvictCachedValue(key)
 	return nil
 }
 
 // Update Config
 func (bt *BaseTable) Save(key, value string) error {
 	bt.mgr.SetConfig(key, value)
+	bt.mgr.EvictCachedValue(key)
 	return nil
 }
 
@@ -271,5 +295,6 @@ func (bt *BaseTable) SaveGroup(group map[string]string) error {
 // Reset Config to default value
 func (bt *BaseTable) Reset(key string) error {
 	bt.mgr.ResetConfig(key)
+	bt.mgr.EvictCachedValue(key)
 	return nil
 }

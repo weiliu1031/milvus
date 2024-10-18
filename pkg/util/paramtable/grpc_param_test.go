@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package paramtable
 
@@ -48,7 +53,7 @@ func TestGrpcServerParams(t *testing.T) {
 	assert.Equal(t, serverConfig.ServerMaxRecvSize.GetAsInt(), DefaultServerMaxRecvSize)
 
 	base.Save("grpc.serverMaxRecvSize", "a")
-	assert.Equal(t, serverConfig.ServerMaxSendSize.GetAsInt(), DefaultServerMaxRecvSize)
+	assert.Equal(t, serverConfig.ServerMaxRecvSize.GetAsInt(), DefaultServerMaxRecvSize)
 
 	assert.NotZero(t, serverConfig.ServerMaxSendSize.GetAsInt())
 	t.Logf("ServerMaxSendSize = %d", serverConfig.ServerMaxSendSize.GetAsInt())
@@ -128,23 +133,23 @@ func TestGrpcClientParams(t *testing.T) {
 	base.Save("grpc.client.maxMaxAttempts", "4")
 	assert.Equal(t, clientConfig.MaxAttempts.GetAsInt(), 4)
 
-	assert.Equal(t, clientConfig.InitialBackoff.GetAsFloat(), DefaultInitialBackoff)
-	base.Save("grpc.client.initialBackOff", "a")
-	assert.Equal(t, clientConfig.InitialBackoff.GetAsFloat(), DefaultInitialBackoff)
-	base.Save("grpc.client.initialBackOff", "2.0")
-	assert.Equal(t, clientConfig.InitialBackoff.GetAsFloat(), 2.0)
+	assert.Equal(t, DefaultInitialBackoff, clientConfig.InitialBackoff.GetAsFloat())
+	base.Save(clientConfig.InitialBackoff.Key, "a")
+	assert.Equal(t, DefaultInitialBackoff, clientConfig.InitialBackoff.GetAsFloat())
+	base.Save(clientConfig.InitialBackoff.Key, "2.0")
+	assert.Equal(t, 2.0, clientConfig.InitialBackoff.GetAsFloat())
 
 	assert.Equal(t, clientConfig.MaxBackoff.GetAsFloat(), DefaultMaxBackoff)
-	base.Save("grpc.client.maxBackOff", "a")
+	base.Save(clientConfig.MaxBackoff.Key, "a")
 	assert.Equal(t, clientConfig.MaxBackoff.GetAsFloat(), DefaultMaxBackoff)
-	base.Save("grpc.client.maxBackOff", "50.0")
-	assert.Equal(t, clientConfig.MaxBackoff.GetAsFloat(), 50.0)
+	base.Save(clientConfig.MaxBackoff.Key, "50.0")
+	assert.Equal(t, 50.0, clientConfig.MaxBackoff.GetAsFloat())
 
 	assert.Equal(t, clientConfig.CompressionEnabled.GetAsBool(), DefaultCompressionEnabled)
 	base.Save("grpc.client.CompressionEnabled", "a")
 	assert.Equal(t, clientConfig.CompressionEnabled.GetAsBool(), DefaultCompressionEnabled)
-	base.Save("grpc.client.CompressionEnabled", "true")
-	assert.Equal(t, clientConfig.CompressionEnabled.GetAsBool(), true)
+	base.Save(clientConfig.CompressionEnabled.Key, "true")
+	assert.Equal(t, true, clientConfig.CompressionEnabled.GetAsBool())
 
 	assert.Equal(t, clientConfig.MinResetInterval.GetValue(), "1000")
 	base.Save("grpc.client.minResetInterval", "abc")

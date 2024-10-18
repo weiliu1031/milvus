@@ -19,10 +19,12 @@
 
 namespace milvus::query {
 
-SubSearchResult
+void
 SearchOnIndex(const dataset::SearchDataset& search_dataset,
               const index::VectorIndex& indexing,
               const SearchInfo& search_conf,
-              const BitsetView& bitset);
+              const BitsetView& bitset,
+              SearchResult& search_result,
+              bool is_sparse = false);
 
 }  // namespace milvus::query

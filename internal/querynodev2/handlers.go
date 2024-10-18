@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tasks"
+	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/internal/util/streamrpc"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
@@ -59,6 +60,7 @@ func loadL0Segments(ctx context.Context, delegator delegator.ShardDelegator, req
 				NumOfRows:     segmentInfo.NumOfRows,
 				Statslogs:     segmentInfo.Statslogs,
 				Deltalogs:     segmentInfo.Deltalogs,
+				Bm25Logs:      segmentInfo.Bm25Statslogs,
 				InsertChannel: segmentInfo.InsertChannel,
 				StartPosition: segmentInfo.GetStartPosition(),
 				Level:         segmentInfo.GetLevel(),
@@ -94,13 +96,16 @@ func loadGrowingSegments(ctx context.Context, delegator delegator.ShardDelegator
 			if len(segmentInfo.GetBinlogs()) > 0 {
 				growingSegments = append(growingSegments, &querypb.SegmentLoadInfo{
 					SegmentID:     segmentInfo.ID,
+					Level:         segmentInfo.GetLevel(),
 					PartitionID:   segmentInfo.PartitionID,
 					CollectionID:  segmentInfo.CollectionID,
 					BinlogPaths:   segmentInfo.Binlogs,
 					NumOfRows:     segmentInfo.NumOfRows,
 					Statslogs:     segmentInfo.Statslogs,
 					Deltalogs:     segmentInfo.Deltalogs,
+					Bm25Logs:      segmentInfo.Bm25Statslogs,
 					InsertChannel: segmentInfo.InsertChannel,
+					StartPosition: segmentInfo.GetStartPosition(),
 				})
 			} else {
 				log.Info("skip segment which binlog is empty", zap.Int64("segmentID", segmentInfo.ID))
@@ -130,6 +135,8 @@ func (node *QueryNode) loadDeltaLogs(ctx context.Context, req *querypb.LoadSegme
 			}
 			continue
 		}
+		// try to update segment version after load delta logs
+		node.manager.Segment.UpdateBy(segments.IncreaseVersion(req.GetVersion()), segments.WithType(segments.SegmentTypeSealed), segments.WithID(info.GetSegmentID()))
 	}
 
 	if finalErr != nil {
@@ -162,6 +169,12 @@ func (node *QueryNode) loadIndex(ctx context.Context, req *querypb.LoadSegmentsR
 			continue
 		}
 
+		if localSegment.IsLazyLoad() {
+			localSegment.SetLoadInfo(info)
+			localSegment.SetNeedUpdatedVersion(req.GetVersion())
+			node.manager.DiskCache.MarkItemNeedReload(ctx, localSegment.ID())
+			return nil
+		}
 		err := node.loader.LoadIndex(ctx, localSegment, info, req.Version)
 		if err != nil {
 			log.Warn("failed to load index", zap.Error(err))
@@ -184,15 +197,14 @@ func (node *QueryNode) queryChannel(ctx context.Context, req *querypb.QueryReque
 	)
 
 	var err error
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.Leader).Inc()
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.Leader).Inc()
 	defer func() {
 		if err != nil {
-			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.Leader).Inc()
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.Leader).Inc()
 		}
 	}()
 
 	log.Debug("start do query with channel",
-		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
 	)
 	// add cancel when error occurs
@@ -217,9 +229,8 @@ func (node *QueryNode) queryChannel(ctx context.Context, req *querypb.QueryReque
 	}
 
 	// reduce result
-	tr.CtxElapse(ctx, fmt.Sprintf("start reduce query result, traceID = %s, fromShardLeader = %t, vChannel = %s, segmentIDs = %v",
+	tr.CtxElapse(ctx, fmt.Sprintf("start reduce query result, traceID = %s, vChannel = %s, segmentIDs = %v",
 		traceID,
-		req.GetFromShardLeader(),
 		channel,
 		req.GetSegmentIDs(),
 	))
@@ -244,13 +255,13 @@ func (node *QueryNode) queryChannel(ctx context.Context, req *querypb.QueryReque
 	))
 
 	latency := tr.ElapseSpan()
-	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.Leader).Observe(float64(latency.Milliseconds()))
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.Leader).Inc()
+	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.Leader).Observe(float64(latency.Milliseconds()))
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.Leader).Inc()
 	return resp, nil
 }
 
 func (node *QueryNode) queryChannelStream(ctx context.Context, req *querypb.QueryRequest, channel string, srv streamrpc.QueryStreamServer) error {
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.Leader).Inc()
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.Leader).Inc()
 	msgID := req.Req.Base.GetMsgID()
 	log := log.Ctx(ctx).With(
 		zap.Int64("msgID", msgID),
@@ -262,12 +273,11 @@ func (node *QueryNode) queryChannelStream(ctx context.Context, req *querypb.Quer
 	var err error
 	defer func() {
 		if err != nil {
-			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.Leader).Inc()
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.Leader).Inc()
 		}
 	}()
 
 	log.Debug("start do streaming query with channel",
-		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
 	)
 
@@ -313,7 +323,10 @@ func (node *QueryNode) queryStreamSegments(ctx context.Context, req *querypb.Que
 	}
 
 	// Send task to scheduler and wait until it finished.
-	task := tasks.NewQueryStreamTask(ctx, collection, node.manager, req, srv)
+
+	task := tasks.NewQueryStreamTask(ctx, collection, node.manager, req, srv,
+		paramtable.Get().QueryNodeCfg.QueryStreamBatchSize.GetAsInt(),
+		paramtable.Get().QueryNodeCfg.QueryStreamMaxBatchSize.GetAsInt())
 	if err := node.scheduler.Add(task); err != nil {
 		log.Warn("failed to add query task into scheduler", zap.Error(err))
 		return err
@@ -344,15 +357,14 @@ func (node *QueryNode) searchChannel(ctx context.Context, req *querypb.SearchReq
 	defer node.lifetime.Done()
 
 	var err error
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.TotalLabel, metrics.Leader).Inc()
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.TotalLabel, metrics.Leader).Inc()
 	defer func() {
 		if err != nil {
-			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.FailLabel, metrics.Leader).Inc()
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.FailLabel, metrics.Leader).Inc()
 		}
 	}()
 
 	log.Debug("start to search channel",
-		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
 	)
 	searchCtx, cancel := context.WithCancel(ctx)
@@ -375,14 +387,16 @@ func (node *QueryNode) searchChannel(ctx context.Context, req *querypb.SearchReq
 	}
 
 	// reduce result
-	tr.CtxElapse(ctx, fmt.Sprintf("start reduce query result, traceID = %s, fromShardLeader = %t, vChannel = %s, segmentIDs = %v",
+	tr.CtxElapse(ctx, fmt.Sprintf("start reduce query result, traceID = %s,  vChannel = %s, segmentIDs = %v",
 		traceID,
-		req.GetFromShardLeader(),
 		channel,
 		req.GetSegmentIDs(),
 	))
 
-	resp, err := segments.ReduceSearchResults(ctx, results, req.Req.GetNq(), req.Req.GetTopk(), req.Req.GetMetricType())
+	resp, err := segments.ReduceSearchOnQueryNode(ctx, results,
+		reduce.NewReduceSearchResultInfo(req.GetReq().GetNq(),
+			req.GetReq().GetTopk()).WithMetricType(req.GetReq().GetMetricType()).WithGroupByField(req.GetReq().GetGroupByFieldId()).
+			WithGroupSize(req.GetReq().GetGroupByFieldId()).WithAdvance(req.GetReq().GetIsAdvanced()))
 	if err != nil {
 		return nil, err
 	}
@@ -394,11 +408,10 @@ func (node *QueryNode) searchChannel(ctx context.Context, req *querypb.SearchReq
 
 	// update metric to prometheus
 	latency := tr.ElapseSpan()
-	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.Leader).Observe(float64(latency.Milliseconds()))
-	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.SuccessLabel, metrics.Leader).Inc()
-	metrics.QueryNodeSearchNQ.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(float64(req.Req.GetNq()))
-	metrics.QueryNodeSearchTopK.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(float64(req.Req.GetTopk()))
-
+	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.Leader).Observe(float64(latency.Milliseconds()))
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(node.GetNodeID()), metrics.SearchLabel, metrics.SuccessLabel, metrics.Leader).Inc()
+	metrics.QueryNodeSearchNQ.WithLabelValues(fmt.Sprint(node.GetNodeID())).Observe(float64(req.Req.GetNq()))
+	metrics.QueryNodeSearchTopK.WithLabelValues(fmt.Sprint(node.GetNodeID())).Observe(float64(req.Req.GetTopk()))
 	return resp, nil
 }
 
@@ -425,11 +438,11 @@ func (node *QueryNode) getChannelStatistics(ctx context.Context, req *querypb.Ge
 			results, readSegments, err = segments.StatisticStreaming(ctx, node.manager, req.Req.GetCollectionID(), req.Req.GetPartitionIDs(), req.GetSegmentIDs())
 		}
 
+		defer node.manager.Segment.Unpin(readSegments)
 		if err != nil {
 			log.Warn("get segments statistics failed", zap.Error(err))
 			return nil, err
 		}
-		defer node.manager.Segment.Unpin(readSegments)
 		return segmentStatsResponse(results), nil
 	}
 

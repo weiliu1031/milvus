@@ -19,15 +19,12 @@ package grpcdatacoord
 
 import (
 	"context"
-	"net"
-	"strconv"
 	"sync"
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -43,6 +40,8 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	_ "github.com/milvus-io/milvus/internal/util/grpcclient"
+	"github.com/milvus-io/milvus/internal/util/streamingutil"
+	streamingserviceinterceptor "github.com/milvus-io/milvus/internal/util/streamingutil/service/interceptor"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util"
@@ -50,6 +49,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
+	"github.com/milvus-io/milvus/pkg/util/netutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/tikv"
 )
@@ -61,7 +61,7 @@ type Server struct {
 
 	serverID atomic.Int64
 
-	wg        sync.WaitGroup
+	grpcWG    sync.WaitGroup
 	dataCoord types.DataCoordComponent
 
 	etcdCli *clientv3.Client
@@ -69,29 +69,46 @@ type Server struct {
 
 	grpcErrChan chan error
 	grpcServer  *grpc.Server
+	listener    *netutil.NetListener
 }
 
 // NewServer new data service grpc server
-func NewServer(ctx context.Context, factory dependency.Factory, opts ...datacoord.Option) *Server {
+func NewServer(ctx context.Context, factory dependency.Factory, opts ...datacoord.Option) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
-
 	s := &Server{
 		ctx:         ctx1,
 		cancel:      cancel,
 		grpcErrChan: make(chan error),
 	}
 	s.dataCoord = datacoord.CreateServer(s.ctx, factory, opts...)
-	return s
+	return s, nil
 }
 
 var getTiKVClient = tikv.GetTiKVClient
+
+func (s *Server) Prepare() error {
+	listener, err := netutil.NewListener(
+		netutil.OptIP(paramtable.Get().DataCoordGrpcServerCfg.IP),
+		netutil.OptPort(paramtable.Get().DataCoordGrpcServerCfg.Port.GetAsInt()),
+	)
+	if err != nil {
+		log.Warn("DataCoord fail to create net listener", zap.Error(err))
+		return err
+	}
+	log.Info("DataCoord listen on", zap.String("address", listener.Addr().String()), zap.Int("port", listener.Port()))
+	s.listener = listener
+	return nil
+}
 
 func (s *Server) init() error {
 	params := paramtable.Get()
 	etcdConfig := &params.EtcdCfg
 
-	etcdCli, err := etcd.GetEtcdClient(
+	etcdCli, err := etcd.CreateEtcdClient(
 		etcdConfig.UseEmbedEtcd.GetAsBool(),
+		etcdConfig.EtcdEnableAuth.GetAsBool(),
+		etcdConfig.EtcdAuthUserName.GetValue(),
+		etcdConfig.EtcdAuthPassword.GetValue(),
 		etcdConfig.EtcdUseSSL.GetAsBool(),
 		etcdConfig.Endpoints.GetAsStrings(),
 		etcdConfig.EtcdTLSCert.GetValue(),
@@ -104,7 +121,7 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.dataCoord.SetEtcdClient(etcdCli)
-	s.dataCoord.SetAddress(params.DataCoordGrpcServerCfg.GetAddress())
+	s.dataCoord.SetAddress(s.listener.Address())
 
 	if params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
 		log.Info("Connecting to tikv metadata storage.")
@@ -117,40 +134,32 @@ func (s *Server) init() error {
 		log.Info("Connected to tikv. Using tikv as metadata storage.")
 	}
 
-	err = s.startGrpc()
-	if err != nil {
-		log.Debug("DataCoord startGrpc failed", zap.Error(err))
+	if err := s.dataCoord.Init(); err != nil {
+		log.Error("dataCoord init error", zap.Error(err))
 		return err
 	}
 
-	if err := s.dataCoord.Init(); err != nil {
-		log.Error("dataCoord init error", zap.Error(err))
+	err = s.startGrpc()
+	if err != nil {
+		log.Debug("DataCoord startGrpc failed", zap.Error(err))
 		return err
 	}
 	return nil
 }
 
 func (s *Server) startGrpc() error {
-	Params := &paramtable.Get().DataCoordGrpcServerCfg
-	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port.GetAsInt())
+	s.grpcWG.Add(1)
+	go s.startGrpcLoop()
 	// wait for grpc server loop start
 	err := <-s.grpcErrChan
 	return err
 }
 
-func (s *Server) startGrpcLoop(grpcPort int) {
+func (s *Server) startGrpcLoop() {
 	defer logutil.LogPanic()
-	defer s.wg.Done()
+	defer s.grpcWG.Done()
 
 	Params := &paramtable.Get().DataCoordGrpcServerCfg
-	log.Debug("network port", zap.Int("port", grpcPort))
-	lis, err := net.Listen("tcp", ":"+strconv.Itoa(grpcPort))
-	if err != nil {
-		log.Error("grpc server failed to listen error", zap.Error(err))
-		s.grpcErrChan <- err
-		return
-	}
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
@@ -165,38 +174,42 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
 
-	opts := tracer.GetInterceptorOpts()
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
 		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize.GetAsInt()),
 		grpc.MaxSendMsgSize(Params.ServerMaxSendSize.GetAsInt()),
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-			otelgrpc.UnaryServerInterceptor(opts...),
 			logutil.UnaryTraceLoggerInterceptor,
 			interceptor.ClusterValidationUnaryServerInterceptor(),
 			interceptor.ServerIDValidationUnaryServerInterceptor(func() int64 {
 				if s.serverID.Load() == 0 {
-					s.serverID.Store(paramtable.GetNodeID())
+					s.serverID.Store(s.dataCoord.(*datacoord.Server).GetServerID())
 				}
 				return s.serverID.Load()
 			}),
+			streamingserviceinterceptor.NewStreamingServiceUnaryServerInterceptor(),
 		)),
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-			otelgrpc.StreamServerInterceptor(opts...),
 			logutil.StreamTraceLoggerInterceptor,
 			interceptor.ClusterValidationStreamServerInterceptor(),
 			interceptor.ServerIDValidationStreamServerInterceptor(func() int64 {
 				if s.serverID.Load() == 0 {
-					s.serverID.Store(paramtable.GetNodeID())
+					s.serverID.Store(s.dataCoord.(*datacoord.Server).GetServerID())
 				}
 				return s.serverID.Load()
 			}),
-		)))
+			streamingserviceinterceptor.NewStreamingServiceStreamServerInterceptor(),
+		)),
+		grpc.StatsHandler(tracer.GetDynamicOtelGrpcServerStatsHandler()))
 	indexpb.RegisterIndexCoordServer(s.grpcServer, s)
 	datapb.RegisterDataCoordServer(s.grpcServer, s)
+	// register the streaming coord grpc service.
+	if streamingutil.IsStreamingServiceEnabled() {
+		s.dataCoord.RegisterStreamingCoordGRPCService(s.grpcServer)
+	}
 	go funcutil.CheckGrpcReady(ctx, s.grpcErrChan)
-	if err := s.grpcServer.Serve(lis); err != nil {
+	if err := s.grpcServer.Serve(s.listener); err != nil {
 		s.grpcErrChan <- err
 	}
 }
@@ -218,11 +231,15 @@ func (s *Server) start() error {
 
 // Stop stops the DataCoord server gracefully.
 // Need to call the GracefulStop interface of grpc server and call the stop method of the inner DataCoord object.
-func (s *Server) Stop() error {
-	Params := &paramtable.Get().DataCoordGrpcServerCfg
-	log.Debug("Datacoord stop", zap.String("Address", Params.GetAddress()))
-	var err error
-	s.cancel()
+func (s *Server) Stop() (err error) {
+	logger := log.With()
+	if s.listener != nil {
+		logger = log.With(zap.String("address", s.listener.Address()))
+	}
+	logger.Info("Datacoord stopping")
+	defer func() {
+		logger.Info("Datacoord stopped", zap.Error(err))
+	}()
 
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
@@ -233,14 +250,20 @@ func (s *Server) Stop() error {
 	if s.grpcServer != nil {
 		utils.GracefulStopGRPCServer(s.grpcServer)
 	}
+	s.grpcWG.Wait()
 
+	logger.Info("internal server[dataCoord] start to stop")
 	err = s.dataCoord.Stop()
 	if err != nil {
+		log.Error("failed to close dataCoord", zap.Error(err))
 		return err
 	}
+	s.cancel()
 
-	s.wg.Wait()
-
+	// release the listener
+	if s.listener != nil {
+		s.listener.Close()
+	}
 	return nil
 }
 
@@ -288,6 +311,11 @@ func (s *Server) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentI
 	return s.dataCoord.AssignSegmentID(ctx, req)
 }
 
+// AllocSegment alloc a new growing segment, add it into segment meta.
+func (s *Server) AllocSegment(ctx context.Context, req *datapb.AllocSegmentRequest) (*datapb.AllocSegmentResponse, error) {
+	return s.dataCoord.AllocSegment(ctx, req)
+}
+
 // GetSegmentStates gets states of segments
 func (s *Server) GetSegmentStates(ctx context.Context, req *datapb.GetSegmentStatesRequest) (*datapb.GetSegmentStatesResponse, error) {
 	return s.dataCoord.GetSegmentStates(ctx, req)
@@ -326,6 +354,11 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 // GetRecoveryInfoV2 gets information for recovering channels
 func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryInfoRequestV2) (*datapb.GetRecoveryInfoResponseV2, error) {
 	return s.dataCoord.GetRecoveryInfoV2(ctx, req)
+}
+
+// GetChannelRecoveryInfo gets the corresponding vchannel info.
+func (s *Server) GetChannelRecoveryInfo(ctx context.Context, req *datapb.GetChannelRecoveryInfoRequest) (*datapb.GetChannelRecoveryInfoResponse, error) {
+	return s.dataCoord.GetChannelRecoveryInfo(ctx, req)
 }
 
 // GetFlushedSegments get all flushed segments of a partition
@@ -388,11 +421,6 @@ func (s *Server) SetSegmentState(ctx context.Context, req *datapb.SetSegmentStat
 	return s.dataCoord.SetSegmentState(ctx, req)
 }
 
-// Import data files(json, numpy, etc.) on MinIO/S3 storage, read and parse them into sealed segments
-func (s *Server) Import(ctx context.Context, req *datapb.ImportTaskRequest) (*datapb.ImportTaskResponse, error) {
-	return s.dataCoord.Import(ctx, req)
-}
-
 // UpdateSegmentStatistics is the dataCoord service caller of UpdateSegmentStatistics.
 func (s *Server) UpdateSegmentStatistics(ctx context.Context, req *datapb.UpdateSegmentStatisticsRequest) (*commonpb.Status, error) {
 	return s.dataCoord.UpdateSegmentStatistics(ctx, req)
@@ -401,17 +429,6 @@ func (s *Server) UpdateSegmentStatistics(ctx context.Context, req *datapb.Update
 // UpdateChannelCheckpoint updates channel checkpoint in dataCoord.
 func (s *Server) UpdateChannelCheckpoint(ctx context.Context, req *datapb.UpdateChannelCheckpointRequest) (*commonpb.Status, error) {
 	return s.dataCoord.UpdateChannelCheckpoint(ctx, req)
-}
-
-// SaveImportSegment saves the import segment binlog paths data and then looks for the right DataNode to add the
-// segment to that DataNode.
-func (s *Server) SaveImportSegment(ctx context.Context, request *datapb.SaveImportSegmentRequest) (*commonpb.Status, error) {
-	return s.dataCoord.SaveImportSegment(ctx, request)
-}
-
-// UnsetIsImportingState is the distributed caller of UnsetIsImportingState.
-func (s *Server) UnsetIsImportingState(ctx context.Context, request *datapb.UnsetIsImportingStateRequest) (*commonpb.Status, error) {
-	return s.dataCoord.UnsetIsImportingState(ctx, request)
 }
 
 // MarkSegmentsDropped is the distributed caller of MarkSegmentsDropped.
@@ -434,6 +451,10 @@ func (s *Server) GcConfirm(ctx context.Context, request *datapb.GcConfirmRequest
 // CreateIndex sends the build index request to DataCoord.
 func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexRequest) (*commonpb.Status, error) {
 	return s.dataCoord.CreateIndex(ctx, req)
+}
+
+func (s *Server) AlterIndex(ctx context.Context, req *indexpb.AlterIndexRequest) (*commonpb.Status, error) {
+	return s.dataCoord.AlterIndex(ctx, req)
 }
 
 // GetIndexState gets the index states from DataCoord.
@@ -473,4 +494,24 @@ func (s *Server) GetIndexBuildProgress(ctx context.Context, req *indexpb.GetInde
 
 func (s *Server) ReportDataNodeTtMsgs(ctx context.Context, req *datapb.ReportDataNodeTtMsgsRequest) (*commonpb.Status, error) {
 	return s.dataCoord.ReportDataNodeTtMsgs(ctx, req)
+}
+
+func (s *Server) GcControl(ctx context.Context, req *datapb.GcControlRequest) (*commonpb.Status, error) {
+	return s.dataCoord.GcControl(ctx, req)
+}
+
+func (s *Server) ImportV2(ctx context.Context, in *internalpb.ImportRequestInternal) (*internalpb.ImportResponse, error) {
+	return s.dataCoord.ImportV2(ctx, in)
+}
+
+func (s *Server) GetImportProgress(ctx context.Context, in *internalpb.GetImportProgressRequest) (*internalpb.GetImportProgressResponse, error) {
+	return s.dataCoord.GetImportProgress(ctx, in)
+}
+
+func (s *Server) ListImports(ctx context.Context, in *internalpb.ListImportsRequestInternal) (*internalpb.ListImportsResponse, error) {
+	return s.dataCoord.ListImports(ctx, in)
+}
+
+func (s *Server) ListIndexes(ctx context.Context, in *indexpb.ListIndexesRequest) (*indexpb.ListIndexesResponse, error) {
+	return s.dataCoord.ListIndexes(ctx, in)
 }

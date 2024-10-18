@@ -20,6 +20,7 @@ extern "C" {
 #include "common/binary_set_c.h"
 #include "indexbuilder/type_c.h"
 
+// used only in test
 CStatus
 CreateIndexV0(enum CDataType dtype,
               const char* serialized_type_params,
@@ -27,16 +28,35 @@ CreateIndexV0(enum CDataType dtype,
               CIndex* res_index);
 
 CStatus
-CreateIndex(CIndex* res_index, CBuildIndexInfo c_build_index_info);
+CreateIndex(CIndex* res_index,
+            const uint8_t* serialized_build_index_info,
+            const uint64_t len);
 
 CStatus
 DeleteIndex(CIndex index);
+
+CStatus
+BuildTextIndex(CBinarySet* c_binary_set,
+               const uint8_t* serialized_build_index_info,
+               const uint64_t len);
 
 CStatus
 BuildFloatVecIndex(CIndex index, int64_t float_value_num, const float* vectors);
 
 CStatus
 BuildBinaryVecIndex(CIndex index, int64_t data_size, const uint8_t* vectors);
+
+CStatus
+BuildFloat16VecIndex(CIndex index, int64_t data_size, const uint8_t* vectors);
+
+CStatus
+BuildBFloat16VecIndex(CIndex index, int64_t data_size, const uint8_t* vectors);
+
+CStatus
+BuildSparseFloatVecIndex(CIndex index,
+                         int64_t row_num,
+                         int64_t dim,
+                         const uint8_t* vectors);
 
 // field_data:
 //  1, serialized proto::schema::BoolArray, if type is bool;
@@ -104,13 +124,14 @@ AppendIndexEngineVersionToBuildInfo(CBuildIndexInfo c_load_index_info,
                                     int32_t c_index_engine_version);
 
 CStatus
+AppendOptionalFieldDataPath(CBuildIndexInfo c_build_index_info,
+                            const int64_t field_id,
+                            const char* field_name,
+                            const int32_t field_type,
+                            const char* c_file_path);
+
+CStatus
 SerializeIndexAndUpLoad(CIndex index, CBinarySet* c_binary_set);
-
-CStatus
-SerializeIndexAndUpLoadV2(CIndex index, CBinarySet* c_binary_set);
-
-CStatus
-CreateIndexV2(CIndex* res_index, CBuildIndexInfo c_build_index_info);
 
 CStatus
 AppendIndexStorageInfo(CBuildIndexInfo c_build_index_info,

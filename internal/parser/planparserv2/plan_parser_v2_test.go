@@ -1,10 +1,14 @@
 package planparserv2
 
 import (
+	"fmt"
+	"math/rand"
 	"sync"
 	"testing"
 
+	"github.com/antlr4-go/antlr/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
@@ -35,7 +39,6 @@ func newTestSchema() *schemapb.CollectionSchema {
 		FieldID: 131, Name: "StringArrayField", IsPrimaryKey: false, Description: "string array field",
 		DataType:    schemapb.DataType_Array,
 		ElementType: schemapb.DataType_VarChar,
-		IsDynamic:   true,
 	})
 
 	return &schemapb.CollectionSchema{
@@ -45,6 +48,13 @@ func newTestSchema() *schemapb.CollectionSchema {
 		Fields:             fields,
 		EnableDynamicField: true,
 	}
+}
+
+func newTestSchemaHelper(t *testing.T) *typeutil.SchemaHelper {
+	schema := newTestSchema()
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	require.NoError(t, err)
+	return schemaHelper
 }
 
 func assertValidExpr(t *testing.T, helper *typeutil.SchemaHelper, exprStr string) {
@@ -155,10 +165,31 @@ func TestExpr_Like(t *testing.T) {
 	}
 
 	// TODO: enable these after regex-match is supported.
+	//unsupported := []string{
+	//	`VarCharField like "not_%_supported"`,
+	//	`JSONField["A"] like "not_%_supported"`,
+	//	`$meta["A"] like "not_%_supported"`,
+	//}
+	//for _, exprStr := range unsupported {
+	//	assertInvalidExpr(t, helper, exprStr)
+	//}
+}
+
+func TestExpr_TextMatch(t *testing.T) {
+	schema := newTestSchema()
+	helper, err := typeutil.CreateSchemaHelper(schema)
+	assert.NoError(t, err)
+
+	exprStrs := []string{
+		`TextMatch(VarCharField, "query")`,
+	}
+	for _, exprStr := range exprStrs {
+		assertValidExpr(t, helper, exprStr)
+	}
+
 	unsupported := []string{
-		`VarCharField like "not_%_supported"`,
-		`JSONField["A"] like "not_%_supported"`,
-		`$meta["A"] like "not_%_supported"`,
+		`TextMatch(not_exist, "query")`,
+		`TextMatch(BoolField, "query")`,
 	}
 	for _, exprStr := range unsupported {
 		assertInvalidExpr(t, helper, exprStr)
@@ -192,13 +223,13 @@ func TestExpr_BinaryRange(t *testing.T) {
 		`"str16" > VarCharField > "str15"`,
 		`18 > DoubleField > 17`,
 		`100 > B > 14`,
+		`1 < JSONField < 3`,
 	}
 	for _, exprStr := range exprStrs {
 		assertValidExpr(t, helper, exprStr)
 	}
 
 	invalidExprs := []string{
-		`1 < JSONField < 3`,
 		`1 < ArrayField < 3`,
 		`1 < A+B < 3`,
 	}
@@ -218,6 +249,17 @@ func TestExpr_BinaryArith(t *testing.T) {
 		`Int64Field % 10 != 9`,
 		`Int64Field + 1.1 == 2.1`,
 		`A % 10 != 2`,
+		`Int8Field + 1 < 2`,
+		`Int16Field - 3 <= 4`,
+		`Int32Field * 5 > 6`,
+		`Int64Field / 7 >= 8`,
+		`FloatField + 11 < 12`,
+		`DoubleField - 13 <= 14`,
+		`A * 15 > 16`,
+		`JSONField['A'] / 17 >= 18`,
+		`ArrayField[0] % 19 >= 20`,
+		`JSONField + 15 == 16`,
+		`15 + JSONField == 16`,
 	}
 	for _, exprStr := range exprStrs {
 		assertValidExpr(t, helper, exprStr)
@@ -225,15 +267,6 @@ func TestExpr_BinaryArith(t *testing.T) {
 
 	// TODO: enable these after execution backend is ready.
 	unsupported := []string{
-		`Int8Field + 1 < 2`,
-		`Int16Field - 3 <= 4`,
-		`Int32Field * 5 > 6`,
-		`Int64Field / 7 >= 8`,
-		`FloatField + 11 < 12`,
-		`DoubleField - 13 < 14`,
-		`A - 15 < 16`,
-		`JSONField + 15 == 16`,
-		`15 + JSONField == 16`,
 		`ArrayField + 15 == 16`,
 		`15 + ArrayField == 16`,
 	}
@@ -380,14 +413,47 @@ func TestExpr_Combinations(t *testing.T) {
 }
 
 func TestCreateRetrievePlan(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	_, err := CreateRetrievePlan(schema, "Int64Field > 0")
 	assert.NoError(t, err)
 }
 
 func TestCreateSearchPlan(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	_, err := CreateSearchPlan(schema, `$meta["A"] != 10`, "FloatVectorField", &planpb.QueryInfo{
+		Topk:         0,
+		MetricType:   "",
+		SearchParams: "",
+		RoundDecimal: 0,
+	})
+	assert.NoError(t, err)
+}
+
+func TestCreateFloat16SearchPlan(t *testing.T) {
+	schema := newTestSchemaHelper(t)
+	_, err := CreateSearchPlan(schema, `$meta["A"] != 10`, "Float16VectorField", &planpb.QueryInfo{
+		Topk:         0,
+		MetricType:   "",
+		SearchParams: "",
+		RoundDecimal: 0,
+	})
+	assert.NoError(t, err)
+}
+
+func TestCreateBFloat16earchPlan(t *testing.T) {
+	schema := newTestSchemaHelper(t)
+	_, err := CreateSearchPlan(schema, `$meta["A"] != 10`, "BFloat16VectorField", &planpb.QueryInfo{
+		Topk:         0,
+		MetricType:   "",
+		SearchParams: "",
+		RoundDecimal: 0,
+	})
+	assert.NoError(t, err)
+}
+
+func TestCreateSparseFloatVectorSearchPlan(t *testing.T) {
+	schema := newTestSchemaHelper(t)
+	_, err := CreateSearchPlan(schema, `$meta["A"] != 10`, "SparseFloatVectorField", &planpb.QueryInfo{
 		Topk:         0,
 		MetricType:   "",
 		SearchParams: "",
@@ -433,8 +499,9 @@ func TestExpr_Invalid(t *testing.T) {
 		`StringField % VarCharField`,
 		`StringField * 2`,
 		`2 / StringField`,
-		`JSONField / 2 == 1`,
+		//`JSONField / 2 == 1`,
 		`2 % JSONField == 1`,
+		`2 % Int64Field == 1`,
 		`ArrayField / 2 == 1`,
 		`2 / ArrayField == 1`,
 		// ----------------------- ==/!= -------------------------
@@ -451,10 +518,19 @@ func TestExpr_Invalid(t *testing.T) {
 		`"str" >= false`,
 		`VarCharField < FloatField`,
 		`FloatField > VarCharField`,
-		`JSONField > 1`,
-		`1 < JSONField`,
+		//`JSONField > 1`,
+		//`1 < JSONField`,
 		`ArrayField > 2`,
 		`2 < ArrayField`,
+		// https://github.com/milvus-io/milvus/issues/34139
+		"\"Int64Field\" > 500 && \"Int64Field\" < 1000",
+		"\"Int64Field\" == 500 || \"Int64Field\" != 1000",
+		`"str" < 100`,
+		`"str" <= 100`,
+		`"str" > 100`,
+		`"str" >= 100`,
+		`"str" == 100`,
+		`"str" != 100`,
 		// ------------------------ like ------------------------
 		`(VarCharField % 2) like "prefix%"`,
 		`FloatField like "prefix%"`,
@@ -533,45 +609,64 @@ func TestExpr_Invalid(t *testing.T) {
 }
 
 func TestCreateRetrievePlan_Invalid(t *testing.T) {
-	t.Run("invalid schema", func(t *testing.T) {
-		schema := newTestSchema()
-		schema.Fields = append(schema.Fields, schema.Fields[0])
-		_, err := CreateRetrievePlan(schema, "")
-		assert.Error(t, err)
-	})
-
 	t.Run("invalid expr", func(t *testing.T) {
-		schema := newTestSchema()
+		schema := newTestSchemaHelper(t)
 		_, err := CreateRetrievePlan(schema, "invalid expression")
 		assert.Error(t, err)
 	})
 }
 
 func TestCreateSearchPlan_Invalid(t *testing.T) {
-	t.Run("invalid schema", func(t *testing.T) {
-		schema := newTestSchema()
-		schema.Fields = append(schema.Fields, schema.Fields[0])
-		_, err := CreateSearchPlan(schema, "", "", nil)
-		assert.Error(t, err)
-	})
-
 	t.Run("invalid expr", func(t *testing.T) {
-		schema := newTestSchema()
+		schema := newTestSchemaHelper(t)
 		_, err := CreateSearchPlan(schema, "invalid expression", "", nil)
 		assert.Error(t, err)
 	})
 
 	t.Run("invalid vector field", func(t *testing.T) {
-		schema := newTestSchema()
+		schema := newTestSchemaHelper(t)
 		_, err := CreateSearchPlan(schema, "Int64Field > 0", "not_exist", nil)
 		assert.Error(t, err)
 	})
 
 	t.Run("not vector type", func(t *testing.T) {
-		schema := newTestSchema()
+		schema := newTestSchemaHelper(t)
 		_, err := CreateSearchPlan(schema, "Int64Field > 0", "VarCharField", nil)
 		assert.Error(t, err)
 	})
+}
+
+var listenerCnt int
+
+type errorListenerTest struct {
+	antlr.DefaultErrorListener
+}
+
+func (l *errorListenerTest) SyntaxError(recognizer antlr.Recognizer, offendingSymbol interface{}, line, column int, msg string, e antlr.RecognitionException) {
+	listenerCnt += 1
+}
+
+func (l *errorListenerTest) ReportAmbiguity(recognizer antlr.Parser, dfa *antlr.DFA, startIndex, stopIndex int, exact bool, ambigAlts *antlr.BitSet, configs *antlr.ATNConfigSet) {
+	listenerCnt += 1
+}
+
+func (l *errorListenerTest) Error() error {
+	return nil
+}
+
+func Test_FixErrorListenerNotRemoved(t *testing.T) {
+	schema := newTestSchema()
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	assert.NoError(t, err)
+
+	normal := "1 < Int32Field < (Int16Field)"
+	for i := 0; i < 10; i++ {
+		err := handleExprWithErrorListener(schemaHelper, normal, &errorListenerTest{})
+		err1, ok := err.(error)
+		assert.True(t, ok)
+		assert.Error(t, err1)
+	}
+	assert.True(t, listenerCnt <= 10)
 }
 
 func Test_handleExpr(t *testing.T) {
@@ -617,7 +712,7 @@ func Test_handleExpr_17126_26662(t *testing.T) {
 }
 
 func Test_JSONExpr(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	// search
@@ -663,6 +758,16 @@ func Test_JSONExpr(t *testing.T) {
 		`A == [1,2,3]`,
 		`A + 1.2 == 3.3`,
 		`A + 1 == 2`,
+		`JSONField > 0`,
+		`JSONField == 0`,
+		`JSONField < 100`,
+		`0 < JSONField < 100`,
+		`20 > JSONField > 0`,
+		`JSONField + 5 > 0`,
+		`JSONField > 2 + 5`,
+		`JSONField * 2 > 5`,
+		`JSONField / 2 > 5`,
+		`JSONField % 10 > 5`,
 	}
 	for _, expr = range exprs {
 		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
@@ -676,7 +781,7 @@ func Test_JSONExpr(t *testing.T) {
 }
 
 func Test_InvalidExprOnJSONField(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	// search
@@ -684,15 +789,8 @@ func Test_InvalidExprOnJSONField(t *testing.T) {
 		`exists $meta`,
 		`exists JSONField`,
 		`exists ArrayField`,
-		`$meta > 0`,
-		`JSONField == 0`,
-		`$meta < 100`,
-		`0 < $meta < 100`,
-		`20 > $meta > 0`,
-		`$meta + 5 > 0`,
-		`$meta > 2 + 5`,
 		`exists $meta["A"] > 10 `,
-		`exists Int64Field `,
+		`exists Int64Field`,
 		`A[[""B""]] > 10`,
 		`A["[""B""]"] > 10`,
 		`A[[""B""]] > 10`,
@@ -723,8 +821,9 @@ func Test_InvalidExprWithoutJSONField(t *testing.T) {
 		AutoID:      true,
 		Fields:      fields,
 	}
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	require.NoError(t, err)
 	expr := ""
-	var err error
 
 	exprs := []string{
 		`A == 0`,
@@ -737,7 +836,7 @@ func Test_InvalidExprWithoutJSONField(t *testing.T) {
 	}
 
 	for _, expr = range exprs {
-		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
+		_, err = CreateSearchPlan(schemaHelper, expr, "FloatVectorField", &planpb.QueryInfo{
 			Topk:         0,
 			MetricType:   "",
 			SearchParams: "",
@@ -761,9 +860,10 @@ func Test_InvalidExprWithMultipleJSONField(t *testing.T) {
 		AutoID:      true,
 		Fields:      fields,
 	}
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	require.NoError(t, err)
 
 	expr := ""
-	var err error
 	exprs := []string{
 		`A == 0`,
 		`A in [1, 2, 3]`,
@@ -773,7 +873,7 @@ func Test_InvalidExprWithMultipleJSONField(t *testing.T) {
 	}
 
 	for _, expr = range exprs {
-		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
+		_, err = CreateSearchPlan(schemaHelper, expr, "FloatVectorField", &planpb.QueryInfo{
 			Topk:         0,
 			MetricType:   "",
 			SearchParams: "",
@@ -784,7 +884,7 @@ func Test_InvalidExprWithMultipleJSONField(t *testing.T) {
 }
 
 func Test_exprWithSingleQuotes(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	exprs := []string{
@@ -820,7 +920,7 @@ func Test_exprWithSingleQuotes(t *testing.T) {
 }
 
 func Test_JSONContains(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	exprs := []string{
@@ -839,6 +939,8 @@ func Test_JSONContains(t *testing.T) {
 		`array_contains(A, [1,2,3])`,
 		`array_contains(ArrayField, [1,2,3])`,
 		`array_contains(ArrayField, 1)`,
+		`json_contains(JSONField, 5)`,
+		`json_contains($meta, 1)`,
 	}
 	for _, expr = range exprs {
 		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
@@ -852,7 +954,7 @@ func Test_JSONContains(t *testing.T) {
 }
 
 func Test_InvalidJSONContains(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	exprs := []string{
@@ -861,7 +963,6 @@ func Test_InvalidJSONContains(t *testing.T) {
 		`json_contains([1,2,3], 1)`,
 		`json_contains([1,2,3], [1,2,3])`,
 		`json_contains([1,2,3], [1,2])`,
-		`json_contains($meta, 1)`,
 		`json_contains(A, B)`,
 		`not json_contains(A, B)`,
 		`json_contains(A, B > 5)`,
@@ -869,7 +970,6 @@ func Test_InvalidJSONContains(t *testing.T) {
 		`json_contains(A, StringField > 5)`,
 		`json_contains(A)`,
 		`json_contains(A, 5, C)`,
-		`json_contains(JSONField, 5)`,
 		`json_Contains(JSONField, 5)`,
 		`JSON_contains(JSONField, 5)`,
 	}
@@ -914,7 +1014,7 @@ func Test_isEmptyExpression(t *testing.T) {
 }
 
 func Test_EscapeString(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	exprs := []string{
@@ -954,18 +1054,19 @@ c'`,
 		`A == "\中国"`,
 	}
 	for _, expr = range invalidExprs {
-		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
+		plan, err := CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
 			Topk:         0,
 			MetricType:   "",
 			SearchParams: "",
 			RoundDecimal: 0,
 		})
 		assert.Error(t, err)
+		fmt.Println(plan)
 	}
 }
 
 func Test_JSONContainsAll(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	var plan *planpb.PlanNode
@@ -1011,7 +1112,7 @@ func Test_JSONContainsAll(t *testing.T) {
 }
 
 func Test_JSONContainsAny(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 	var plan *planpb.PlanNode
@@ -1057,7 +1158,7 @@ func Test_JSONContainsAny(t *testing.T) {
 }
 
 func Test_ArrayExpr(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 
@@ -1091,6 +1192,7 @@ func Test_ArrayExpr(t *testing.T) {
 		`100 > ArrayField[0] > 0`,
 		`ArrayField[0] > 1`,
 		`ArrayField[0] == 1`,
+		`ArrayField in []`,
 	}
 	for _, expr = range exprs {
 		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
@@ -1117,7 +1219,6 @@ func Test_ArrayExpr(t *testing.T) {
 		`ArrayField + 3 == 1`,
 		`ArrayField in [1,2,3]`,
 		`ArrayField[0] in [1, "abc",3.3]`,
-		`ArrayField in []`,
 		`0 < ArrayField < 100`,
 		`100 > ArrayField > 0`,
 		`ArrayField > 1`,
@@ -1139,7 +1240,7 @@ func Test_ArrayExpr(t *testing.T) {
 }
 
 func Test_ArrayLength(t *testing.T) {
-	schema := newTestSchema()
+	schema := newTestSchemaHelper(t)
 	expr := ""
 	var err error
 
@@ -1150,6 +1251,10 @@ func Test_ArrayLength(t *testing.T) {
 		`array_length(B) != 1`,
 		`not (array_length(C[0]) == 1)`,
 		`not (array_length(C["D"]) != 1)`,
+		`array_length(StringArrayField) < 1`,
+		`array_length(StringArrayField) <= 1`,
+		`array_length(StringArrayField) > 5`,
+		`array_length(StringArrayField) >= 5`,
 	}
 	for _, expr = range exprs {
 		_, err = CreateSearchPlan(schema, expr, "FloatVectorField", &planpb.QueryInfo{
@@ -1171,7 +1276,6 @@ func Test_ArrayLength(t *testing.T) {
 		`0 < array_length(a-b) < 2`,
 		`0 < array_length(StringArrayField) < 1`,
 		`100 > array_length(ArrayField) > 10`,
-		`array_length(StringArrayField) < 1`,
 		`array_length(A) % 10 == 2`,
 		`array_length(A) / 10 == 2`,
 		`array_length(A) + 1  == 2`,
@@ -1186,5 +1290,104 @@ func Test_ArrayLength(t *testing.T) {
 			RoundDecimal: 0,
 		})
 		assert.Error(t, err, expr)
+	}
+}
+
+func TestConcurrency(t *testing.T) {
+	schemaHelper := newTestSchemaHelper(t)
+
+	wg := sync.WaitGroup{}
+	wg.Add(10)
+
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				r := handleExpr(schemaHelper, fmt.Sprintf("array_length(ArrayField) == %d", j))
+				err := getError(r)
+				assert.NoError(t, err)
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+func BenchmarkPlanCache(b *testing.B) {
+	schema := newTestSchema()
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	require.NoError(b, err)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		r := handleExpr(schemaHelper, "array_length(ArrayField) == 10")
+		err := getError(r)
+		assert.NoError(b, err)
+	}
+}
+
+func BenchmarkNoPlanCache(b *testing.B) {
+	schema := newTestSchema()
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	require.NoError(b, err)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		r := handleExpr(schemaHelper, fmt.Sprintf("array_length(ArrayField) == %d", i))
+		err := getError(r)
+		assert.NoError(b, err)
+	}
+}
+
+func randomChineseString(length int) string {
+	min := 0x4e00
+	max := 0x9fa5
+
+	result := make([]rune, length)
+	for i := 0; i < length; i++ {
+		result[i] = rune(rand.Intn(max-min+1) + min)
+	}
+
+	return string(result)
+}
+
+func BenchmarkWithString(b *testing.B) {
+	schema := newTestSchema()
+	schemaHelper, err := typeutil.CreateSchemaHelper(schema)
+	require.NoError(b, err)
+
+	expr := ""
+	for i := 0; i < 100; i++ {
+		expr += fmt.Sprintf(`"%s",`, randomChineseString(rand.Intn(100)))
+	}
+	expr = "StringField in [" + expr + "]"
+
+	for i := 0; i < b.N; i++ {
+		plan, err := CreateSearchPlan(schemaHelper, expr, "FloatVectorField", &planpb.QueryInfo{
+			Topk:         0,
+			MetricType:   "",
+			SearchParams: "",
+			RoundDecimal: 0,
+		})
+		assert.NoError(b, err)
+		assert.NotNil(b, plan)
+	}
+}
+
+func Test_convertHanToASCII(t *testing.T) {
+	type testcase struct {
+		source string
+		target string
+	}
+	testcases := []testcase{
+		{`A in ["中国"]`, `A in ["\u4e2d\u56fd"]`},
+		{`A in ["\中国"]`, `A in ["\中国"]`},
+		{`A in ["\\中国"]`, `A in ["\\\u4e2d\u56fd"]`},
+	}
+
+	for _, c := range testcases {
+		assert.Equal(t, c.target, convertHanToASCII(c.source))
 	}
 }

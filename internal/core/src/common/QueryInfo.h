@@ -18,15 +18,23 @@
 
 #include <memory>
 
+#include "common/Tracer.h"
 #include "common/Types.h"
 #include "knowhere/config.h"
+
 namespace milvus {
+
 struct SearchInfo {
-    int64_t topk_;
-    int64_t round_decimal_;
+    int64_t topk_{0};
+    int64_t group_size_{1};
+    bool group_strict_size_{false};
+    int64_t round_decimal_{0};
     FieldId field_id_;
     MetricType metric_type_;
     knowhere::Json search_params_;
+    std::optional<FieldId> group_by_field_id_;
+    tracer::TraceContext trace_ctx_;
+    bool materialized_view_involved = false;
 };
 
 using SearchInfoPtr = std::shared_ptr<SearchInfo>;

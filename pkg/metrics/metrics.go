@@ -29,7 +29,10 @@ const (
 	AbandonLabel = "abandon"
 	SuccessLabel = "success"
 	FailLabel    = "fail"
+	CancelLabel  = "cancel"
 	TotalLabel   = "total"
+
+	HybridSearchLabel = "hybrid_search"
 
 	InsertLabel    = "insert"
 	DeleteLabel    = "delete"
@@ -54,6 +57,9 @@ const (
 	FlushingSegmentLabel = "Flushing"
 	DroppedSegmentLabel  = "Dropped"
 
+	StreamingDataSourceLabel  = "streaming"
+	BulkinsertDataSourceLabel = "bulkinsert"
+
 	Leader     = "OnLeader"
 	FromLeader = "FromLeader"
 
@@ -64,6 +70,23 @@ const (
 	ReduceSegments = "segments"
 	ReduceShards   = "shards"
 
+	BatchReduce  = "batch_reduce"
+	StreamReduce = "stream_reduce"
+
+	Pending   = "pending"
+	Executing = "executing"
+	Done      = "done"
+
+	ImportStagePending    = "pending"
+	ImportStagePreImport  = "preimport"
+	ImportStageImport     = "import"
+	ImportStageStats      = "stats"
+	ImportStageBuildIndex = "build_index"
+
+	compactionTypeLabelName  = "compaction_type"
+	isVectorFieldLabelName   = "is_vector_field"
+	segmentPruneLabelName    = "segment_prune_label"
+	stageLabelName           = "compaction_stage"
 	nodeIDLabelName          = "node_id"
 	statusLabelName          = "status"
 	indexTaskStatusLabelName = "index_task_status"
@@ -74,21 +97,38 @@ const (
 	functionLabelName        = "function_name"
 	queryTypeLabelName       = "query_type"
 	collectionName           = "collection_name"
+	databaseLabelName        = "db_name"
+	resourceGroupLabelName   = "rg"
+	indexName                = "index_name"
+	isVectorIndex            = "is_vector_index"
 	segmentStateLabelName    = "segment_state"
 	segmentIDLabelName       = "segment_id"
 	segmentLevelLabelName    = "segment_level"
+	segmentIsSortedLabelName = "segment_is_sorted"
 	usernameLabelName        = "username"
 	roleNameLabelName        = "role_name"
 	cacheNameLabelName       = "cache_name"
 	cacheStateLabelName      = "cache_state"
 	indexCountLabelName      = "indexed_field_count"
+	dataSourceLabelName      = "data_source"
+	importStageLabelName     = "import_stage"
 	requestScope             = "scope"
 	fullMethodLabelName      = "full_method"
 	reduceLevelName          = "reduce_level"
+	reduceType               = "reduce_type"
 	lockName                 = "lock_name"
 	lockSource               = "lock_source"
 	lockType                 = "lock_type"
 	lockOp                   = "lock_op"
+	loadTypeName             = "load_type"
+	pathLabelName            = "path"
+
+	// entities label
+	LoadedLabel         = "loaded"
+	NumEntitiesAllLabel = "all"
+
+	taskTypeLabel  = "task_type"
+	taskStateLabel = "task_state"
 )
 
 var (
@@ -98,6 +138,9 @@ var (
 
 	// longTaskBuckets provides long task duration in milliseconds
 	longTaskBuckets = []float64{1, 100, 500, 1000, 5000, 10000, 20000, 50000, 100000, 250000, 500000, 1000000, 3600000, 5000000, 10000000} // unit milliseconds
+
+	// size provides size in byte
+	sizeBuckets = []float64{10000, 100000, 1000000, 100000000, 500000000, 1024000000, 2048000000, 4096000000, 10000000000, 50000000000} // unit byte
 
 	NumNodes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -135,5 +178,7 @@ func GetRegisterer() prometheus.Registerer {
 func Register(r prometheus.Registerer) {
 	r.MustRegister(NumNodes)
 	r.MustRegister(LockCosts)
+	r.MustRegister(BuildInfo)
+	r.MustRegister(RuntimeInfo)
 	metricRegisterer = r
 }

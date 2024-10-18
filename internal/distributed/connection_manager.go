@@ -33,9 +33,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
-	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/internal/proto/workerpb"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/tracer"
@@ -59,7 +59,7 @@ type ConnectionManager struct {
 	queryNodesMu sync.RWMutex
 	dataNodes    map[int64]datapb.DataNodeClient
 	dataNodesMu  sync.RWMutex
-	indexNodes   map[int64]indexpb.IndexNodeClient
+	indexNodes   map[int64]workerpb.IndexNodeClient
 	indexNodesMu sync.RWMutex
 
 	taskMu     sync.RWMutex
@@ -81,7 +81,7 @@ func NewConnectionManager(session *sessionutil.Session) *ConnectionManager {
 
 		queryNodes: make(map[int64]querypb.QueryNodeClient),
 		dataNodes:  make(map[int64]datapb.DataNodeClient),
-		indexNodes: make(map[int64]indexpb.IndexNodeClient),
+		indexNodes: make(map[int64]workerpb.IndexNodeClient),
 
 		buildTasks: make(map[int64]*buildClientTask),
 		notify:     make(chan int64),
@@ -98,19 +98,19 @@ func (cm *ConnectionManager) AddDependency(roleName string) error {
 
 	_, ok := cm.dependencies[roleName]
 	if ok {
-		log.Warn("Dependency is already added", zap.Any("roleName", roleName))
+		log.Warn("Dependency is already added", zap.String("roleName", roleName))
 		return nil
 	}
 	cm.dependencies[roleName] = struct{}{}
 
 	msess, rev, err := cm.session.GetSessions(roleName)
 	if err != nil {
-		log.Debug("ClientManager GetSessions failed", zap.Any("roleName", roleName))
+		log.Debug("ClientManager GetSessions failed", zap.String("roleName", roleName))
 		return err
 	}
 
 	if len(msess) == 0 {
-		log.Debug("No nodes are currently alive", zap.Any("roleName", roleName))
+		log.Debug("No nodes are currently alive", zap.String("roleName", roleName))
 	} else {
 		for _, value := range msess {
 			cm.buildConnections(value)
@@ -187,7 +187,7 @@ func (cm *ConnectionManager) GetDataNodeClients() (map[int64]datapb.DataNodeClie
 	return cm.dataNodes, true
 }
 
-func (cm *ConnectionManager) GetIndexNodeClients() (map[int64]indexpb.IndexNodeClient, bool) {
+func (cm *ConnectionManager) GetIndexNodeClients() (map[int64]workerpb.IndexNodeClient, bool) {
 	cm.indexNodesMu.RLock()
 	defer cm.indexNodesMu.RUnlock()
 	_, ok := cm.dependencies[typeutil.IndexNodeRole]
@@ -254,12 +254,12 @@ func (cm *ConnectionManager) receiveFinishTask() {
 		case serverID := <-cm.notify:
 			cm.taskMu.Lock()
 			task, ok := cm.buildTasks[serverID]
-			log.Debug("ConnectionManager", zap.Any("receive finish", serverID))
+			log.Debug("ConnectionManager", zap.Int64("receive finish", serverID))
 			if ok {
-				log.Debug("ConnectionManager", zap.Any("get task ok", serverID))
+				log.Debug("ConnectionManager", zap.Int64("get task ok", serverID))
 				log.Debug("ConnectionManager", zap.Any("task state", task.state))
 				if task.state == buildClientSuccess {
-					log.Debug("ConnectionManager", zap.Any("build success", serverID))
+					log.Debug("ConnectionManager", zap.Int64("build success", serverID))
 					cm.addConnection(task.sess.ServerID, task.result)
 					cm.buildClients(task.sess, task.result)
 				}
@@ -295,7 +295,7 @@ func (cm *ConnectionManager) buildClients(session *sessionutil.Session, connecti
 	case typeutil.IndexNodeRole:
 		cm.indexNodesMu.Lock()
 		defer cm.indexNodesMu.Unlock()
-		cm.indexNodes[session.ServerID] = indexpb.NewIndexNodeClient(connection)
+		cm.indexNodes[session.ServerID] = workerpb.NewIndexNodeClient(connection)
 	}
 }
 
@@ -410,10 +410,10 @@ func (bct *buildClientTask) Run() {
 		}
 
 		err := retry.Do(bct.ctx, connectGrpcFunc, bct.retryOptions...)
-		log.Debug("ConnectionManager", zap.Any("build connection finish", bct.sess.ServerID))
+		log.Debug("ConnectionManager", zap.Int64("build connection finish", bct.sess.ServerID))
 		if err != nil {
 			log.Debug("BuildClientTask try connect failed",
-				zap.Any("roleName", bct.sess.ServerName), zap.Error(err))
+				zap.String("roleName", bct.sess.ServerName), zap.Error(err))
 			bct.state = buildClientFailed
 			return
 		}
@@ -425,7 +425,7 @@ func (bct *buildClientTask) Stop() {
 }
 
 func (bct *buildClientTask) finish() {
-	log.Debug("ConnectionManager", zap.Any("notify connection finish", bct.sess.ServerID))
+	log.Debug("ConnectionManager", zap.Int64("notify connection finish", bct.sess.ServerID))
 	bct.notify <- bct.sess.ServerID
 }
 

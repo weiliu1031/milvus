@@ -112,3 +112,21 @@ func (m *ConcurrentMap[K, V]) Remove(key K) {
 func (m *ConcurrentMap[K, V]) Len() int {
 	return int(m.len.Load())
 }
+
+func (m *ConcurrentMap[K, V]) Values() []V {
+	ret := make([]V, m.Len())
+	m.inner.Range(func(key, value any) bool {
+		ret = append(ret, value.(V))
+		return true
+	})
+	return ret
+}
+
+func (m *ConcurrentMap[K, V]) Keys() []K {
+	ret := make([]K, m.Len())
+	m.inner.Range(func(key, value any) bool {
+		ret = append(ret, key.(K))
+		return true
+	})
+	return ret
+}

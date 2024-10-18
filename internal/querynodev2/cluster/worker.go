@@ -19,19 +19,19 @@ package cluster
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/cockroachdb/errors"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/streamrpc"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 // Worker is the interface definition for querynode worker role.
@@ -50,14 +50,47 @@ type Worker interface {
 
 // remoteWorker wraps grpc QueryNode client as Worker.
 type remoteWorker struct {
-	client types.QueryNodeClient
+	client   types.QueryNodeClient
+	clients  []types.QueryNodeClient
+	poolSize int
+	idx      atomic.Int64
+	pooling  bool
 }
 
 // NewRemoteWorker creates a grpcWorker.
 func NewRemoteWorker(client types.QueryNodeClient) Worker {
 	return &remoteWorker{
-		client: client,
+		client:  client,
+		pooling: false,
 	}
+}
+
+func NewPoolingRemoteWorker(fn func() (types.QueryNodeClient, error)) (Worker, error) {
+	num := paramtable.Get().QueryNodeCfg.WorkerPoolingSize.GetAsInt()
+	if num <= 0 {
+		num = 1
+	}
+	clients := make([]types.QueryNodeClient, 0, num)
+	for i := 0; i < num; i++ {
+		c, err := fn()
+		if err != nil {
+			return nil, err
+		}
+		clients = append(clients, c)
+	}
+	return &remoteWorker{
+		pooling:  true,
+		clients:  clients,
+		poolSize: num,
+	}, nil
+}
+
+func (w *remoteWorker) getClient() types.QueryNodeClient {
+	if w.pooling {
+		idx := w.idx.Inc()
+		return w.clients[int(idx)%w.poolSize]
+	}
+	return w.client
 }
 
 // LoadSegments implements Worker.
@@ -65,18 +98,13 @@ func (w *remoteWorker) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 	log := log.Ctx(ctx).With(
 		zap.Int64("workerID", req.GetDstNodeID()),
 	)
-	status, err := w.client.LoadSegments(ctx, req)
-	if err != nil {
+	client := w.getClient()
+	status, err := client.LoadSegments(ctx, req)
+	if err = merr.CheckRPCCall(status, err); err != nil {
 		log.Warn("failed to call LoadSegments via grpc worker",
 			zap.Error(err),
 		)
 		return err
-	} else if status.GetErrorCode() != commonpb.ErrorCode_Success {
-		log.Warn("failed to call LoadSegments, worker return error",
-			zap.String("errorCode", status.GetErrorCode().String()),
-			zap.String("reason", status.GetReason()),
-		)
-		return fmt.Errorf(status.Reason)
 	}
 	return nil
 }
@@ -85,18 +113,13 @@ func (w *remoteWorker) ReleaseSegments(ctx context.Context, req *querypb.Release
 	log := log.Ctx(ctx).With(
 		zap.Int64("workerID", req.GetNodeID()),
 	)
-	status, err := w.client.ReleaseSegments(ctx, req)
-	if err != nil {
+	client := w.getClient()
+	status, err := client.ReleaseSegments(ctx, req)
+	if err = merr.CheckRPCCall(status, err); err != nil {
 		log.Warn("failed to call ReleaseSegments via grpc worker",
 			zap.Error(err),
 		)
 		return err
-	} else if status.GetErrorCode() != commonpb.ErrorCode_Success {
-		log.Warn("failed to call ReleaseSegments, worker return error",
-			zap.String("errorCode", status.GetErrorCode().String()),
-			zap.String("reason", status.GetReason()),
-		)
-		return fmt.Errorf(status.Reason)
 	}
 	return nil
 }
@@ -105,7 +128,8 @@ func (w *remoteWorker) Delete(ctx context.Context, req *querypb.DeleteRequest) e
 	log := log.Ctx(ctx).With(
 		zap.Int64("workerID", req.GetBase().GetTargetID()),
 	)
-	status, err := w.client.Delete(ctx, req)
+	client := w.getClient()
+	status, err := client.Delete(ctx, req)
 	if err := merr.CheckRPCCall(status, err); err != nil {
 		if errors.Is(err, merr.ErrServiceUnimplemented) {
 			log.Warn("invoke legacy querynode Delete method, ignore error", zap.Error(err))
@@ -118,27 +142,30 @@ func (w *remoteWorker) Delete(ctx context.Context, req *querypb.DeleteRequest) e
 }
 
 func (w *remoteWorker) SearchSegments(ctx context.Context, req *querypb.SearchRequest) (*internalpb.SearchResults, error) {
-	ret, err := w.client.SearchSegments(ctx, req)
+	client := w.getClient()
+	ret, err := client.SearchSegments(ctx, req)
 	if err != nil && errors.Is(err, merr.ErrServiceUnimplemented) {
 		// for compatible with rolling upgrade from version before v2.2.9
-		return w.client.Search(ctx, req)
+		return client.Search(ctx, req)
 	}
 
 	return ret, err
 }
 
 func (w *remoteWorker) QuerySegments(ctx context.Context, req *querypb.QueryRequest) (*internalpb.RetrieveResults, error) {
-	ret, err := w.client.QuerySegments(ctx, req)
+	client := w.getClient()
+	ret, err := client.QuerySegments(ctx, req)
 	if err != nil && errors.Is(err, merr.ErrServiceUnimplemented) {
 		// for compatible with rolling upgrade from version before v2.2.9
-		return w.client.Query(ctx, req)
+		return client.Query(ctx, req)
 	}
 
 	return ret, err
 }
 
 func (w *remoteWorker) QueryStreamSegments(ctx context.Context, req *querypb.QueryRequest, srv streamrpc.QueryStreamServer) error {
-	client, err := w.client.QueryStreamSegments(ctx, req)
+	c := w.getClient()
+	client, err := c.QueryStreamSegments(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -169,7 +196,8 @@ func (w *remoteWorker) QueryStreamSegments(ctx context.Context, req *querypb.Que
 }
 
 func (w *remoteWorker) GetStatistics(ctx context.Context, req *querypb.GetStatisticsRequest) (*internalpb.GetStatisticsResponse, error) {
-	return w.client.GetStatistics(ctx, req)
+	client := w.getClient()
+	return client.GetStatistics(ctx, req)
 }
 
 func (w *remoteWorker) IsHealthy() bool {
@@ -177,6 +205,12 @@ func (w *remoteWorker) IsHealthy() bool {
 }
 
 func (w *remoteWorker) Stop() {
+	if w.pooling {
+		for _, client := range w.clients {
+			client.Close()
+		}
+		return
+	}
 	if err := w.client.Close(); err != nil {
 		log.Warn("failed to call Close via grpc worker", zap.Error(err))
 	}

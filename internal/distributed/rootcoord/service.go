@@ -18,15 +18,12 @@ package grpcrootcoord
 
 import (
 	"context"
-	"net"
-	"strconv"
 	"sync"
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -51,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
+	"github.com/milvus-io/milvus/pkg/util/netutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/tikv"
 )
@@ -59,9 +57,10 @@ import (
 type Server struct {
 	rootCoord   types.RootCoordComponent
 	grpcServer  *grpc.Server
+	listener    *netutil.NetListener
 	grpcErrChan chan error
 
-	wg sync.WaitGroup
+	grpcWG sync.WaitGroup
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -77,6 +76,10 @@ type Server struct {
 	newQueryCoordClient func() types.QueryCoordClient
 }
 
+func (s *Server) DescribeDatabase(ctx context.Context, request *rootcoordpb.DescribeDatabaseRequest) (*rootcoordpb.DescribeDatabaseResponse, error) {
+	return s.rootCoord.DescribeDatabase(ctx, request)
+}
+
 func (s *Server) CreateDatabase(ctx context.Context, request *milvuspb.CreateDatabaseRequest) (*commonpb.Status, error) {
 	return s.rootCoord.CreateDatabase(ctx, request)
 }
@@ -87,6 +90,10 @@ func (s *Server) DropDatabase(ctx context.Context, request *milvuspb.DropDatabas
 
 func (s *Server) ListDatabases(ctx context.Context, request *milvuspb.ListDatabasesRequest) (*milvuspb.ListDatabasesResponse, error) {
 	return s.rootCoord.ListDatabases(ctx, request)
+}
+
+func (s *Server) AlterDatabase(ctx context.Context, request *rootcoordpb.AlterDatabaseRequest) (*commonpb.Status, error) {
+	return s.rootCoord.AlterDatabase(ctx, request)
 }
 
 func (s *Server) CheckHealth(ctx context.Context, request *milvuspb.CheckHealthRequest) (*milvuspb.CheckHealthResponse, error) {
@@ -108,6 +115,16 @@ func (s *Server) AlterAlias(ctx context.Context, request *milvuspb.AlterAliasReq
 	return s.rootCoord.AlterAlias(ctx, request)
 }
 
+// DescribeAlias show the alias-collection relation for the specified alias.
+func (s *Server) DescribeAlias(ctx context.Context, request *milvuspb.DescribeAliasRequest) (*milvuspb.DescribeAliasResponse, error) {
+	return s.rootCoord.DescribeAlias(ctx, request)
+}
+
+// ListAliases show all alias in db.
+func (s *Server) ListAliases(ctx context.Context, request *milvuspb.ListAliasesRequest) (*milvuspb.ListAliasesResponse, error) {
+	return s.rootCoord.ListAliases(ctx, request)
+}
+
 // NewServer create a new RootCoord grpc server.
 func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
@@ -123,6 +140,20 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 		return nil, err
 	}
 	return s, err
+}
+
+func (s *Server) Prepare() error {
+	listener, err := netutil.NewListener(
+		netutil.OptIP(paramtable.Get().RootCoordGrpcServerCfg.IP),
+		netutil.OptPort(paramtable.Get().RootCoordGrpcServerCfg.Port.GetAsInt()),
+	)
+	if err != nil {
+		log.Warn("RootCoord fail to create net listener", zap.Error(err))
+		return err
+	}
+	log.Info("RootCoord listen on", zap.String("address", listener.Addr().String()), zap.Int("port", listener.Port()))
+	s.listener = listener
+	return nil
 }
 
 func (s *Server) setClient() {
@@ -148,12 +179,12 @@ func (s *Server) Run() error {
 	if err := s.init(); err != nil {
 		return err
 	}
-	log.Debug("RootCoord init done ...")
+	log.Info("RootCoord init done ...")
 
 	if err := s.start(); err != nil {
 		return err
 	}
-	log.Debug("RootCoord start done ...")
+	log.Info("RootCoord start done ...")
 	return nil
 }
 
@@ -162,11 +193,13 @@ var getTiKVClient = tikv.GetTiKVClient
 func (s *Server) init() error {
 	params := paramtable.Get()
 	etcdConfig := &params.EtcdCfg
-	rpcParams := &params.RootCoordGrpcServerCfg
-	log.Debug("init params done..")
+	log.Info("init params done..")
 
-	etcdCli, err := etcd.GetEtcdClient(
+	etcdCli, err := etcd.CreateEtcdClient(
 		etcdConfig.UseEmbedEtcd.GetAsBool(),
+		etcdConfig.EtcdEnableAuth.GetAsBool(),
+		etcdConfig.EtcdAuthUserName.GetValue(),
+		etcdConfig.EtcdAuthPassword.GetValue(),
 		etcdConfig.EtcdUseSSL.GetAsBool(),
 		etcdConfig.Endpoints.GetAsStrings(),
 		etcdConfig.EtcdTLSCert.GetValue(),
@@ -174,33 +207,33 @@ func (s *Server) init() error {
 		etcdConfig.EtcdTLSCACert.GetValue(),
 		etcdConfig.EtcdTLSMinVersion.GetValue())
 	if err != nil {
-		log.Debug("RootCoord connect to etcd failed", zap.Error(err))
+		log.Warn("RootCoord connect to etcd failed", zap.Error(err))
 		return err
 	}
 	s.etcdCli = etcdCli
 	s.rootCoord.SetEtcdClient(s.etcdCli)
-	s.rootCoord.SetAddress(rpcParams.GetAddress())
-	log.Debug("etcd connect done ...")
+	s.rootCoord.SetAddress(s.listener.Address())
+	log.Info("etcd connect done ...")
 
 	if params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
 		log.Info("Connecting to tikv metadata storage.")
 		s.tikvCli, err = getTiKVClient(&paramtable.Get().TiKVCfg)
 		if err != nil {
-			log.Debug("RootCoord failed to connect to tikv", zap.Error(err))
+			log.Warn("RootCoord failed to connect to tikv", zap.Error(err))
 			return err
 		}
 		s.rootCoord.SetTiKVClient(s.tikvCli)
 		log.Info("Connected to tikv. Using tikv as metadata storage.")
 	}
 
-	err = s.startGrpc(rpcParams.Port.GetAsInt())
+	err = s.startGrpc()
 	if err != nil {
 		return err
 	}
-	log.Debug("grpc init done ...")
+	log.Info("grpc init done ...")
 
 	if s.newDataCoordClient != nil {
-		log.Debug("RootCoord start to create DataCoord client")
+		log.Info("RootCoord start to create DataCoord client")
 		dataCoord := s.newDataCoordClient()
 		s.dataCoord = dataCoord
 		if err := s.rootCoord.SetDataCoordClient(dataCoord); err != nil {
@@ -209,7 +242,7 @@ func (s *Server) init() error {
 	}
 
 	if s.newQueryCoordClient != nil {
-		log.Debug("RootCoord start to create QueryCoord client")
+		log.Info("RootCoord start to create QueryCoord client")
 		queryCoord := s.newQueryCoordClient()
 		s.queryCoord = queryCoord
 		if err := s.rootCoord.SetQueryCoordClient(queryCoord); err != nil {
@@ -220,16 +253,16 @@ func (s *Server) init() error {
 	return s.rootCoord.Init()
 }
 
-func (s *Server) startGrpc(port int) error {
-	s.wg.Add(1)
-	go s.startGrpcLoop(port)
+func (s *Server) startGrpc() error {
+	s.grpcWG.Add(1)
+	go s.startGrpcLoop()
 	// wait for grpc server loop start
 	err := <-s.grpcErrChan
 	return err
 }
 
-func (s *Server) startGrpcLoop(port int) {
-	defer s.wg.Done()
+func (s *Server) startGrpcLoop() {
+	defer s.grpcWG.Done()
 	Params := &paramtable.Get().RootCoordGrpcServerCfg
 	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
@@ -240,25 +273,17 @@ func (s *Server) startGrpcLoop(port int) {
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
-	log.Debug("start grpc ", zap.Int("port", port))
-	lis, err := net.Listen("tcp", ":"+strconv.Itoa(port))
-	if err != nil {
-		log.Error("GrpcServer:failed to listen", zap.Error(err))
-		s.grpcErrChan <- err
-		return
-	}
+	log.Info("start grpc ", zap.Int("port", s.listener.Port()))
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	opts := tracer.GetInterceptorOpts()
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
 		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize.GetAsInt()),
 		grpc.MaxSendMsgSize(Params.ServerMaxSendSize.GetAsInt()),
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-			otelgrpc.UnaryServerInterceptor(opts...),
 			logutil.UnaryTraceLoggerInterceptor,
 			interceptor.ClusterValidationUnaryServerInterceptor(),
 			interceptor.ServerIDValidationUnaryServerInterceptor(func() int64 {
@@ -269,7 +294,6 @@ func (s *Server) startGrpcLoop(port int) {
 			}),
 		)),
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-			otelgrpc.StreamServerInterceptor(opts...),
 			logutil.StreamTraceLoggerInterceptor,
 			interceptor.ClusterValidationStreamServerInterceptor(),
 			interceptor.ServerIDValidationStreamServerInterceptor(func() int64 {
@@ -278,11 +302,12 @@ func (s *Server) startGrpcLoop(port int) {
 				}
 				return s.serverID.Load()
 			}),
-		)))
+		)),
+		grpc.StatsHandler(tracer.GetDynamicOtelGrpcServerStatsHandler()))
 	rootcoordpb.RegisterRootCoordServer(s.grpcServer, s)
 
 	go funcutil.CheckGrpcReady(ctx, s.grpcErrChan)
-	if err := s.grpcServer.Serve(lis); err != nil {
+	if err := s.grpcServer.Serve(s.listener); err != nil {
 		s.grpcErrChan <- err
 	}
 }
@@ -302,9 +327,16 @@ func (s *Server) start() error {
 	return nil
 }
 
-func (s *Server) Stop() error {
-	Params := &paramtable.Get().RootCoordGrpcServerCfg
-	log.Debug("Rootcoord stop", zap.String("Address", Params.GetAddress()))
+func (s *Server) Stop() (err error) {
+	logger := log.With()
+	if s.listener != nil {
+		logger = log.With(zap.String("address", s.listener.Address()))
+	}
+	logger.Info("Rootcoord stopping")
+	defer func() {
+		logger.Info("Rootcoord stopped", zap.Error(err))
+	}()
+
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
 	}
@@ -312,11 +344,10 @@ func (s *Server) Stop() error {
 		defer s.tikvCli.Close()
 	}
 
-	s.cancel()
 	if s.grpcServer != nil {
 		utils.GracefulStopGRPCServer(s.grpcServer)
 	}
-	s.wg.Wait()
+	s.grpcWG.Wait()
 
 	if s.dataCoord != nil {
 		if err := s.dataCoord.Close(); err != nil {
@@ -329,9 +360,15 @@ func (s *Server) Stop() error {
 		}
 	}
 	if s.rootCoord != nil {
+		logger.Info("internal server[rootCoord] start to stop")
 		if err := s.rootCoord.Stop(); err != nil {
-			log.Error("Failed to close close rootCoord", zap.Error(err))
+			log.Error("Failed to close rootCoord", zap.Error(err))
 		}
+	}
+
+	s.cancel()
+	if s.listener != nil {
+		s.listener.Close()
 	}
 	return nil
 }
@@ -426,6 +463,11 @@ func (s *Server) ShowSegments(ctx context.Context, in *milvuspb.ShowSegmentsRequ
 	return s.rootCoord.ShowSegments(ctx, in)
 }
 
+// GetPChannelInfo gets the physical channel information
+func (s *Server) GetPChannelInfo(ctx context.Context, in *rootcoordpb.GetPChannelInfoRequest) (*rootcoordpb.GetPChannelInfoResponse, error) {
+	return s.rootCoord.GetPChannelInfo(ctx, in)
+}
+
 // InvalidateCollectionMetaCache notifies RootCoord to release the collection cache in Proxies.
 func (s *Server) InvalidateCollectionMetaCache(ctx context.Context, in *proxypb.InvalidateCollMetaCacheRequest) (*commonpb.Status, error) {
 	return s.rootCoord.InvalidateCollectionMetaCache(ctx, in)
@@ -439,26 +481,6 @@ func (s *Server) ShowConfigurations(ctx context.Context, req *internalpb.ShowCon
 // GetMetrics gets the metrics of RootCoord.
 func (s *Server) GetMetrics(ctx context.Context, in *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return s.rootCoord.GetMetrics(ctx, in)
-}
-
-// Import data files(json, numpy, etc.) on MinIO/S3 storage, read and parse them into sealed segments
-func (s *Server) Import(ctx context.Context, in *milvuspb.ImportRequest) (*milvuspb.ImportResponse, error) {
-	return s.rootCoord.Import(ctx, in)
-}
-
-// Check import task state from datanode
-func (s *Server) GetImportState(ctx context.Context, in *milvuspb.GetImportStateRequest) (*milvuspb.GetImportStateResponse, error) {
-	return s.rootCoord.GetImportState(ctx, in)
-}
-
-// Returns id array of all import tasks
-func (s *Server) ListImportTasks(ctx context.Context, in *milvuspb.ListImportTasksRequest) (*milvuspb.ListImportTasksResponse, error) {
-	return s.rootCoord.ListImportTasks(ctx, in)
-}
-
-// Report impot task state to datacoord
-func (s *Server) ReportImport(ctx context.Context, in *rootcoordpb.ImportResult) (*commonpb.Status, error) {
-	return s.rootCoord.ReportImport(ctx, in)
 }
 
 func (s *Server) CreateCredential(ctx context.Context, request *internalpb.CredentialInfo) (*commonpb.Status, error) {
@@ -519,4 +541,12 @@ func (s *Server) AlterCollection(ctx context.Context, request *milvuspb.AlterCol
 
 func (s *Server) RenameCollection(ctx context.Context, request *milvuspb.RenameCollectionRequest) (*commonpb.Status, error) {
 	return s.rootCoord.RenameCollection(ctx, request)
+}
+
+func (s *Server) BackupRBAC(ctx context.Context, request *milvuspb.BackupRBACMetaRequest) (*milvuspb.BackupRBACMetaResponse, error) {
+	return s.rootCoord.BackupRBAC(ctx, request)
+}
+
+func (s *Server) RestoreRBAC(ctx context.Context, request *milvuspb.RestoreRBACMetaRequest) (*commonpb.Status, error) {
+	return s.rootCoord.RestoreRBAC(ctx, request)
 }

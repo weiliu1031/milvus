@@ -34,8 +34,43 @@
 #include "simdjson/dom/element.h"
 #include "simdjson/error.h"
 #include "simdjson/padded_string.h"
+#include "rapidjson/document.h"
+#include "rapidjson/error/en.h"
+#include "rapidjson/writer.h"
+#include "rapidjson/stringbuffer.h"
 
 namespace milvus {
+// function to extract specific keys and convert them to json
+// rapidjson is suitable for extract and reconstruct serialization
+// instead of simdjson which not suitable for serialization
+inline std::string
+ExtractSubJson(const std::string& json, const std::vector<std::string>& keys) {
+    rapidjson::Document doc;
+    doc.Parse(json.c_str());
+    if (doc.HasParseError()) {
+        PanicInfo(ErrorCode::UnexpectedError,
+                  "json parse failed, error:{}",
+                  rapidjson::GetParseError_En(doc.GetParseError()));
+    }
+
+    rapidjson::Document result_doc;
+    result_doc.SetObject();
+    rapidjson::Document::AllocatorType& allocator = result_doc.GetAllocator();
+
+    for (const auto& key : keys) {
+        if (doc.HasMember(key.c_str())) {
+            result_doc.AddMember(rapidjson::Value(key.c_str(), allocator),
+                                 doc[key.c_str()],
+                                 allocator);
+        }
+    }
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    result_doc.Accept(writer);
+    return buffer.GetString();
+}
+
 using document = simdjson::ondemand::document;
 template <typename T>
 using value_result = simdjson::simdjson_result<T>;
@@ -133,6 +168,9 @@ class Json {
     // construct JSON pointer with provided path
     static std::string
     pointer(std::vector<std::string> nested_path) {
+        if (nested_path.empty()) {
+            return "";
+        }
         std::for_each(
             nested_path.begin(), nested_path.end(), [](std::string& key) {
                 boost::replace_all(key, "~", "~0");
@@ -145,6 +183,19 @@ class Json {
     template <typename T>
     value_result<T>
     at(std::string_view pointer) const {
+        if (pointer == "") {
+            if constexpr (std::is_same_v<std::string_view, T> ||
+                          std::is_same_v<std::string, T>) {
+                return doc().get_string(false);
+            } else if constexpr (std::is_same_v<bool, T>) {
+                return doc().get_bool();
+            } else if constexpr (std::is_same_v<int64_t, T>) {
+                return doc().get_int64();
+            } else if constexpr (std::is_same_v<double, T>) {
+                return doc().get_double();
+            }
+        }
+
         return doc().at_pointer(pointer).get<T>();
     }
 
@@ -157,9 +208,19 @@ class Json {
         return dom_doc().at_pointer(pointer).get_array();
     }
 
+    size_t
+    size() const {
+        return data_.size();
+    }
+
     std::string_view
     data() const {
         return data_;
+    }
+
+    const char*
+    c_str() const {
+        return data_.data();
     }
 
  private:

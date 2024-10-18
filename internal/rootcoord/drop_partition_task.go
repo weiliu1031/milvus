@@ -26,6 +26,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 )
@@ -73,7 +74,9 @@ func (t *dropPartitionTask) Execute(ctx context.Context) error {
 		dbName:          t.Req.GetDbName(),
 		collectionNames: []string{t.collMeta.Name},
 		collectionID:    t.collMeta.CollectionID,
+		partitionName:   t.Req.GetPartitionName(),
 		ts:              t.GetTs(),
+		opts:            []proxyutil.ExpireCacheOpt{proxyutil.SetMsgType(commonpb.MsgType_DropPartition)},
 	})
 	redoTask.AddSyncStep(&changePartitionStateStep{
 		baseStep:     baseStep{core: t.core},
@@ -86,6 +89,7 @@ func (t *dropPartitionTask) Execute(ctx context.Context) error {
 	redoTask.AddAsyncStep(&deletePartitionDataStep{
 		baseStep: baseStep{core: t.core},
 		pchans:   t.collMeta.PhysicalChannelNames,
+		vchans:   t.collMeta.VirtualChannelNames,
 		partition: &model.Partition{
 			PartitionID:   partID,
 			PartitionName: t.Req.GetPartitionName(),

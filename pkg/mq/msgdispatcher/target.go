@@ -20,12 +20,12 @@ import (
 	"fmt"
 	"sync"
 	"time"
-)
 
-// TODO: dyh, move to config
-var (
-	MaxTolerantLag        = 3 * time.Second
-	DefaultTargetChanSize = 1024
+	"go.uber.org/zap"
+
+	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/lifetime"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 type target struct {
@@ -36,23 +36,33 @@ type target struct {
 	closeMu   sync.Mutex
 	closeOnce sync.Once
 	closed    bool
+	maxLag    time.Duration
+	timer     *time.Timer
+
+	cancelCh lifetime.SafeChan
 }
 
 func newTarget(vchannel string, pos *Pos) *target {
+	maxTolerantLag := paramtable.Get().MQCfg.MaxTolerantLag.GetAsDuration(time.Second)
 	t := &target{
 		vchannel: vchannel,
-		ch:       make(chan *MsgPack, DefaultTargetChanSize),
+		ch:       make(chan *MsgPack, paramtable.Get().MQCfg.TargetBufSize.GetAsInt()),
 		pos:      pos,
+		cancelCh: lifetime.NewSafeChan(),
+		maxLag:   maxTolerantLag,
+		timer:    time.NewTimer(maxTolerantLag),
 	}
 	t.closed = false
 	return t
 }
 
 func (t *target) close() {
+	t.cancelCh.Close()
 	t.closeMu.Lock()
 	defer t.closeMu.Unlock()
 	t.closeOnce.Do(func() {
 		t.closed = true
+		t.timer.Stop()
 		close(t.ch)
 	})
 }
@@ -63,9 +73,13 @@ func (t *target) send(pack *MsgPack) error {
 	if t.closed {
 		return nil
 	}
+	t.timer.Reset(t.maxLag)
 	select {
-	case <-time.After(MaxTolerantLag):
-		return fmt.Errorf("send target timeout, vchannel=%s, timeout=%s", t.vchannel, MaxTolerantLag)
+	case <-t.cancelCh.CloseCh():
+		log.Info("target closed", zap.String("vchannel", t.vchannel))
+		return nil
+	case <-t.timer.C:
+		return fmt.Errorf("send target timeout, vchannel=%s, timeout=%s", t.vchannel, t.maxLag)
 	case t.ch <- pack:
 		return nil
 	}

@@ -35,18 +35,33 @@ const milvus::FieldId TimestampFieldID = milvus::FieldId(1);
 // fill followed extra info to binlog file
 const char ORIGIN_SIZE_KEY[] = "original_size";
 const char INDEX_BUILD_ID_KEY[] = "indexBuildID";
+const char NULLABLE[] = "nullable";
 
 const char INDEX_ROOT_PATH[] = "index_files";
 const char RAWDATA_ROOT_PATH[] = "raw_datas";
+const char ANALYZE_ROOT_PATH[] = "analyze_stats";
+const char CENTROIDS_NAME[] = "centroids";
+const char OFFSET_MAPPING_NAME[] = "offset_mapping";
+const char NUM_CLUSTERS[] = "num_clusters";
+const char KMEANS_CLUSTER[] = "KMEANS";
+const char VEC_OPT_FIELDS[] = "opt_fields";
+const char PAGE_RETAIN_ORDER[] = "page_retain_order";
+const char TEXT_LOG_ROOT_PATH[] = "text_log";
 
-const int64_t DEFAULT_FIELD_MAX_MEMORY_LIMIT = 64 << 20;  // bytes
+const char DEFAULT_PLANNODE_ID[] = "0";
+const char DEAFULT_QUERY_ID[] = "0";
+const char DEFAULT_TASK_ID[] = "0";
+
+const int64_t DEFAULT_FIELD_MAX_MEMORY_LIMIT = 128 << 20;  // bytes
 const int64_t DEFAULT_HIGH_PRIORITY_THREAD_CORE_COEFFICIENT = 10;
 const int64_t DEFAULT_MIDDLE_PRIORITY_THREAD_CORE_COEFFICIENT = 5;
 const int64_t DEFAULT_LOW_PRIORITY_THREAD_CORE_COEFFICIENT = 1;
 
-const int64_t DEFAULT_INDEX_FILE_SLICE_SIZE = 4 << 20;  // bytes
+const int64_t DEFAULT_INDEX_FILE_SLICE_SIZE = 16 << 20;  // bytes
 
 const int DEFAULT_CPU_NUM = 1;
+
+const int64_t DEFAULT_EXEC_EVAL_EXPR_BATCH_SIZE = 8192;
 
 constexpr const char* RADIUS = knowhere::meta::RADIUS;
 constexpr const char* RANGE_FILTER = knowhere::meta::RANGE_FILTER;
@@ -54,3 +69,9 @@ constexpr const char* RANGE_FILTER = knowhere::meta::RANGE_FILTER;
 const int64_t DEFAULT_MAX_OUTPUT_SIZE = 67108864;  // bytes, 64MB
 
 const int64_t DEFAULT_CHUNK_MANAGER_REQUEST_TIMEOUT_MS = 10000;
+
+const int64_t DEFAULT_BITMAP_INDEX_BUILD_MODE_BOUND = 500;
+
+const int64_t DEFAULT_HYBRID_INDEX_BITMAP_CARDINALITY_LIMIT = 100;
+
+const size_t MARISA_NULL_KEY_ID = -1;

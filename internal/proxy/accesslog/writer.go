@@ -37,35 +37,107 @@ const megabyte = 1024 * 1024
 var (
 	CheckBucketRetryAttempts uint = 20
 	timeNameFormat                = ".2006-01-02T15-04-05.000"
-	timePrintFormat               = "2006/01/02 15:04:05.000 -07:00"
 )
 
-type CacheLogger struct {
+type CacheWriter struct {
 	mu     sync.Mutex
-	writer io.Writer
+	writer *bufio.Writer
+	closer io.Closer
+
+	// interval of auto flush
+	flushInterval time.Duration
+
+	closed    bool
+	closeOnce sync.Once
+	closeCh   chan struct{}
+	closeWg   sync.WaitGroup
 }
 
-func NewCacheLogger(writer io.Writer, cacheSize int) *CacheLogger {
-	return &CacheLogger{
-		writer: bufio.NewWriterSize(writer, cacheSize),
+func NewCacheWriter(writer io.Writer, cacheSize int, flushInterval time.Duration) *CacheWriter {
+	c := &CacheWriter{
+		writer:        bufio.NewWriterSize(writer, cacheSize),
+		flushInterval: flushInterval,
+		closeCh:       make(chan struct{}),
 	}
+	c.Start()
+	return c
 }
 
-func (l *CacheLogger) Write(p []byte) (n int, err error) {
+func NewCacheWriterWithCloser(writer io.Writer, closer io.Closer, cacheSize int, flushInterval time.Duration) *CacheWriter {
+	c := &CacheWriter{
+		writer:        bufio.NewWriterSize(writer, cacheSize),
+		flushInterval: flushInterval,
+		closer:        closer,
+		closeCh:       make(chan struct{}),
+	}
+	c.Start()
+	return c
+}
+
+func (l *CacheWriter) Write(p []byte) (n int, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return 0, fmt.Errorf("write to closed writer")
+	}
 
 	return l.writer.Write(p)
 }
 
-// a rotated file logger for zap.log and could upload sealed log file to minIO
-type RotateLogger struct {
+func (l *CacheWriter) Flush() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.writer.Flush()
+}
+
+func (l *CacheWriter) Start() {
+	l.closeWg.Add(1)
+	go func() {
+		defer l.closeWg.Done()
+		if l.flushInterval == 0 {
+			return
+		}
+		ticker := time.NewTicker(l.flushInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				l.Flush()
+			case <-l.closeCh:
+				return
+			}
+		}
+	}()
+}
+
+func (l *CacheWriter) Close() {
+	l.closeOnce.Do(func() {
+		// close auto flush
+		close(l.closeCh)
+		l.closeWg.Wait()
+
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.closed = true
+
+		// flush remaining bytes
+		l.writer.Flush()
+
+		if l.closer != nil {
+			l.closer.Close()
+		}
+	})
+}
+
+// a rotated file writer
+type RotateWriter struct {
 	// local path is the path to save log before update to minIO
 	// use os.TempDir()/accesslog if empty
 	localPath string
 	fileName  string
-	// the time interval of  rotate and update log to minIO
-	// only used when minIO enable
+	// the time interval of rotate and update log to minIO
 	rotatedTime int64
 	// the max size(MB) of log file
 	// if local file large than maxSize will update immediately
@@ -81,27 +153,29 @@ type RotateLogger struct {
 	file *os.File
 	mu   sync.Mutex
 
-	millCh    chan bool
+	millCh chan bool
+
+	closed    bool
 	closeCh   chan struct{}
 	closeWg   sync.WaitGroup
 	closeOnce sync.Once
 }
 
-func NewRotateLogger(logCfg *paramtable.AccessLogConfig, minioCfg *paramtable.MinioConfig) (*RotateLogger, error) {
-	logger := &RotateLogger{
+func NewRotateWriter(logCfg *paramtable.AccessLogConfig, minioCfg *paramtable.MinioConfig) (*RotateWriter, error) {
+	logger := &RotateWriter{
 		localPath:   logCfg.LocalPath.GetValue(),
 		fileName:    logCfg.Filename.GetValue(),
 		rotatedTime: logCfg.RotatedTime.GetAsInt64(),
 		maxSize:     logCfg.MaxSize.GetAsInt(),
 		maxBackups:  logCfg.MaxBackups.GetAsInt(),
+		closeCh:     make(chan struct{}),
 	}
 	log.Info("Access log save to " + logger.dir())
 	if logCfg.MinioEnable.GetAsBool() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		log.Debug("remtepath", zap.Any("remote", logCfg.RemotePath.GetValue()))
-		log.Debug("maxBackups", zap.Any("maxBackups", logCfg.MaxBackups.GetValue()))
+		log.Info("Access log will backup files to minio", zap.String("remote", logCfg.RemotePath.GetValue()), zap.String("maxBackups", logCfg.MaxBackups.GetValue()))
 		handler, err := NewMinioHandler(ctx, minioCfg, logCfg.RemotePath.GetValue(), logCfg.MaxBackups.GetAsInt())
 		if err != nil {
 			return nil, err
@@ -115,13 +189,16 @@ func NewRotateLogger(logCfg *paramtable.AccessLogConfig, minioCfg *paramtable.Mi
 	}
 
 	logger.start()
-
 	return logger, nil
 }
 
-func (l *RotateLogger) Write(p []byte) (n int, err error) {
+func (l *RotateWriter) Write(p []byte) (n int, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.closed {
+		return 0, fmt.Errorf("write to closed writer")
+	}
 
 	writeLen := int64(len(p))
 	if writeLen > l.max() {
@@ -147,7 +224,7 @@ func (l *RotateLogger) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
-func (l *RotateLogger) Close() error {
+func (l *RotateWriter) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.closeOnce.Do(func() {
@@ -157,18 +234,19 @@ func (l *RotateLogger) Close() error {
 		}
 
 		l.closeWg.Wait()
+		l.closed = true
 	})
 
 	return l.closeFile()
 }
 
-func (l *RotateLogger) Rotate() error {
+func (l *RotateWriter) Rotate() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.rotate()
 }
 
-func (l *RotateLogger) rotate() error {
+func (l *RotateWriter) rotate() error {
 	if err := l.closeFile(); err != nil {
 		return err
 	}
@@ -179,7 +257,7 @@ func (l *RotateLogger) rotate() error {
 	return nil
 }
 
-func (l *RotateLogger) openFileExistingOrNew() error {
+func (l *RotateWriter) openFileExistingOrNew() error {
 	l.mill()
 	filename := l.filename()
 	info, err := os.Stat(filename)
@@ -200,7 +278,7 @@ func (l *RotateLogger) openFileExistingOrNew() error {
 	return nil
 }
 
-func (l *RotateLogger) openNewFile() error {
+func (l *RotateWriter) openNewFile() error {
 	err := os.MkdirAll(l.dir(), 0o744)
 	if err != nil {
 		return fmt.Errorf("make directories for new log file filed: %s", err)
@@ -235,7 +313,7 @@ func (l *RotateLogger) openNewFile() error {
 	return nil
 }
 
-func (l *RotateLogger) closeFile() error {
+func (l *RotateWriter) closeFile() error {
 	if l.file == nil {
 		return nil
 	}
@@ -245,7 +323,7 @@ func (l *RotateLogger) closeFile() error {
 }
 
 // Remove old log when log num over maxBackups
-func (l *RotateLogger) millRunOnce() error {
+func (l *RotateWriter) millRunOnce() error {
 	files, err := l.oldLogFiles()
 	if err != nil {
 		return err
@@ -264,7 +342,7 @@ func (l *RotateLogger) millRunOnce() error {
 }
 
 // millRun runs in a goroutine to remove old log files out of limit.
-func (l *RotateLogger) millRun() {
+func (l *RotateWriter) millRun() {
 	defer l.closeWg.Done()
 	for {
 		select {
@@ -277,14 +355,14 @@ func (l *RotateLogger) millRun() {
 	}
 }
 
-func (l *RotateLogger) mill() {
+func (l *RotateWriter) mill() {
 	select {
 	case l.millCh <- true:
 	default:
 	}
 }
 
-func (l *RotateLogger) timeRotating() {
+func (l *RotateWriter) timeRotating() {
 	ticker := time.NewTicker(time.Duration(l.rotatedTime * int64(time.Second)))
 	log.Info("start time rotating of access log")
 	defer ticker.Stop()
@@ -302,9 +380,7 @@ func (l *RotateLogger) timeRotating() {
 }
 
 // start rotate log file by time
-func (l *RotateLogger) start() {
-	l.closeCh = make(chan struct{})
-	l.closeWg = sync.WaitGroup{}
+func (l *RotateWriter) start() {
 	if l.rotatedTime > 0 {
 		l.closeWg.Add(1)
 		go l.timeRotating()
@@ -317,35 +393,35 @@ func (l *RotateLogger) start() {
 	}
 }
 
-func (l *RotateLogger) max() int64 {
+func (l *RotateWriter) max() int64 {
 	return int64(l.maxSize) * int64(megabyte)
 }
 
-func (l *RotateLogger) dir() string {
+func (l *RotateWriter) dir() string {
 	if l.localPath == "" {
 		l.localPath = path.Join(os.TempDir(), "milvus_accesslog")
 	}
 	return l.localPath
 }
 
-func (l *RotateLogger) filename() string {
+func (l *RotateWriter) filename() string {
 	return path.Join(l.dir(), l.fileName)
 }
 
-func (l *RotateLogger) prefixAndExt() (string, string) {
+func (l *RotateWriter) prefixAndExt() (string, string) {
 	ext := path.Ext(l.fileName)
 	prefix := l.fileName[:len(l.fileName)-len(ext)]
 	return prefix, ext
 }
 
-func (l *RotateLogger) newBackupName() string {
+func (l *RotateWriter) newBackupName() string {
 	t := time.Now()
 	timestamp := t.Format(timeNameFormat)
 	prefix, ext := l.prefixAndExt()
 	return path.Join(l.dir(), prefix+timestamp+ext)
 }
 
-func (l *RotateLogger) oldLogFiles() ([]logInfo, error) {
+func (l *RotateWriter) oldLogFiles() ([]logInfo, error) {
 	files, err := os.ReadDir(l.dir())
 	if err != nil {
 		return nil, fmt.Errorf("can't read log file directory: %s", err)

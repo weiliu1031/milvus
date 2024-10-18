@@ -18,6 +18,7 @@ package querynodev2
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -64,7 +65,7 @@ func (suite *QueryNodeSuite) SetupTest() {
 	var err error
 	paramtable.Init()
 	suite.params = paramtable.Get()
-	suite.params.Save(suite.params.QueryNodeCfg.GCEnabled.Key, "false")
+	suite.params.Save(suite.params.CommonCfg.GCEnabled.Key, "false")
 
 	// mock factory
 	suite.factory = dependency.NewMockFactory(suite.T())
@@ -218,21 +219,25 @@ func (suite *QueryNodeSuite) TestStop() {
 
 	suite.node.manager = segments.NewManager()
 
-	schema := segments.GenTestCollectionSchema("test_stop", schemapb.DataType_Int64)
-	collection := segments.NewCollection(1, schema, nil, querypb.LoadType_LoadCollection)
+	schema := segments.GenTestCollectionSchema("test_stop", schemapb.DataType_Int64, true)
+	collection := segments.NewCollection(1, schema, nil, &querypb.LoadMetaInfo{
+		LoadType: querypb.LoadType_LoadCollection,
+	})
 	segment, err := segments.NewSegment(
+		context.Background(),
 		collection,
-		100,
-		10,
-		1,
-		"test_stop_channel",
 		segments.SegmentTypeSealed,
-		1, nil,
-		nil,
-		datapb.SegmentLevel_Legacy,
+		1,
+		&querypb.SegmentLoadInfo{
+			SegmentID:     100,
+			PartitionID:   10,
+			CollectionID:  1,
+			Level:         datapb.SegmentLevel_Legacy,
+			InsertChannel: fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", 1),
+		},
 	)
 	suite.NoError(err)
-	suite.node.manager.Segment.Put(segments.SegmentTypeSealed, segment)
+	suite.node.manager.Segment.Put(context.Background(), segments.SegmentTypeSealed, segment)
 	err = suite.node.Stop()
 	suite.NoError(err)
 	suite.True(suite.node.manager.Segment.Empty())

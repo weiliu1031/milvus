@@ -22,7 +22,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,7 +29,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/errors"
 	"github.com/gin-gonic/gin"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
@@ -66,10 +64,10 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	_ "github.com/milvus-io/milvus/internal/util/grpcclient"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -92,15 +90,15 @@ const apiPathPrefix = "/api/v1"
 
 // Server is the Proxy Server
 type Server struct {
+	milvuspb.UnimplementedMilvusServiceServer
+
 	ctx                context.Context
 	wg                 sync.WaitGroup
 	proxy              types.ProxyComponent
-	httpListener       net.Listener
-	grpcListener       net.Listener
-	tcpServer          cmux.CMux
 	httpServer         *http.Server
 	grpcInternalServer *grpc.Server
 	grpcExternalServer *grpc.Server
+	listenerManager    *listenerManager
 
 	serverID atomic.Int64
 
@@ -112,11 +110,11 @@ type Server struct {
 
 // NewServer create a Proxy server.
 func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error) {
-	var err error
 	server := &Server{
 		ctx: ctx,
 	}
 
+	var err error
 	server.proxy, err = proxy.NewProxy(server.ctx, factory)
 	if err != nil {
 		return nil, err
@@ -125,10 +123,6 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 }
 
 func authenticate(c *gin.Context) {
-	c.Set(httpserver.ContextUsername, "")
-	if !proxy.Params.CommonCfg.AuthorizationEnabled.GetAsBool() {
-		return
-	}
 	username, password, ok := httpserver.ParseUsernamePassword(c)
 	if ok {
 		if proxy.PasswordVerify(c, username, password) {
@@ -165,7 +159,7 @@ func (s *Server) registerHTTPServer() {
 	apiv1 := metricsGinHandler.Group(apiPathPrefix)
 	httpserver.NewHandlers(s.proxy).RegisterRoutesTo(apiv1)
 	management.Register(&management.Handler{
-		Path:        "/",
+		Path:        management.RootPath,
 		HandlerFunc: nil,
 		Handler:     metricsGinHandler.Handler(),
 	})
@@ -174,15 +168,65 @@ func (s *Server) registerHTTPServer() {
 func (s *Server) startHTTPServer(errChan chan error) {
 	defer s.wg.Done()
 	ginHandler := gin.New()
+	ginHandler.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		metrics.RestfulFunctionCall.WithLabelValues(
+			strconv.FormatInt(paramtable.GetNodeID(), 10), path,
+		).Inc()
+		if c.Request.ContentLength >= 0 {
+			metrics.RestfulReceiveBytes.WithLabelValues(
+				strconv.FormatInt(paramtable.GetNodeID(), 10), path,
+			).Add(float64(c.Request.ContentLength))
+		}
+		start := time.Now()
+
+		// Process request
+		c.Next()
+
+		latency := time.Since(start)
+		metrics.RestfulReqLatency.WithLabelValues(
+			strconv.FormatInt(paramtable.GetNodeID(), 10), path,
+		).Observe(float64(latency.Milliseconds()))
+
+		// see https://github.com/milvus-io/milvus/issues/35767, counter cannot add negative value
+		// when response is not written(say timeout/network broken), panicking may happen if not check
+		if size := c.Writer.Size(); size > 0 {
+			metrics.RestfulSendBytes.WithLabelValues(
+				strconv.FormatInt(paramtable.GetNodeID(), 10), path,
+			).Add(float64(c.Writer.Size()))
+		}
+	})
+
+	ginHandler.Use(accesslog.AccessLogMiddleware)
 	ginLogger := gin.LoggerWithConfig(gin.LoggerConfig{
 		SkipPaths: proxy.Params.ProxyCfg.GinLogSkipPaths.GetAsStrings(),
+		Formatter: func(param gin.LogFormatterParams) string {
+			if param.Latency > time.Minute {
+				param.Latency = param.Latency.Truncate(time.Second)
+			}
+			traceID, ok := param.Keys["traceID"]
+			if !ok {
+				traceID = ""
+			}
+
+			accesslog.SetHTTPParams(&param)
+			return fmt.Sprintf("[%v] [GIN] [%s] [traceID=%s] [code=%3d] [latency=%v] [client=%s] [method=%s] [error=%s]\n",
+				param.TimeStamp.Format("2006/01/02 15:04:05.000 Z07:00"),
+				param.Path,
+				traceID,
+				param.StatusCode,
+				param.Latency,
+				param.ClientIP,
+				param.Method,
+				param.ErrorMessage,
+			)
+		},
 	})
 	ginHandler.Use(ginLogger, gin.Recovery())
 	ginHandler.Use(func(c *gin.Context) {
 		_, err := strconv.ParseBool(c.Request.Header.Get(httpserver.HTTPHeaderAllowInt64))
 		if err != nil {
-			httpParams := &paramtable.Get().HTTPCfg
-			if httpParams.AcceptTypeAllowInt64.GetAsBool() {
+			if paramtable.Get().HTTPCfg.AcceptTypeAllowInt64.GetAsBool() {
 				c.Request.Header.Set(httpserver.HTTPHeaderAllowInt64, "true")
 			} else {
 				c.Request.Header.Set(httpserver.HTTPHeaderAllowInt64, "false")
@@ -197,12 +241,20 @@ func (s *Server) startHTTPServer(errChan chan error) {
 			return
 		}
 		c.Next()
-	}, authenticate)
+	})
+	ginHandler.Use(func(c *gin.Context) {
+		c.Set(httpserver.ContextUsername, "")
+	})
+	if proxy.Params.CommonCfg.AuthorizationEnabled.GetAsBool() {
+		ginHandler.Use(authenticate)
+	}
 	app := ginHandler.Group("/v1")
-	httpserver.NewHandlers(s.proxy).RegisterRoutesToV1(app)
+	httpserver.NewHandlersV1(s.proxy).RegisterRoutesToV1(app)
+	appV2 := ginHandler.Group("/v2/vectordb")
+	httpserver.NewHandlersV2(s.proxy).RegisterRoutesToV2(appV2)
 	s.httpServer = &http.Server{Handler: ginHandler, ReadHeaderTimeout: time.Second}
 	errChan <- nil
-	if err := s.httpServer.Serve(s.httpListener); err != nil && err != cmux.ErrServerClosed {
+	if err := s.httpServer.Serve(s.listenerManager.HTTPListener()); err != nil && err != cmux.ErrServerClosed {
 		log.Error("start Proxy http server to listen failed", zap.Error(err))
 		errChan <- err
 		return
@@ -210,17 +262,17 @@ func (s *Server) startHTTPServer(errChan chan error) {
 	log.Info("Proxy http server exited")
 }
 
-func (s *Server) startInternalRPCServer(grpcInternalPort int, errChan chan error) {
+func (s *Server) startInternalRPCServer(errChan chan error) {
 	s.wg.Add(1)
-	go s.startInternalGrpc(grpcInternalPort, errChan)
+	go s.startInternalGrpc(errChan)
 }
 
-func (s *Server) startExternalRPCServer(grpcExternalPort int, errChan chan error) {
+func (s *Server) startExternalRPCServer(errChan chan error) {
 	s.wg.Add(1)
-	go s.startExternalGrpc(grpcExternalPort, errChan)
+	go s.startExternalGrpc(errChan)
 }
 
-func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
+func (s *Server) startExternalGrpc(errChan chan error) {
 	defer s.wg.Done()
 	Params := &paramtable.Get().ProxyGrpcServerCfg
 	kaep := keepalive.EnforcementPolicy{
@@ -235,19 +287,16 @@ func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 
 	limiter, err := s.proxy.GetRateLimiter()
 	if err != nil {
-		log.Error("Get proxy rate limiter failed", zap.Int("port", grpcPort), zap.Error(err))
+		log.Error("Get proxy rate limiter failed", zap.Error(err))
 		errChan <- err
 		return
 	}
-	log.Debug("Get proxy rate limiter done", zap.Int("port", grpcPort))
-
-	opts := tracer.GetInterceptorOpts()
+	log.Debug("Get proxy rate limiter done")
 
 	var unaryServerOption grpc.ServerOption
 	if enableCustomInterceptor {
 		unaryServerOption = grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
 			accesslog.UnaryAccessLogInterceptor,
-			otelgrpc.UnaryServerInterceptor(opts...),
 			grpc_auth.UnaryServerInterceptor(proxy.AuthenticationInterceptor),
 			proxy.DatabaseInterceptor(),
 			proxy.UnaryServerHookInterceptor(),
@@ -268,12 +317,23 @@ func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize.GetAsInt()),
 		grpc.MaxSendMsgSize(Params.ServerMaxSendSize.GetAsInt()),
 		unaryServerOption,
+		grpc.StatsHandler(tracer.GetDynamicOtelGrpcServerStatsHandler()),
+		grpc.StatsHandler(metrics.NewGRPCSizeStatsHandler().
+			// both inbound and outbound
+			WithTargetMethods(
+				milvuspb.MilvusService_Search_FullMethodName,
+				milvuspb.MilvusService_HybridSearch_FullMethodName,
+				milvuspb.MilvusService_Query_FullMethodName,
+			).
+			// inbound only
+			WithInboundRecord(milvuspb.MilvusService_Insert_FullMethodName,
+				milvuspb.MilvusService_Delete_FullMethodName,
+				milvuspb.MilvusService_Upsert_FullMethodName)),
 	}
 
 	if Params.TLSMode.GetAsInt() == 1 {
 		creds, err := credentials.NewServerTLSFromFile(Params.ServerPemPath.GetValue(), Params.ServerKeyPath.GetValue())
 		if err != nil {
-			log.Warn("proxy can't create creds", zap.Error(err))
 			log.Warn("proxy can't create creds", zap.Error(err))
 			errChan <- err
 			return
@@ -322,7 +382,7 @@ func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 		zap.Any("enforcement policy", kaep),
 		zap.Any("server parameters", kasp))
 
-	if err := s.grpcExternalServer.Serve(s.grpcListener); err != nil && err != cmux.ErrServerClosed {
+	if err := s.grpcExternalServer.Serve(s.listenerManager.ExternalGrpcListener()); err != nil && err != cmux.ErrServerClosed {
 		log.Error("failed to serve on Proxy's listener", zap.Error(err))
 		errChan <- err
 		return
@@ -330,7 +390,7 @@ func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 	log.Info("Proxy external grpc server exited")
 }
 
-func (s *Server) startInternalGrpc(grpcPort int, errChan chan error) {
+func (s *Server) startInternalGrpc(errChan chan error) {
 	defer s.wg.Done()
 	Params := &paramtable.Get().ProxyGrpcServerCfg
 	kaep := keepalive.EnforcementPolicy{
@@ -342,15 +402,6 @@ func (s *Server) startInternalGrpc(grpcPort int, errChan chan error) {
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
-
-	log.Info("Proxy internal server listen on tcp", zap.Int("port", grpcPort))
-	lis, err := net.Listen("tcp", ":"+strconv.Itoa(grpcPort))
-	if err != nil {
-		log.Warn("Proxy internal server failed to listen on", zap.Error(err), zap.Int("port", grpcPort))
-		errChan <- err
-		return
-	}
-	log.Info("Proxy internal server already listen on tcp", zap.Int("port", grpcPort))
 
 	opts := tracer.GetInterceptorOpts()
 	s.grpcInternalServer = grpc.NewServer(
@@ -386,7 +437,7 @@ func (s *Server) startInternalGrpc(grpcPort int, errChan chan error) {
 		zap.Any("enforcement policy", kaep),
 		zap.Any("server parameters", kasp))
 
-	if err := s.grpcInternalServer.Serve(lis); err != nil {
+	if err := s.grpcInternalServer.Serve(s.listenerManager.InternalGrpcListener()); err != nil {
 		log.Error("failed to internal serve on Proxy's listener", zap.Error(err))
 		errChan <- err
 		return
@@ -394,55 +445,49 @@ func (s *Server) startInternalGrpc(grpcPort int, errChan chan error) {
 	log.Info("Proxy internal grpc server exited")
 }
 
+func (s *Server) Prepare() error {
+	listenerManager, err := newListenerManager()
+	if err != nil {
+		return err
+	}
+	s.listenerManager = listenerManager
+	return nil
+}
+
 // Start start the Proxy Server
 func (s *Server) Run() error {
-	log.Debug("init Proxy server")
+	log.Info("init Proxy server")
 	if err := s.init(); err != nil {
 		log.Warn("init Proxy server failed", zap.Error(err))
 		return err
 	}
-	log.Debug("init Proxy server done")
+	log.Info("init Proxy server done")
 
-	log.Debug("start Proxy server")
+	log.Info("start Proxy server")
 	if err := s.start(); err != nil {
 		log.Warn("start Proxy server failed", zap.Error(err))
 		return err
 	}
-	log.Debug("start Proxy server done")
-
-	if s.tcpServer != nil {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			if err := s.tcpServer.Serve(); err != nil && !errors.Is(err, net.ErrClosed) {
-				log.Warn("Proxy server for tcp port failed", zap.Error(err))
-				return
-			}
-			log.Info("Proxy tcp server exited")
-		}()
-	}
+	log.Info("start Proxy server done")
 	return nil
 }
 
 func (s *Server) init() error {
 	etcdConfig := &paramtable.Get().EtcdCfg
 	Params := &paramtable.Get().ProxyGrpcServerCfg
-	log.Debug("Proxy init service's parameter table done")
+	log.Info("Proxy init service's parameter table done")
 	HTTPParams := &paramtable.Get().HTTPCfg
-	log.Debug("Proxy init http server's parameter table done")
+	log.Info("Proxy init http server's parameter table done")
 
-	if !funcutil.CheckPortAvailable(Params.Port.GetAsInt()) {
-		paramtable.Get().Save(Params.Port.Key, fmt.Sprintf("%d", funcutil.GetAvailablePort()))
-		log.Warn("Proxy get available port when init", zap.Int("Port", Params.Port.GetAsInt()))
-	}
-
-	log.Debug("init Proxy's parameter table done", zap.String("internal address", Params.GetInternalAddress()), zap.String("external address", Params.GetAddress()))
-
+	accesslog.InitAccessLogger(paramtable.Get())
 	serviceName := fmt.Sprintf("Proxy ip: %s, port: %d", Params.IP, Params.Port.GetAsInt())
-	log.Debug("init Proxy's tracer done", zap.String("service name", serviceName))
+	log.Info("init Proxy's tracer done", zap.String("service name", serviceName))
 
-	etcdCli, err := etcd.GetEtcdClient(
+	etcdCli, err := etcd.CreateEtcdClient(
 		etcdConfig.UseEmbedEtcd.GetAsBool(),
+		etcdConfig.EtcdEnableAuth.GetAsBool(),
+		etcdConfig.EtcdAuthUserName.GetValue(),
+		etcdConfig.EtcdAuthPassword.GetValue(),
 		etcdConfig.EtcdUseSSL.GetAsBool(),
 		etcdConfig.Endpoints.GetAsStrings(),
 		etcdConfig.EtcdTLSCert.GetValue(),
@@ -455,91 +500,18 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.proxy.SetEtcdClient(s.etcdCli)
-	s.proxy.SetAddress(Params.GetInternalAddress())
+	s.proxy.SetAddress(s.listenerManager.internalGrpcListener.Address())
 
 	errChan := make(chan error, 1)
 	{
-		s.startInternalRPCServer(Params.InternalPort.GetAsInt(), errChan)
+		s.startInternalRPCServer(errChan)
 		if err := <-errChan; err != nil {
 			log.Error("failed to create internal rpc server", zap.Error(err))
 			return err
 		}
 	}
 	{
-		log.Info("Proxy server listen on tcp", zap.Int("port", Params.Port.GetAsInt()))
-		var lis net.Listener
-		var listenErr error
-
-		log.Info("Proxy server already listen on tcp", zap.Int("port", Params.Port.GetAsInt()))
-		lis, listenErr = net.Listen("tcp", ":"+strconv.Itoa(Params.Port.GetAsInt()))
-		if listenErr != nil {
-			log.Error("Proxy server(grpc/http) failed to listen on", zap.Error(err), zap.Int("port", Params.Port.GetAsInt()))
-			return err
-		}
-
-		if HTTPParams.Enabled.GetAsBool() && Params.TLSMode.GetAsInt() == 0 &&
-			(HTTPParams.Port.GetValue() == "" || HTTPParams.Port.GetAsInt() == Params.Port.GetAsInt()) {
-			s.tcpServer = cmux.New(lis)
-			s.grpcListener = s.tcpServer.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
-			s.httpListener = s.tcpServer.Match(cmux.Any())
-		} else {
-			s.grpcListener = lis
-		}
-
-		if HTTPParams.Enabled.GetAsBool() && HTTPParams.Port.GetValue() != "" && HTTPParams.Port.GetAsInt() != Params.Port.GetAsInt() {
-			if Params.TLSMode.GetAsInt() == 0 {
-				s.httpListener, listenErr = net.Listen("tcp", ":"+strconv.Itoa(HTTPParams.Port.GetAsInt()))
-				if listenErr != nil {
-					log.Error("Proxy server(grpc/http) failed to listen on", zap.Error(err), zap.Int("port", Params.Port.GetAsInt()))
-					return err
-				}
-			} else if Params.TLSMode.GetAsInt() == 1 {
-				creds, err := tls.LoadX509KeyPair(Params.ServerPemPath.GetValue(), Params.ServerKeyPath.GetValue())
-				if err != nil {
-					log.Error("proxy can't create creds", zap.Error(err))
-					return err
-				}
-				s.httpListener, listenErr = tls.Listen("tcp", ":"+strconv.Itoa(HTTPParams.Port.GetAsInt()), &tls.Config{
-					Certificates: []tls.Certificate{creds},
-				})
-				if listenErr != nil {
-					log.Error("Proxy server(grpc/http) failed to listen on", zap.Error(err), zap.Int("port", Params.Port.GetAsInt()))
-					return listenErr
-				}
-			} else if Params.TLSMode.GetAsInt() == 2 {
-				cert, err := tls.LoadX509KeyPair(Params.ServerPemPath.GetValue(), Params.ServerKeyPath.GetValue())
-				if err != nil {
-					log.Error("proxy cant load x509 key pair", zap.Error(err))
-					return err
-				}
-
-				certPool := x509.NewCertPool()
-				rootBuf, err := storage.ReadFile(Params.CaPemPath.GetValue())
-				if err != nil {
-					log.Error("failed read ca pem", zap.Error(err))
-					return err
-				}
-				if !certPool.AppendCertsFromPEM(rootBuf) {
-					log.Warn("fail to append ca to cert")
-					return fmt.Errorf("fail to append ca to cert")
-				}
-
-				tlsConf := &tls.Config{
-					ClientAuth:   tls.RequireAndVerifyClientCert,
-					Certificates: []tls.Certificate{cert},
-					ClientCAs:    certPool,
-					MinVersion:   tls.VersionTLS13,
-				}
-				s.httpListener, listenErr = tls.Listen("tcp", ":"+strconv.Itoa(HTTPParams.Port.GetAsInt()), tlsConf)
-				if listenErr != nil {
-					log.Error("Proxy server(grpc/http) failed to listen on", zap.Error(err), zap.Int("port", Params.Port.GetAsInt()))
-					return listenErr
-				}
-			}
-		}
-	}
-	{
-		s.startExternalRPCServer(Params.Port.GetAsInt(), errChan)
+		s.startExternalRPCServer(errChan)
 		if err := <-errChan; err != nil {
 			log.Error("failed to create external rpc server", zap.Error(err))
 			return err
@@ -646,7 +618,7 @@ func (s *Server) start() error {
 		return err
 	}
 
-	if s.httpListener != nil {
+	if s.listenerManager.HTTPListener() != nil {
 		log.Info("start Proxy http server")
 		errChan := make(chan error, 1)
 		s.wg.Add(1)
@@ -661,9 +633,17 @@ func (s *Server) start() error {
 }
 
 // Stop stop the Proxy Server
-func (s *Server) Stop() error {
-	Params := &paramtable.Get().ProxyGrpcServerCfg
-	log.Debug("Proxy stop", zap.String("internal address", Params.GetInternalAddress()), zap.String("external address", Params.GetInternalAddress()))
+func (s *Server) Stop() (err error) {
+	logger := log.With()
+	if s.listenerManager != nil {
+		logger = log.With(
+			zap.String("internal address", s.listenerManager.internalGrpcListener.Address()),
+			zap.String("external address", s.listenerManager.externalGrpcListener.Address()))
+	}
+	logger.Info("Proxy stopping")
+	defer func() {
+		logger.Info("Proxy stopped", zap.Error(err))
+	}()
 
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
@@ -687,28 +667,23 @@ func (s *Server) Stop() error {
 			s.httpServer.Close()
 		}
 
-		// close cmux server, it isn't a synchronized operation.
-		// Note that:
-		// 1. all listeners can be closed after closing cmux server that has the root listener, it will automatically
-		//    propagate the closure to all the listeners derived from it, but it doesn't provide a graceful shutdown
-		//    grpc server ideally.
-		// 2. avoid resource leak also need to close cmux after grpc and http listener closed.
-		if s.tcpServer != nil {
-			log.Info("Proxy stop tcp server...")
-			s.tcpServer.Close()
-		}
-
 		if s.grpcInternalServer != nil {
 			log.Info("Proxy stop internal grpc server")
 			utils.GracefulStopGRPCServer(s.grpcInternalServer)
+		}
+
+		if s.listenerManager != nil {
+			s.listenerManager.Close()
 		}
 	}()
 	gracefulWg.Wait()
 
 	s.wg.Wait()
 
-	err := s.proxy.Stop()
+	logger.Info("internal server[proxy] start to stop")
+	err = s.proxy.Stop()
 	if err != nil {
+		log.Error("failed to close proxy", zap.Error(err))
 		return err
 	}
 
@@ -821,6 +796,11 @@ func (s *Server) CreateIndex(ctx context.Context, request *milvuspb.CreateIndexR
 	return s.proxy.CreateIndex(ctx, request)
 }
 
+// AlterIndex notifies Proxy to alter index
+func (s *Server) AlterIndex(ctx context.Context, request *milvuspb.AlterIndexRequest) (*commonpb.Status, error) {
+	return s.proxy.AlterIndex(ctx, request)
+}
+
 // DropIndex notifies Proxy to drop index
 func (s *Server) DropIndex(ctx context.Context, request *milvuspb.DropIndexRequest) (*commonpb.Status, error) {
 	return s.proxy.DropIndex(ctx, request)
@@ -863,6 +843,10 @@ func (s *Server) Upsert(ctx context.Context, request *milvuspb.UpsertRequest) (*
 
 func (s *Server) Search(ctx context.Context, request *milvuspb.SearchRequest) (*milvuspb.SearchResults, error) {
 	return s.proxy.Search(ctx, request)
+}
+
+func (s *Server) HybridSearch(ctx context.Context, request *milvuspb.HybridSearchRequest) (*milvuspb.SearchResults, error) {
+	return s.proxy.HybridSearch(ctx, request)
 }
 
 func (s *Server) Flush(ctx context.Context, request *milvuspb.FlushRequest) (*milvuspb.FlushResponse, error) {
@@ -927,16 +911,14 @@ func (s *Server) AlterAlias(ctx context.Context, request *milvuspb.AlterAliasReq
 	return s.proxy.AlterAlias(ctx, request)
 }
 
+// DescribeAlias show the alias-collection relation for the specified alias.
 func (s *Server) DescribeAlias(ctx context.Context, request *milvuspb.DescribeAliasRequest) (*milvuspb.DescribeAliasResponse, error) {
-	return &milvuspb.DescribeAliasResponse{
-		Status: merr.Status(merr.WrapErrServiceUnavailable("DescribeAlias unimplemented")),
-	}, nil
+	return s.proxy.DescribeAlias(ctx, request)
 }
 
+// ListAliases list all the alias for the specified db, collection.
 func (s *Server) ListAliases(ctx context.Context, request *milvuspb.ListAliasesRequest) (*milvuspb.ListAliasesResponse, error) {
-	return &milvuspb.ListAliasesResponse{
-		Status: merr.Status(merr.WrapErrServiceUnavailable("ListAliases unimplemented")),
-	}, nil
+	return s.proxy.ListAliases(ctx, request)
 }
 
 // GetCompactionState gets the state of a compaction
@@ -1069,6 +1051,14 @@ func (s *Server) SelectGrant(ctx context.Context, req *milvuspb.SelectGrantReque
 	return s.proxy.SelectGrant(ctx, req)
 }
 
+func (s *Server) BackupRBAC(ctx context.Context, req *milvuspb.BackupRBACMetaRequest) (*milvuspb.BackupRBACMetaResponse, error) {
+	return s.proxy.BackupRBAC(ctx, req)
+}
+
+func (s *Server) RestoreRBAC(ctx context.Context, req *milvuspb.RestoreRBACMetaRequest) (*commonpb.Status, error) {
+	return s.proxy.RestoreRBAC(ctx, req)
+}
+
 func (s *Server) RefreshPolicyInfoCache(ctx context.Context, req *proxypb.RefreshPolicyInfoCacheRequest) (*commonpb.Status, error) {
 	return s.proxy.RefreshPolicyInfoCache(ctx, req)
 }
@@ -1101,6 +1091,10 @@ func (s *Server) RenameCollection(ctx context.Context, req *milvuspb.RenameColle
 
 func (s *Server) CreateResourceGroup(ctx context.Context, req *milvuspb.CreateResourceGroupRequest) (*commonpb.Status, error) {
 	return s.proxy.CreateResourceGroup(ctx, req)
+}
+
+func (s *Server) UpdateResourceGroups(ctx context.Context, req *milvuspb.UpdateResourceGroupsRequest) (*commonpb.Status, error) {
+	return s.proxy.UpdateResourceGroups(ctx, req)
 }
 
 func (s *Server) DropResourceGroup(ctx context.Context, req *milvuspb.DropResourceGroupRequest) (*commonpb.Status, error) {
@@ -1161,4 +1155,28 @@ func (s *Server) AllocTimestamp(ctx context.Context, req *milvuspb.AllocTimestam
 
 func (s *Server) ReplicateMessage(ctx context.Context, req *milvuspb.ReplicateMessageRequest) (*milvuspb.ReplicateMessageResponse, error) {
 	return s.proxy.ReplicateMessage(ctx, req)
+}
+
+func (s *Server) ImportV2(ctx context.Context, req *internalpb.ImportRequest) (*internalpb.ImportResponse, error) {
+	return s.proxy.ImportV2(ctx, req)
+}
+
+func (s *Server) GetImportProgress(ctx context.Context, req *internalpb.GetImportProgressRequest) (*internalpb.GetImportProgressResponse, error) {
+	return s.proxy.GetImportProgress(ctx, req)
+}
+
+func (s *Server) ListImports(ctx context.Context, req *internalpb.ListImportsRequest) (*internalpb.ListImportsResponse, error) {
+	return s.proxy.ListImports(ctx, req)
+}
+
+func (s *Server) AlterDatabase(ctx context.Context, req *milvuspb.AlterDatabaseRequest) (*commonpb.Status, error) {
+	return s.proxy.AlterDatabase(ctx, req)
+}
+
+func (s *Server) InvalidateShardLeaderCache(ctx context.Context, req *proxypb.InvalidateShardLeaderCacheRequest) (*commonpb.Status, error) {
+	return s.proxy.InvalidateShardLeaderCache(ctx, req)
+}
+
+func (s *Server) DescribeDatabase(ctx context.Context, req *milvuspb.DescribeDatabaseRequest) (*milvuspb.DescribeDatabaseResponse, error) {
+	return s.proxy.DescribeDatabase(ctx, req)
 }

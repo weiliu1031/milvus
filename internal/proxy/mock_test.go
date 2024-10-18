@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -28,11 +27,12 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/pkg/mq/common"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/testutils"
 	"github.com/milvus-io/milvus/pkg/util/uniquegenerator"
 )
 
@@ -96,11 +96,16 @@ func newMockIDAllocatorInterface() allocator.Interface {
 }
 
 type mockTask struct {
+	baseTask
 	*TaskCondition
 	id    UniqueID
 	name  string
 	tType commonpb.MsgType
 	ts    Timestamp
+}
+
+func (m *mockTask) CanSkipAllocTimestamp() bool {
+	return false
 }
 
 func (m *mockTask) TraceCtx() context.Context {
@@ -253,7 +258,7 @@ func (ms *simpleMockMsgStream) Chan() <-chan *msgstream.MsgPack {
 func (ms *simpleMockMsgStream) AsProducer(channels []string) {
 }
 
-func (ms *simpleMockMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error {
+func (ms *simpleMockMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position common.SubscriptionInitialPosition) error {
 	return nil
 }
 
@@ -294,7 +299,7 @@ func (ms *simpleMockMsgStream) GetProduceChannels() []string {
 	return nil
 }
 
-func (ms *simpleMockMsgStream) Seek(ctx context.Context, offset []*msgstream.MsgPosition) error {
+func (ms *simpleMockMsgStream) Seek(ctx context.Context, msgPositions []*msgstream.MsgPosition, includeCurrentMsg bool) error {
 	return nil
 }
 
@@ -339,327 +344,28 @@ func newSimpleMockMsgStreamFactory() *simpleMockMsgStreamFactory {
 }
 
 func generateFieldData(dataType schemapb.DataType, fieldName string, numRows int) *schemapb.FieldData {
-	fieldData := &schemapb.FieldData{
-		Type:      dataType,
-		FieldName: fieldName,
+	if dataType < 100 {
+		return testutils.GenerateScalarFieldData(dataType, fieldName, numRows)
 	}
-	switch dataType {
-	case schemapb.DataType_Bool:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_BoolData{
-					BoolData: &schemapb.BoolArray{
-						Data: generateBoolArray(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Int32:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_IntData{
-					IntData: &schemapb.IntArray{
-						Data: generateInt32Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Int64:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_LongData{
-					LongData: &schemapb.LongArray{
-						Data: generateInt64Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Float:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_FloatData{
-					FloatData: &schemapb.FloatArray{
-						Data: generateFloat32Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Double:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_DoubleData{
-					DoubleData: &schemapb.DoubleArray{
-						Data: generateFloat64Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_VarChar:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_StringData{
-					StringData: &schemapb.StringArray{
-						Data: generateVarCharArray(numRows, maxTestStringLen),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_FloatVector:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Vectors{
-			Vectors: &schemapb.VectorField{
-				Dim: int64(testVecDim),
-				Data: &schemapb.VectorField_FloatVector{
-					FloatVector: &schemapb.FloatArray{
-						Data: generateFloatVectors(numRows, testVecDim),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_BinaryVector:
-		fieldData.FieldName = fieldName
-		fieldData.Field = &schemapb.FieldData_Vectors{
-			Vectors: &schemapb.VectorField{
-				Dim: int64(testVecDim),
-				Data: &schemapb.VectorField_BinaryVector{
-					BinaryVector: generateBinaryVectors(numRows, testVecDim),
-				},
-			},
-		}
-	default:
-		// TODO::
-	}
-
-	return fieldData
-}
-
-func generateBoolArray(numRows int) []bool {
-	ret := make([]bool, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, rand.Int()%2 == 0)
-	}
-	return ret
-}
-
-func generateInt8Array(numRows int) []int8 {
-	ret := make([]int8, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, int8(rand.Int()))
-	}
-	return ret
-}
-
-func generateInt16Array(numRows int) []int16 {
-	ret := make([]int16, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, int16(rand.Int()))
-	}
-	return ret
-}
-
-func generateInt32Array(numRows int) []int32 {
-	ret := make([]int32, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, int32(rand.Int()))
-	}
-	return ret
-}
-
-func generateInt64Array(numRows int) []int64 {
-	ret := make([]int64, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, int64(rand.Int()))
-	}
-	return ret
-}
-
-func generateUint64Array(numRows int) []uint64 {
-	ret := make([]uint64, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, rand.Uint64())
-	}
-	return ret
-}
-
-func generateFloat32Array(numRows int) []float32 {
-	ret := make([]float32, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, rand.Float32())
-	}
-	return ret
-}
-
-func generateFloat64Array(numRows int) []float64 {
-	ret := make([]float64, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, rand.Float64())
-	}
-	return ret
-}
-
-func generateFloatVectors(numRows, dim int) []float32 {
-	total := numRows * dim
-	ret := make([]float32, 0, total)
-	for i := 0; i < total; i++ {
-		ret = append(ret, rand.Float32())
-	}
-	return ret
-}
-
-func generateBinaryVectors(numRows, dim int) []byte {
-	total := (numRows * dim) / 8
-	ret := make([]byte, total)
-	_, err := rand.Read(ret)
-	if err != nil {
-		panic(err)
-	}
-	return ret
-}
-
-func generateVarCharArray(numRows int, maxLen int) []string {
-	ret := make([]string, numRows)
-	for i := 0; i < numRows; i++ {
-		ret[i] = funcutil.RandomString(rand.Intn(maxLen))
-	}
-
-	return ret
+	return testutils.GenerateVectorFieldData(dataType, fieldName, numRows, testVecDim)
 }
 
 func newScalarFieldData(fieldSchema *schemapb.FieldSchema, fieldName string, numRows int) *schemapb.FieldData {
-	ret := &schemapb.FieldData{
-		Type:      fieldSchema.DataType,
-		FieldName: fieldName,
-		Field:     nil,
-	}
-
-	switch fieldSchema.DataType {
-	case schemapb.DataType_Bool:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_BoolData{
-					BoolData: &schemapb.BoolArray{
-						Data: generateBoolArray(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Int8:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_IntData{
-					IntData: &schemapb.IntArray{
-						Data: generateInt32Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Int16:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_IntData{
-					IntData: &schemapb.IntArray{
-						Data: generateInt32Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Int32:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_IntData{
-					IntData: &schemapb.IntArray{
-						Data: generateInt32Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Int64:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_LongData{
-					LongData: &schemapb.LongArray{
-						Data: generateInt64Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Float:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_FloatData{
-					FloatData: &schemapb.FloatArray{
-						Data: generateFloat32Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_Double:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_DoubleData{
-					DoubleData: &schemapb.DoubleArray{
-						Data: generateFloat64Array(numRows),
-					},
-				},
-			},
-		}
-	case schemapb.DataType_VarChar:
-		ret.Field = &schemapb.FieldData_Scalars{
-			Scalars: &schemapb.ScalarField{
-				Data: &schemapb.ScalarField_StringData{
-					StringData: &schemapb.StringArray{
-						Data: generateVarCharArray(numRows, testMaxVarCharLength),
-					},
-				},
-			},
-		}
-	}
-
-	return ret
+	return testutils.GenerateScalarFieldData(fieldSchema.GetDataType(), fieldName, numRows)
 }
 
 func newFloatVectorFieldData(fieldName string, numRows, dim int) *schemapb.FieldData {
-	return &schemapb.FieldData{
-		Type:      schemapb.DataType_FloatVector,
-		FieldName: fieldName,
-		Field: &schemapb.FieldData_Vectors{
-			Vectors: &schemapb.VectorField{
-				Dim: int64(dim),
-				Data: &schemapb.VectorField_FloatVector{
-					FloatVector: &schemapb.FloatArray{
-						Data: generateFloatVectors(numRows, dim),
-					},
-				},
-			},
-		},
-	}
+	return testutils.NewFloatVectorFieldData(fieldName, numRows, dim)
 }
 
 func newBinaryVectorFieldData(fieldName string, numRows, dim int) *schemapb.FieldData {
-	return &schemapb.FieldData{
-		Type:      schemapb.DataType_BinaryVector,
-		FieldName: fieldName,
-		Field: &schemapb.FieldData_Vectors{
-			Vectors: &schemapb.VectorField{
-				Dim: int64(dim),
-				Data: &schemapb.VectorField_BinaryVector{
-					BinaryVector: generateBinaryVectors(numRows, dim),
-				},
-			},
-		},
-	}
+	return testutils.NewBinaryVectorFieldData(fieldName, numRows, dim)
 }
 
-func generateHashKeys(numRows int) []uint32 {
-	ret := make([]uint32, 0, numRows)
-	for i := 0; i < numRows; i++ {
-		ret = append(ret, rand.Uint32())
-	}
-	return ret
+func newFloat16VectorFieldData(fieldName string, numRows, dim int) *schemapb.FieldData {
+	return testutils.NewFloat16VectorFieldData(fieldName, numRows, dim)
+}
+
+func newBFloat16VectorFieldData(fieldName string, numRows, dim int) *schemapb.FieldData {
+	return testutils.NewBFloat16VectorFieldData(fieldName, numRows, dim)
 }

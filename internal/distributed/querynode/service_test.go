@@ -91,9 +91,12 @@ func Test_NewServer(t *testing.T) {
 	mockQN.EXPECT().SetAddress(mock.Anything).Maybe()
 	mockQN.EXPECT().UpdateStateCode(mock.Anything).Maybe()
 	mockQN.EXPECT().Init().Return(nil).Maybe()
+	mockQN.EXPECT().GetNodeID().Return(2).Maybe()
 	server.querynode = mockQN
 
 	t.Run("Run", func(t *testing.T) {
+		err = server.Prepare()
+		assert.NoError(t, err)
 		err = server.Run()
 		assert.NoError(t, err)
 	})
@@ -285,7 +288,10 @@ func Test_Run(t *testing.T) {
 	mockQN.EXPECT().SetAddress(mock.Anything).Maybe()
 	mockQN.EXPECT().UpdateStateCode(mock.Anything).Maybe()
 	mockQN.EXPECT().Init().Return(nil).Maybe()
+	mockQN.EXPECT().GetNodeID().Return(2).Maybe()
 	server.querynode = mockQN
+	err = server.Prepare()
+	assert.NoError(t, err)
 	err = server.Run()
 	assert.Error(t, err)
 

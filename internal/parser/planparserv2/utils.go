@@ -259,14 +259,6 @@ func combineArrayLengthExpr(op planpb.OpType, arithOp planpb.ArithOpType, column
 }
 
 func handleBinaryArithExpr(op planpb.OpType, arithExpr *planpb.BinaryArithExpr, valueExpr *planpb.ValueExpr) (*planpb.Expr, error) {
-	switch op {
-	case planpb.OpType_Equal, planpb.OpType_NotEqual:
-		break
-	default:
-		// TODO: enable this after execution is ready.
-		return nil, fmt.Errorf("%s is not supported in execution backend", op)
-	}
-
 	leftExpr, leftValue := arithExpr.Left.GetColumnExpr(), arithExpr.Left.GetValueExpr()
 	rightExpr, rightValue := arithExpr.Right.GetColumnExpr(), arithExpr.Right.GetValueExpr()
 	arithOp := arithExpr.GetOp()
@@ -417,10 +409,17 @@ func canBeCompared(left, right *ExprWithType) bool {
 	return canBeComparedDataType(left.dataType, getArrayElementType(right))
 }
 
+func getDataType(expr *ExprWithType) string {
+	if typeutil.IsArrayType(expr.dataType) {
+		return fmt.Sprintf("%s[%s]", expr.dataType, getArrayElementType(expr))
+	}
+	return expr.dataType.String()
+}
+
 func HandleCompare(op int, left, right *ExprWithType) (*planpb.Expr, error) {
 	if !canBeCompared(left, right) {
-		return nil, fmt.Errorf("comparisons between %s, element_type: %s and %s elementType: %s are not supported",
-			left.dataType, getArrayElementType(left), right.dataType, getArrayElementType(right))
+		return nil, fmt.Errorf("comparisons between %s and %s are not supported",
+			getDataType(left), getDataType(right))
 	}
 
 	cmpOp := cmpOpMap[op]
@@ -539,4 +538,26 @@ func isIntegerColumn(col *planpb.ColumnInfo) bool {
 	return typeutil.IsIntegerType(col.GetDataType()) ||
 		(typeutil.IsArrayType(col.GetDataType()) && typeutil.IsIntegerType(col.GetElementType())) ||
 		typeutil.IsJSONType(col.GetDataType())
+}
+
+func isEscapeCh(ch uint8) bool {
+	return ch == '\\' || ch == 'n' || ch == 't' || ch == 'r' || ch == 'f' || ch == '"' || ch == '\''
+}
+
+func formatUnicode(r uint32) string {
+	return string([]byte{
+		'\\', 'u',
+		hexDigit(r >> 12),
+		hexDigit(r >> 8),
+		hexDigit(r >> 4),
+		hexDigit(r),
+	})
+}
+
+func hexDigit(n uint32) byte {
+	n &= 0xf
+	if n < 10 {
+		return byte(n) + '0'
+	}
+	return byte(n-10) + 'a'
 }

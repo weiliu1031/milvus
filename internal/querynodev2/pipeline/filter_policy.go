@@ -17,8 +17,6 @@
 package pipeline
 
 import (
-	"fmt"
-
 	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
@@ -49,19 +47,7 @@ func InsertOutOfTarget(n *filterNode, c *Collection, msg *InsertMsg) error {
 		return merr.WrapErrParameterInvalid(msg.GetCollectionID(), c.ID(), "msg not target because of collection")
 	}
 
-	// all growing will be be in-memory to support dynamic partition load/release
-	return nil
-}
-
-func InsertExcluded(n *filterNode, c *Collection, msg *InsertMsg) error {
-	segInfo, ok := n.excludedSegments.Get(msg.SegmentID)
-	if !ok {
-		return nil
-	}
-	if msg.EndTimestamp <= segInfo.GetDmlPosition().GetTimestamp() {
-		m := fmt.Sprintf("Segment excluded, id: %d", msg.GetSegmentID())
-		return merr.WrapErrSegmentLack(msg.GetSegmentID(), m)
-	}
+	// all growing will be in-memory to support dynamic partition load/release
 	return nil
 }
 
@@ -85,6 +71,6 @@ func DeleteOutOfTarget(n *filterNode, c *Collection, msg *DeleteMsg) error {
 		return merr.WrapErrParameterInvalid(msg.GetCollectionID(), c.ID(), "msg not target because of collection")
 	}
 
-	// all growing will be be in-memory to support dynamic partition load/release
+	// all growing will be in-memory to support dynamic partition load/release
 	return nil
 }

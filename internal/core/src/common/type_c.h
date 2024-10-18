@@ -22,11 +22,13 @@
 extern "C" {
 #endif
 
+// WARNING: do not change the enum value of Growing and Sealed
 enum SegmentType {
     Invalid = 0,
     Growing = 1,
     Sealed = 2,
     Indexing = 3,
+    ChunkedSealed = 4,
 };
 
 typedef enum SegmentType SegmentType;
@@ -51,6 +53,8 @@ enum CDataType {
     BinaryVector = 100,
     FloatVector = 101,
     Float16Vector = 102,
+    BFloat16Vector = 103,
+    SparseFloatVector = 104,
 };
 typedef enum CDataType CDataType;
 
@@ -85,16 +89,29 @@ typedef struct CStorageConfig {
     const char* log_level;
     const char* region;
     bool useSSL;
+    const char* sslCACert;
     bool useIAM;
     bool useVirtualHost;
     int64_t requestTimeoutMs;
+    const char* gcp_credential_json;
 } CStorageConfig;
+
+typedef struct CMmapConfig {
+    const char* cache_read_ahead_policy;
+    const char* mmap_path;
+    uint64_t disk_limit;
+    uint64_t fix_file_size;
+    bool growing_enable_mmap;
+    bool scalar_index_enable_mmap;
+} CMmapConfig;
 
 typedef struct CTraceConfig {
     const char* exporter;
-    int sampleFraction;
+    float sampleFraction;
     const char* jaegerURL;
     const char* otlpEndpoint;
+    const char* otlpMethod;
+    bool oltpSecure;
 
     int nodeID;
 } CTraceConfig;
@@ -102,7 +119,7 @@ typedef struct CTraceConfig {
 typedef struct CTraceContext {
     const uint8_t* traceID;
     const uint8_t* spanID;
-    uint8_t flag;
+    uint8_t traceFlags;
 } CTraceContext;
 
 typedef struct CNewSegmentResult {

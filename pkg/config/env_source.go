@@ -16,9 +16,10 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"strings"
+
+	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
@@ -51,7 +52,7 @@ func (es EnvSource) GetConfigurationByKey(key string) (string, error) {
 	value, ok := es.configs.Get(key)
 
 	if !ok {
-		return "", fmt.Errorf("key not found: %s", key)
+		return "", errors.Wrap(ErrKeyNotFound, key) // fmt.Errorf("key not found: %s", key)
 	}
 
 	return value, nil
@@ -76,6 +77,9 @@ func (es EnvSource) GetPriority() int {
 // GetSourceName implements ConfigSource
 func (es EnvSource) GetSourceName() string {
 	return "EnvironmentSource"
+}
+
+func (es EnvSource) SetManager(m ConfigManager) {
 }
 
 func (es EnvSource) SetEventHandler(eh EventHandler) {

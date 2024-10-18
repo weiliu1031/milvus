@@ -18,6 +18,7 @@ package components
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -26,6 +27,7 @@ import (
 	grpcdatacoordclient "github.com/milvus-io/milvus/internal/distributed/datacoord"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -37,12 +39,20 @@ type DataCoord struct {
 
 // NewDataCoord creates a new DataCoord
 func NewDataCoord(ctx context.Context, factory dependency.Factory) (*DataCoord, error) {
-	s := grpcdatacoordclient.NewServer(ctx, factory)
+	s, err := grpcdatacoordclient.NewServer(ctx, factory)
+	if err != nil {
+		return nil, err
+	}
 
 	return &DataCoord{
 		ctx: ctx,
 		svr: s,
 	}, nil
+}
+
+// Prepare prepares service
+func (s *DataCoord) Prepare() error {
+	return s.svr.Prepare()
 }
 
 // Run starts service
@@ -57,10 +67,8 @@ func (s *DataCoord) Run() error {
 
 // Stop terminates service
 func (s *DataCoord) Stop() error {
-	if err := s.svr.Stop(); err != nil {
-		return err
-	}
-	return nil
+	timeout := paramtable.Get().DataCoordCfg.GracefulStopTimeout.GetAsDuration(time.Second)
+	return exitWhenStopTimeout(s.svr.Stop, timeout)
 }
 
 // GetComponentStates returns DataCoord's states

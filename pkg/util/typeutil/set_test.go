@@ -30,11 +30,34 @@ func TestUniqueSet(t *testing.T) {
 	assert.True(t, set.Contain(9))
 	assert.True(t, set.Contain(5, 7, 9))
 
+	containFive := false
+	set.Range(func(i UniqueID) bool {
+		if i == 5 {
+			containFive = true
+			return false
+		}
+		return true
+	})
+	assert.True(t, containFive)
+
 	set.Remove(7)
 	assert.True(t, set.Contain(5))
 	assert.False(t, set.Contain(7))
 	assert.True(t, set.Contain(9))
 	assert.False(t, set.Contain(5, 7, 9))
+
+	count := 0
+	set.Range(func(element UniqueID) bool {
+		count++
+		return true
+	})
+	assert.Equal(t, set.Len(), count)
+	count = 0
+	set.Range(func(element UniqueID) bool {
+		count++
+		return false
+	})
+	assert.Equal(t, 1, count)
 }
 
 func TestUniqueSetClear(t *testing.T) {

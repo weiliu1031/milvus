@@ -17,7 +17,7 @@
 package segments
 
 /*
-#cgo pkg-config: milvus_segcore
+#cgo pkg-config: milvus_core
 
 #include "segcore/collection_c.h"
 #include "segcore/segment_c.h"
@@ -26,6 +26,7 @@ package segments
 import "C"
 
 import (
+	"context"
 	"fmt"
 	"unsafe"
 
@@ -41,25 +42,19 @@ type SearchPlan struct {
 	cSearchPlan C.CSearchPlan
 }
 
-func createSearchPlanByExpr(col *Collection, expr []byte, metricType string) (*SearchPlan, error) {
+func createSearchPlanByExpr(ctx context.Context, col *Collection, expr []byte) (*SearchPlan, error) {
 	if col.collectionPtr == nil {
 		return nil, errors.New("nil collection ptr, collectionID = " + fmt.Sprintln(col.id))
 	}
 	var cPlan C.CSearchPlan
 	status := C.CreateSearchPlanByExpr(col.collectionPtr, unsafe.Pointer(&expr[0]), (C.int64_t)(len(expr)), &cPlan)
 
-	err1 := HandleCStatus(&status, "Create Plan by expr failed")
+	err1 := HandleCStatus(ctx, &status, "Create Plan by expr failed")
 	if err1 != nil {
 		return nil, err1
 	}
 
-	newPlan := &SearchPlan{cSearchPlan: cPlan}
-	if len(metricType) != 0 {
-		newPlan.setMetricType(metricType)
-	} else {
-		newPlan.setMetricType(col.GetMetricType())
-	}
-	return newPlan, nil
+	return &SearchPlan{cSearchPlan: cPlan}, nil
 }
 
 func (plan *SearchPlan) getTopK() int64 {
@@ -73,7 +68,7 @@ func (plan *SearchPlan) setMetricType(metricType string) {
 	C.SetMetricType(plan.cSearchPlan, cmt)
 }
 
-func (plan *SearchPlan) getMetricType() string {
+func (plan *SearchPlan) GetMetricType() string {
 	cMetricType := C.GetMetricType(plan.cSearchPlan)
 	defer C.free(unsafe.Pointer(cMetricType))
 	metricType := C.GoString(cMetricType)
@@ -89,14 +84,13 @@ type SearchRequest struct {
 	cPlaceholderGroup C.CPlaceholderGroup
 	msgID             UniqueID
 	searchFieldID     UniqueID
+	mvccTimestamp     Timestamp
 }
 
-func NewSearchRequest(collection *Collection, req *querypb.SearchRequest, placeholderGrp []byte) (*SearchRequest, error) {
-	var err error
-	var plan *SearchPlan
+func NewSearchRequest(ctx context.Context, collection *Collection, req *querypb.SearchRequest, placeholderGrp []byte) (*SearchRequest, error) {
 	metricType := req.GetReq().GetMetricType()
 	expr := req.Req.SerializedExprPlan
-	plan, err = createSearchPlanByExpr(collection, expr, metricType)
+	plan, err := createSearchPlanByExpr(ctx, collection, expr)
 	if err != nil {
 		return nil, err
 	}
@@ -111,14 +105,20 @@ func NewSearchRequest(collection *Collection, req *querypb.SearchRequest, placeh
 	var cPlaceholderGroup C.CPlaceholderGroup
 	status := C.ParsePlaceholderGroup(plan.cSearchPlan, blobPtr, blobSize, &cPlaceholderGroup)
 
-	if err := HandleCStatus(&status, "parser searchRequest failed"); err != nil {
+	if err := HandleCStatus(ctx, &status, "parser searchRequest failed"); err != nil {
 		plan.delete()
 		return nil, err
 	}
 
+	metricTypeInPlan := plan.GetMetricType()
+	if len(metricType) != 0 && metricType != metricTypeInPlan {
+		plan.delete()
+		return nil, merr.WrapErrParameterInvalid(metricTypeInPlan, metricType, "metric type not match")
+	}
+
 	var fieldID C.int64_t
 	status = C.GetFieldID(plan.cSearchPlan, &fieldID)
-	if err = HandleCStatus(&status, "get fieldID from plan failed"); err != nil {
+	if err = HandleCStatus(ctx, &status, "get fieldID from plan failed"); err != nil {
 		plan.delete()
 		return nil, err
 	}
@@ -128,6 +128,7 @@ func NewSearchRequest(collection *Collection, req *querypb.SearchRequest, placeh
 		cPlaceholderGroup: cPlaceholderGroup,
 		msgID:             req.GetReq().GetBase().GetMsgID(),
 		searchFieldID:     int64(fieldID),
+		mvccTimestamp:     req.GetReq().GetMvccTimestamp(),
 	}
 
 	return ret, nil
@@ -149,7 +150,7 @@ func (req *SearchRequest) Delete() {
 	C.DeletePlaceholderGroup(req.cPlaceholderGroup)
 }
 
-func parseSearchRequest(plan *SearchPlan, searchRequestBlob []byte) (*SearchRequest, error) {
+func parseSearchRequest(ctx context.Context, plan *SearchPlan, searchRequestBlob []byte) (*SearchRequest, error) {
 	if len(searchRequestBlob) == 0 {
 		return nil, fmt.Errorf("empty search request")
 	}
@@ -158,7 +159,7 @@ func parseSearchRequest(plan *SearchPlan, searchRequestBlob []byte) (*SearchRequ
 	var cPlaceholderGroup C.CPlaceholderGroup
 	status := C.ParsePlaceholderGroup(plan.cSearchPlan, blobPtr, blobSize, &cPlaceholderGroup)
 
-	if err := HandleCStatus(&status, "parser searchRequest failed"); err != nil {
+	if err := HandleCStatus(ctx, &status, "parser searchRequest failed"); err != nil {
 		return nil, err
 	}
 
@@ -171,9 +172,10 @@ type RetrievePlan struct {
 	cRetrievePlan C.CRetrievePlan
 	Timestamp     Timestamp
 	msgID         UniqueID // only used to debug.
+	ignoreNonPk   bool
 }
 
-func NewRetrievePlan(col *Collection, expr []byte, timestamp Timestamp, msgID UniqueID) (*RetrievePlan, error) {
+func NewRetrievePlan(ctx context.Context, col *Collection, expr []byte, timestamp Timestamp, msgID UniqueID) (*RetrievePlan, error) {
 	col.mu.RLock()
 	defer col.mu.RUnlock()
 
@@ -184,7 +186,7 @@ func NewRetrievePlan(col *Collection, expr []byte, timestamp Timestamp, msgID Un
 	var cPlan C.CRetrievePlan
 	status := C.CreateRetrievePlanByExpr(col.collectionPtr, unsafe.Pointer(&expr[0]), (C.int64_t)(len(expr)), &cPlan)
 
-	err := HandleCStatus(&status, "Create retrieve plan by expr failed")
+	err := HandleCStatus(ctx, &status, "Create retrieve plan by expr failed")
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +197,10 @@ func NewRetrievePlan(col *Collection, expr []byte, timestamp Timestamp, msgID Un
 		msgID:         msgID,
 	}
 	return newPlan, nil
+}
+
+func (plan *RetrievePlan) ShouldIgnoreNonPk() bool {
+	return bool(C.ShouldIgnoreNonPk(plan.cRetrievePlan))
 }
 
 func (plan *RetrievePlan) Delete() {

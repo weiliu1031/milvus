@@ -9,7 +9,7 @@ spec:
   enableServiceLinks: false
   containers: 
   - name: pytest
-    image: harbor.milvus.io/dockerhub/milvusdb/pytest:20231204-8740adb
+    image: harbor.milvus.io/dockerhub/milvusdb/pytest:20241014-c96bbe1
     resources:
       limits:
         cpu: "6"
@@ -31,6 +31,10 @@ spec:
       value: 240
     - name: COMPOSE_HTTP_TIMEOUT
       value: 240
+    - name: NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
     tty: true
     securityContext:
       privileged: true

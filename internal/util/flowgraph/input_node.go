@@ -43,13 +43,15 @@ const (
 // InputNode is the entry point of flowgragh
 type InputNode struct {
 	BaseNode
-	input        <-chan *msgstream.MsgPack
-	lastMsg      *msgstream.MsgPack
-	name         string
-	role         string
-	nodeID       int64
-	collectionID int64
-	dataType     string
+	input           <-chan *msgstream.MsgPack
+	lastMsg         *msgstream.MsgPack
+	name            string
+	role            string
+	nodeID          int64
+	nodeIDStr       string
+	collectionID    int64
+	collectionIDStr string
+	dataType        string
 
 	closeGracefully *atomic.Bool
 
@@ -77,7 +79,7 @@ func (inNode *InputNode) SetCloseMethod(gracefully bool) {
 	log.Info("input node close method set",
 		zap.String("node", inNode.Name()),
 		zap.Int64("collection", inNode.collectionID),
-		zap.Any("gracefully", gracefully))
+		zap.Bool("gracefully", gracefully))
 }
 
 // Operate consume a message pack from msgstream and return
@@ -115,23 +117,13 @@ func (inNode *InputNode) Operate(in []Msg) []Msg {
 
 	inNode.lastMsg = msgPack
 	sub := tsoutil.SubByNow(msgPack.EndTs)
-	if inNode.role == typeutil.QueryNodeRole {
-		metrics.QueryNodeConsumerMsgCount.
-			WithLabelValues(fmt.Sprint(inNode.nodeID), inNode.dataType, fmt.Sprint(inNode.collectionID)).
-			Inc()
-
-		metrics.QueryNodeConsumeTimeTickLag.
-			WithLabelValues(fmt.Sprint(inNode.nodeID), inNode.dataType, fmt.Sprint(inNode.collectionID)).
-			Set(float64(sub))
-	}
-
 	if inNode.role == typeutil.DataNodeRole {
 		metrics.DataNodeConsumeMsgCount.
-			WithLabelValues(fmt.Sprint(inNode.nodeID), inNode.dataType, fmt.Sprint(inNode.collectionID)).
+			WithLabelValues(inNode.nodeIDStr, inNode.dataType, inNode.collectionIDStr).
 			Inc()
 
 		metrics.DataNodeConsumeTimeTickLag.
-			WithLabelValues(fmt.Sprint(inNode.nodeID), inNode.dataType, fmt.Sprint(inNode.collectionID)).
+			WithLabelValues(inNode.nodeIDStr, inNode.dataType, inNode.collectionIDStr).
 			Set(float64(sub))
 	}
 
@@ -202,7 +194,9 @@ func NewInputNode(input <-chan *msgstream.MsgPack, nodeName string, maxQueueLeng
 		name:                nodeName,
 		role:                role,
 		nodeID:              nodeID,
+		nodeIDStr:           fmt.Sprint(nodeID),
 		collectionID:        collectionID,
+		collectionIDStr:     fmt.Sprint(collectionID),
 		dataType:            dataType,
 		closeGracefully:     atomic.NewBool(CloseImmediately),
 		skipCount:           0,

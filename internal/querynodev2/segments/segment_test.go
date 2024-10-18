@@ -2,6 +2,8 @@ package segments
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -12,6 +14,7 @@ import (
 	storage "github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/initcore"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type SegmentSuite struct {
@@ -39,16 +42,19 @@ func (suite *SegmentSuite) SetupTest() {
 	msgLength := 100
 
 	suite.rootPath = suite.T().Name()
-	chunkManagerFactory := NewTestChunkManagerFactory(paramtable.Get(), suite.rootPath)
+	chunkManagerFactory := storage.NewTestChunkManagerFactory(paramtable.Get(), suite.rootPath)
 	suite.chunkManager, _ = chunkManagerFactory.NewPersistentStorageChunkManager(ctx)
 	initcore.InitRemoteChunkManager(paramtable.Get())
+	localDataRootPath := filepath.Join(paramtable.Get().LocalStorageCfg.Path.GetValue(), typeutil.QueryNodeRole)
+	initcore.InitLocalChunkManager(localDataRootPath)
+	initcore.InitMmapManager(paramtable.Get())
 
 	suite.collectionID = 100
 	suite.partitionID = 10
 	suite.segmentID = 1
 
 	suite.manager = NewManager()
-	schema := GenTestCollectionSchema("test-reduce", schemapb.DataType_Int64)
+	schema := GenTestCollectionSchema("test-reduce", schemapb.DataType_Int64, true)
 	indexMeta := GenTestIndexMeta(suite.collectionID, schema)
 	suite.manager.Collection.PutOrRef(suite.collectionID,
 		schema,
@@ -61,16 +67,29 @@ func (suite *SegmentSuite) SetupTest() {
 	)
 	suite.collection = suite.manager.Collection.Get(suite.collectionID)
 
-	suite.sealed, err = NewSegment(suite.collection,
-		suite.segmentID,
-		suite.partitionID,
-		suite.collectionID,
-		"dml",
+	suite.sealed, err = NewSegment(ctx,
+		suite.collection,
 		SegmentTypeSealed,
 		0,
-		nil,
-		nil,
-		datapb.SegmentLevel_Legacy,
+		&querypb.SegmentLoadInfo{
+			CollectionID:  suite.collectionID,
+			SegmentID:     suite.segmentID,
+			PartitionID:   suite.partitionID,
+			InsertChannel: fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", suite.collectionID),
+			Level:         datapb.SegmentLevel_Legacy,
+			NumOfRows:     int64(msgLength),
+			BinlogPaths: []*datapb.FieldBinlog{
+				{
+					FieldID: 101,
+					Binlogs: []*datapb.Binlog{
+						{
+							LogSize:    10086,
+							MemorySize: 10086,
+						},
+					},
+				},
+			},
+		},
 	)
 	suite.Require().NoError(err)
 
@@ -83,21 +102,25 @@ func (suite *SegmentSuite) SetupTest() {
 		suite.chunkManager,
 	)
 	suite.Require().NoError(err)
+	g, err := suite.sealed.(*LocalSegment).StartLoadData()
+	suite.Require().NoError(err)
 	for _, binlog := range binlogs {
-		err = suite.sealed.(*LocalSegment).LoadFieldData(binlog.FieldID, int64(msgLength), binlog, false)
+		err = suite.sealed.(*LocalSegment).LoadFieldData(ctx, binlog.FieldID, int64(msgLength), binlog)
 		suite.Require().NoError(err)
 	}
+	g.Done(nil)
 
-	suite.growing, err = NewSegment(suite.collection,
-		suite.segmentID+1,
-		suite.partitionID,
-		suite.collectionID,
-		"dml",
+	suite.growing, err = NewSegment(ctx,
+		suite.collection,
 		SegmentTypeGrowing,
 		0,
-		nil,
-		nil,
-		datapb.SegmentLevel_Legacy,
+		&querypb.SegmentLoadInfo{
+			SegmentID:     suite.segmentID + 1,
+			CollectionID:  suite.collectionID,
+			PartitionID:   suite.partitionID,
+			InsertChannel: fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", suite.collectionID),
+			Level:         datapb.SegmentLevel_Legacy,
+		},
 	)
 	suite.Require().NoError(err)
 
@@ -105,28 +128,50 @@ func (suite *SegmentSuite) SetupTest() {
 	suite.Require().NoError(err)
 	insertRecord, err := storage.TransferInsertMsgToInsertRecord(suite.collection.Schema(), insertMsg)
 	suite.Require().NoError(err)
-	err = suite.growing.Insert(insertMsg.RowIDs, insertMsg.Timestamps, insertRecord)
+	err = suite.growing.Insert(ctx, insertMsg.RowIDs, insertMsg.Timestamps, insertRecord)
 	suite.Require().NoError(err)
 
-	suite.manager.Segment.Put(SegmentTypeSealed, suite.sealed)
-	suite.manager.Segment.Put(SegmentTypeGrowing, suite.growing)
+	suite.manager.Segment.Put(context.Background(), SegmentTypeSealed, suite.sealed)
+	suite.manager.Segment.Put(context.Background(), SegmentTypeGrowing, suite.growing)
 }
 
 func (suite *SegmentSuite) TearDownTest() {
 	ctx := context.Background()
-	suite.sealed.Release()
-	suite.growing.Release()
+	suite.sealed.Release(context.Background())
+	suite.growing.Release(context.Background())
 	DeleteCollection(suite.collection)
 	suite.chunkManager.RemoveWithPrefix(ctx, suite.rootPath)
 }
 
+func (suite *SegmentSuite) TestLoadInfo() {
+	// sealed segment has load info
+	suite.NotNil(suite.sealed.LoadInfo())
+	// growing segment has no load info
+	suite.NotNil(suite.growing.LoadInfo())
+}
+
+func (suite *SegmentSuite) TestResourceUsageEstimate() {
+	// growing segment has resource usage
+	// growing segment can not estimate resource usage
+	usage := suite.growing.ResourceUsageEstimate()
+	suite.Zero(usage.MemorySize)
+	suite.Zero(usage.DiskSize)
+	// growing segment has no resource usage
+	usage = suite.sealed.ResourceUsageEstimate()
+	suite.NotZero(usage.MemorySize)
+	suite.Zero(usage.DiskSize)
+	suite.Zero(usage.MmapFieldCount)
+}
+
 func (suite *SegmentSuite) TestDelete() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	pks, err := storage.GenInt64PrimaryKeys(0, 1)
 	suite.NoError(err)
 
 	// Test for sealed
 	rowNum := suite.sealed.RowNum()
-	err = suite.sealed.Delete(pks, []uint64{1000, 1000})
+	err = suite.sealed.Delete(ctx, pks, []uint64{1000, 1000})
 	suite.NoError(err)
 
 	suite.Equal(rowNum-int64(len(pks)), suite.sealed.RowNum())
@@ -134,7 +179,7 @@ func (suite *SegmentSuite) TestDelete() {
 
 	// Test for growing
 	rowNum = suite.growing.RowNum()
-	err = suite.growing.Delete(pks, []uint64{1000, 1000})
+	err = suite.growing.Delete(ctx, pks, []uint64{1000, 1000})
 	suite.NoError(err)
 
 	suite.Equal(rowNum-int64(len(pks)), suite.growing.RowNum())
@@ -159,15 +204,15 @@ func (suite *SegmentSuite) TestCASVersion() {
 	suite.Equal(curVersion+1, segment.Version())
 }
 
+func (suite *SegmentSuite) TestSegmentRemoveUnusedFieldFiles() {
+}
+
 func (suite *SegmentSuite) TestSegmentReleased() {
-	suite.sealed.Release()
+	suite.sealed.Release(context.Background())
 
 	sealed := suite.sealed.(*LocalSegment)
 
-	sealed.ptrLock.RLock()
-	suite.False(sealed.isValid())
-	sealed.ptrLock.RUnlock()
-	suite.EqualValues(0, sealed.InsertCount())
+	suite.False(sealed.ptrLock.PinIfNotReleased())
 	suite.EqualValues(0, sealed.RowNum())
 	suite.EqualValues(0, sealed.MemSize())
 	suite.False(sealed.HasRawData(101))

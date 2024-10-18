@@ -4,14 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 // QueryHook is the interface for search/query parameter optimizer.
@@ -23,12 +25,13 @@ type QueryHook interface {
 }
 
 func OptimizeSearchParams(ctx context.Context, req *querypb.SearchRequest, queryHook QueryHook, numSegments int) (*querypb.SearchRequest, error) {
-	// no hook applied, just return
-	if queryHook == nil {
+	// no hook applied or disabled, just return
+	if queryHook == nil || !paramtable.Get().AutoIndexConfig.Enable.GetAsBool() {
 		return req, nil
 	}
 
-	log := log.Ctx(ctx).With(zap.Int64("collection", req.GetReq().GetCollectionID()))
+	collectionId := req.GetReq().GetCollectionID()
+	log := log.Ctx(ctx).With(zap.Int64("collection", collectionId))
 
 	serializedPlan := req.GetReq().GetSerializedExprPlan()
 	// plan not found
@@ -54,14 +57,21 @@ func OptimizeSearchParams(ctx context.Context, req *querypb.SearchRequest, query
 	case *planpb.PlanNode_VectorAnns:
 		// use shardNum * segments num in shard to estimate total segment number
 		estSegmentNum := numSegments * int(channelNum)
+		metrics.QueryNodeSearchHitSegmentNum.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), fmt.Sprint(collectionId), metrics.SearchLabel).Observe(float64(estSegmentNum))
+
 		withFilter := (plan.GetVectorAnns().GetPredicates() != nil)
 		queryInfo := plan.GetVectorAnns().GetQueryInfo()
 		params := map[string]any{
-			common.TopKKey:        queryInfo.GetTopk(),
-			common.SearchParamKey: queryInfo.GetSearchParams(),
-			common.SegmentNumKey:  estSegmentNum,
-			common.WithFilterKey:  withFilter,
-			common.CollectionKey:  req.GetReq().GetCollectionID(),
+			common.TopKKey:         queryInfo.GetTopk(),
+			common.SearchParamKey:  queryInfo.GetSearchParams(),
+			common.SegmentNumKey:   estSegmentNum,
+			common.WithFilterKey:   withFilter,
+			common.DataTypeKey:     int32(plan.GetVectorAnns().GetVectorType()),
+			common.WithOptimizeKey: paramtable.Get().AutoIndexConfig.EnableOptimize.GetAsBool(),
+			common.CollectionKey:   req.GetReq().GetCollectionID(),
+		}
+		if withFilter && channelNum > 1 {
+			params[common.ChannelNumKey] = channelNum
 		}
 		err := queryHook.Run(params)
 		if err != nil {

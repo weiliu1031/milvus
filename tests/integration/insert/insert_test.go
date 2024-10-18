@@ -20,9 +20,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -38,6 +38,7 @@ type InsertSuite struct {
 	integration.MiniClusterSuite
 }
 
+// insert request with duplicate field data should fail
 func (s *InsertSuite) TestInsert() {
 	c := s.Cluster
 	ctx, cancel := context.WithCancel(c.GetContext())

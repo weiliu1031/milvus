@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,7 +143,7 @@ func (suite *ServerSuite) SetupTest() {
 		suite.Require().NoError(err)
 		ok := suite.waitNodeUp(suite.nodes[i], 5*time.Second)
 		suite.Require().True(ok)
-		suite.server.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, suite.nodes[i].ID)
+		suite.server.meta.ResourceManager.HandleNodeUp(suite.nodes[i].ID)
 		suite.expectLoadAndReleasePartitions(suite.nodes[i])
 	}
 
@@ -208,7 +209,11 @@ func (suite *ServerSuite) TestNodeUp() {
 	}, 5*time.Second, time.Second)
 
 	// mock unhealthy node
-	suite.server.nodeMgr.Add(session.NewNodeInfo(1001, "localhost"))
+	suite.server.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   1001,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
 
 	node2 := mocks.NewMockQueryNode(suite.T(), suite.server.etcdCli, 101)
 	node2.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).Return(&querypb.GetDataDistributionResponse{Status: merr.Success()}, nil).Maybe()
@@ -305,6 +310,7 @@ func (suite *ServerSuite) TestDisableActiveStandby() {
 
 func (suite *ServerSuite) TestEnableActiveStandby() {
 	paramtable.Get().Save(Params.QueryCoordCfg.EnableActiveStandby.Key, "true")
+	defer paramtable.Get().Reset(Params.QueryCoordCfg.EnableActiveStandby.Key)
 
 	err := suite.server.Stop()
 	suite.NoError(err)
@@ -341,14 +347,11 @@ func (suite *ServerSuite) TestEnableActiveStandby() {
 	suite.Equal(commonpb.StateCode_StandBy, states1.GetState().GetStateCode())
 	err = suite.server.Register()
 	suite.NoError(err)
-	err = suite.server.Start()
-	suite.NoError(err)
 
-	states2, err := suite.server.GetComponentStates(context.Background(), nil)
-	suite.NoError(err)
-	suite.Equal(commonpb.StateCode_Healthy, states2.GetState().GetStateCode())
-
-	paramtable.Get().Save(Params.QueryCoordCfg.EnableActiveStandby.Key, "false")
+	suite.Eventually(func() bool {
+		state, err := suite.server.GetComponentStates(context.Background(), nil)
+		return err == nil && state.GetState().GetStateCode() == commonpb.StateCode_Healthy
+	}, time.Second*5, time.Millisecond*200)
 }
 
 func (suite *ServerSuite) TestStop() {
@@ -375,12 +378,20 @@ func (suite *ServerSuite) TestUpdateAutoBalanceConfigLoop() {
 		mockSession.EXPECT().GetSessionsWithVersionRange(mock.Anything, mock.Anything).Return(oldSessions, 0, nil).Maybe()
 
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go server.updateBalanceConfigLoop(ctx)
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(1500 * time.Millisecond)
+			server.updateBalanceConfigLoop(ctx)
+		}()
 		// old query node exist, disable auto balance
 		suite.Eventually(func() bool {
 			return !Params.QueryCoordCfg.AutoBalance.GetAsBool()
 		}, 5*time.Second, 1*time.Second)
+
+		cancel()
+		wg.Wait()
 	})
 
 	suite.Run("all old node down", func() {
@@ -392,12 +403,20 @@ func (suite *ServerSuite) TestUpdateAutoBalanceConfigLoop() {
 		mockSession.EXPECT().GetSessionsWithVersionRange(mock.Anything, mock.Anything).Return(nil, 0, nil).Maybe()
 
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go server.updateBalanceConfigLoop(ctx)
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(1500 * time.Millisecond)
+			server.updateBalanceConfigLoop(ctx)
+		}()
 		// all old query node down, enable auto balance
 		suite.Eventually(func() bool {
 			return Params.QueryCoordCfg.AutoBalance.GetAsBool()
 		}, 5*time.Second, 1*time.Second)
+
+		cancel()
+		wg.Wait()
 	})
 }
 
@@ -417,17 +436,21 @@ func (suite *ServerSuite) loadAll() {
 	for _, collection := range suite.collections {
 		if suite.loadTypes[collection] == querypb.LoadType_LoadCollection {
 			req := &querypb.LoadCollectionRequest{
-				CollectionID:  collection,
-				ReplicaNumber: suite.replicaNumber[collection],
+				CollectionID:   collection,
+				ReplicaNumber:  suite.replicaNumber[collection],
+				ResourceGroups: []string{meta.DefaultResourceGroupName},
+				LoadFields:     []int64{100, 101},
 			}
 			resp, err := suite.server.LoadCollection(ctx, req)
 			suite.NoError(err)
 			suite.Equal(commonpb.ErrorCode_Success, resp.ErrorCode)
 		} else {
 			req := &querypb.LoadPartitionsRequest{
-				CollectionID:  collection,
-				PartitionIDs:  suite.partitions[collection],
-				ReplicaNumber: suite.replicaNumber[collection],
+				CollectionID:   collection,
+				PartitionIDs:   suite.partitions[collection],
+				ReplicaNumber:  suite.replicaNumber[collection],
+				ResourceGroups: []string{meta.DefaultResourceGroupName},
+				LoadFields:     []int64{100, 101},
 			}
 			resp, err := suite.server.LoadPartitions(ctx, req)
 			suite.NoError(err)
@@ -548,10 +571,10 @@ func (suite *ServerSuite) hackServer() {
 		suite.server.meta,
 		suite.server.dist,
 		suite.server.targetMgr,
-		suite.server.balancer,
 		suite.server.nodeMgr,
 		suite.server.taskScheduler,
 		suite.server.broker,
+		suite.server.getBalancerFunc,
 	)
 	suite.server.targetObserver = observers.NewTargetObserver(
 		suite.server.meta,
@@ -565,12 +588,12 @@ func (suite *ServerSuite) hackServer() {
 		suite.server.meta,
 		suite.server.targetMgr,
 		suite.server.targetObserver,
-		suite.server.leaderObserver,
 		suite.server.checkerController,
+		suite.server.proxyClientManager,
 	)
 
 	suite.broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{Schema: &schemapb.CollectionSchema{}}, nil).Maybe()
-	suite.broker.EXPECT().DescribeIndex(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
+	suite.broker.EXPECT().ListIndexes(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	for _, collection := range suite.collections {
 		suite.broker.EXPECT().GetPartitions(mock.Anything, collection).Return(suite.partitions[collection], nil).Maybe()
 		suite.expectGetRecoverInfo(collection)

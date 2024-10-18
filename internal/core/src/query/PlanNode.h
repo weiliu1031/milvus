@@ -18,12 +18,13 @@
 #include <string>
 
 #include "common/QueryInfo.h"
-#include "query/Expr.h"
 
+namespace milvus::plan {
+class PlanNode;
+};
 namespace milvus::query {
 
 class PlanNodeVisitor;
-
 // Base of all Nodes
 struct PlanNode {
  public:
@@ -35,9 +36,9 @@ struct PlanNode {
 using PlanNodePtr = std::unique_ptr<PlanNode>;
 
 struct VectorPlanNode : PlanNode {
-    std::optional<ExprPtr> predicate_;
     SearchInfo search_info_;
     std::string placeholder_tag_;
+    std::shared_ptr<milvus::plan::PlanNode> plannodes_;
 };
 
 struct FloatVectorANNS : VectorPlanNode {
@@ -58,12 +59,25 @@ struct Float16VectorANNS : VectorPlanNode {
     accept(PlanNodeVisitor&) override;
 };
 
+struct BFloat16VectorANNS : VectorPlanNode {
+ public:
+    void
+    accept(PlanNodeVisitor&) override;
+};
+
+struct SparseFloatVectorANNS : VectorPlanNode {
+ public:
+    void
+    accept(PlanNodeVisitor&) override;
+};
+
 struct RetrievePlanNode : PlanNode {
  public:
     void
     accept(PlanNodeVisitor&) override;
 
-    std::optional<ExprPtr> predicate_;
+    std::shared_ptr<milvus::plan::PlanNode> plannodes_;
+
     bool is_count_;
     int64_t limit_;
 };

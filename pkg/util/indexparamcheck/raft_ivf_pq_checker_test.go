@@ -49,9 +49,6 @@ func Test_raftIVFPQChecker_CheckTrain(t *testing.T) {
 	invalidParamsIVF := copyParams(validParams)
 	invalidParamsIVF[IVFM] = "NAN"
 
-	invalidParamsM := copyParams(validParams)
-	invalidParamsM[DIM] = strconv.Itoa(65536)
-
 	validParamsMzero := copyParams(validParams)
 	validParamsMzero[IVFM] = "0"
 
@@ -105,6 +102,22 @@ func Test_raftIVFPQChecker_CheckTrain(t *testing.T) {
 		NBITS:  strconv.Itoa(8),
 		Metric: metric.SUPERSTRUCTURE,
 	}
+	p8 := map[string]string{
+		DIM:                      strconv.Itoa(128),
+		NLIST:                    strconv.Itoa(1024),
+		IVFM:                     strconv.Itoa(4),
+		NBITS:                    strconv.Itoa(8),
+		Metric:                   metric.L2,
+		RaftCacheDatasetOnDevice: "false",
+	}
+	p9 := map[string]string{
+		DIM:                      strconv.Itoa(128),
+		NLIST:                    strconv.Itoa(1024),
+		IVFM:                     strconv.Itoa(4),
+		NBITS:                    strconv.Itoa(8),
+		Metric:                   metric.L2,
+		RaftCacheDatasetOnDevice: "False",
+	}
 
 	cases := []struct {
 		params   map[string]string
@@ -119,15 +132,16 @@ func Test_raftIVFPQChecker_CheckTrain(t *testing.T) {
 		{invalidParamsNbits, false},
 		{invalidParamsWithoutIVF, false},
 		{invalidParamsIVF, false},
-		{invalidParamsM, false},
 		{validParamsMzero, true},
 		{p1, true},
 		{p2, true},
-		{p3, true},
+		{p3, false},
 		{p4, false},
 		{p5, false},
 		{p6, false},
 		{p7, false},
+		{p8, true},
+		{p9, false},
 	}
 
 	c := newRaftIVFPQChecker()
@@ -202,7 +216,7 @@ func Test_raftIVFPQChecker_CheckValidDataType(t *testing.T) {
 
 	c := newRaftIVFPQChecker()
 	for _, test := range cases {
-		err := c.CheckValidDataType(test.dType)
+		err := c.CheckValidDataType(&schemapb.FieldSchema{DataType: test.dType})
 		if test.errIsNil {
 			assert.NoError(t, err)
 		} else {

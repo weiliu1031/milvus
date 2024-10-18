@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
+	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/grpcclient"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -46,7 +47,7 @@ type Client struct {
 }
 
 // NewClient creates a new client instance
-func NewClient(ctx context.Context, addr string, nodeID int64) (*Client, error) {
+func NewClient(ctx context.Context, addr string, nodeID int64) (types.ProxyClient, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("address is empty")
 	}
@@ -195,5 +196,29 @@ func (c *Client) ListClientInfos(ctx context.Context, req *proxypb.ListClientInf
 func (c *Client) GetDdChannel(ctx context.Context, req *internalpb.GetDdChannelRequest, opts ...grpc.CallOption) (*milvuspb.StringResponse, error) {
 	return wrapGrpcCall(ctx, c, func(client proxypb.ProxyClient) (*milvuspb.StringResponse, error) {
 		return client.GetDdChannel(ctx, req)
+	})
+}
+
+func (c *Client) ImportV2(ctx context.Context, req *internalpb.ImportRequest, opts ...grpc.CallOption) (*internalpb.ImportResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client proxypb.ProxyClient) (*internalpb.ImportResponse, error) {
+		return client.ImportV2(ctx, req)
+	})
+}
+
+func (c *Client) GetImportProgress(ctx context.Context, req *internalpb.GetImportProgressRequest, opts ...grpc.CallOption) (*internalpb.GetImportProgressResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client proxypb.ProxyClient) (*internalpb.GetImportProgressResponse, error) {
+		return client.GetImportProgress(ctx, req)
+	})
+}
+
+func (c *Client) ListImports(ctx context.Context, req *internalpb.ListImportsRequest, opts ...grpc.CallOption) (*internalpb.ListImportsResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client proxypb.ProxyClient) (*internalpb.ListImportsResponse, error) {
+		return client.ListImports(ctx, req)
+	})
+}
+
+func (c *Client) InvalidateShardLeaderCache(ctx context.Context, req *proxypb.InvalidateShardLeaderCacheRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return wrapGrpcCall(ctx, c, func(client proxypb.ProxyClient) (*commonpb.Status, error) {
+		return client.InvalidateShardLeaderCache(ctx, req)
 	})
 }

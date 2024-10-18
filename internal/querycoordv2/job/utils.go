@@ -42,18 +42,24 @@ func waitCollectionReleased(dist *meta.DistributionManager, checkerController *c
 	for {
 		var (
 			channels []*meta.DmChannel
-			segments []*meta.Segment = dist.SegmentDistManager.GetByCollection(collection)
+			segments []*meta.Segment = dist.SegmentDistManager.GetByFilter(meta.WithCollectionID(collection))
 		)
 		if partitionSet.Len() > 0 {
 			segments = lo.Filter(segments, func(segment *meta.Segment, _ int) bool {
 				return partitionSet.Contain(segment.GetPartitionID())
 			})
 		} else {
-			channels = dist.ChannelDistManager.GetByCollection(collection)
+			channels = dist.ChannelDistManager.GetByCollectionAndFilter(collection)
 		}
 
 		if len(channels)+len(segments) == 0 {
 			break
+		} else {
+			log.Info("wait for release done", zap.Int64("collection", collection),
+				zap.Int64s("partitions", partitions),
+				zap.Int("channel", len(channels)),
+				zap.Int("segments", len(segments)),
+			)
 		}
 
 		// trigger check more frequently
@@ -79,7 +85,7 @@ func loadPartitions(ctx context.Context,
 		}
 		schema = collectionInfo.GetSchema()
 	}
-	indexes, err := broker.DescribeIndex(ctx, collection)
+	indexes, err := broker.ListIndexes(ctx, collection)
 	if err != nil {
 		return err
 	}

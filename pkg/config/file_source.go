@@ -17,11 +17,11 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"sync"
 
 	"github.com/cockroachdb/errors"
+	"github.com/samber/lo"
 	"github.com/spf13/cast"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -34,7 +34,9 @@ type FileSource struct {
 	files   []string
 	configs map[string]string
 
+	updateMu        sync.Mutex
 	configRefresher *refresher
+	manager         ConfigManager
 }
 
 func NewFileSource(fileInfo *FileInfo) *FileSource {
@@ -52,7 +54,7 @@ func (fs *FileSource) GetConfigurationByKey(key string) (string, error) {
 	v, ok := fs.configs[key]
 	fs.RUnlock()
 	if !ok {
-		return "", fmt.Errorf("key not found: %s", key)
+		return "", errors.Wrap(ErrKeyNotFound, key) // fmt.Errorf("key not found: %s", key)
 	}
 	return v, nil
 }
@@ -90,10 +92,16 @@ func (fs *FileSource) Close() {
 	fs.configRefresher.stop()
 }
 
+func (fs *FileSource) SetManager(m ConfigManager) {
+	fs.Lock()
+	defer fs.Unlock()
+	fs.manager = m
+}
+
 func (fs *FileSource) SetEventHandler(eh EventHandler) {
 	fs.RWMutex.Lock()
 	defer fs.RWMutex.Unlock()
-	fs.configRefresher.eh = eh
+	fs.configRefresher.SetEventHandler(eh)
 }
 
 func (fs *FileSource) UpdateOptions(opts Options) {
@@ -154,13 +162,29 @@ func (fs *FileSource) loadFromFile() error {
 		}
 	}
 
+	return fs.update(newConfig)
+}
+
+// update souce config
+// make sure only update changes configs
+func (fs *FileSource) update(configs map[string]string) error {
+	// make sure config not change when fire event
+	fs.updateMu.Lock()
+	defer fs.updateMu.Unlock()
+
 	fs.Lock()
-	defer fs.Unlock()
-	err := fs.configRefresher.fireEvents(fs.GetSourceName(), fs.configs, newConfig)
+	events, err := PopulateEvents(fs.GetSourceName(), fs.configs, configs)
 	if err != nil {
+		fs.Unlock()
+		log.Warn("generating event error", zap.Error(err))
 		return err
 	}
-	fs.configs = newConfig
+	fs.configs = configs
+	fs.Unlock()
+	if fs.manager != nil {
+		fs.manager.EvictCacheValueByFormat(lo.Map(events, func(event *Event, _ int) string { return event.Key })...)
+	}
 
+	fs.configRefresher.fireEvents(events...)
 	return nil
 }

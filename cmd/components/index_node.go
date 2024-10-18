@@ -18,6 +18,7 @@ package components
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -26,6 +27,7 @@ import (
 	grpcindexnode "github.com/milvus-io/milvus/internal/distributed/indexnode"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -46,6 +48,10 @@ func NewIndexNode(ctx context.Context, factory dependency.Factory) (*IndexNode, 
 	return n, nil
 }
 
+func (n *IndexNode) Prepare() error {
+	return n.svr.Prepare()
+}
+
 // Run starts service
 func (n *IndexNode) Run() error {
 	if err := n.svr.Run(); err != nil {
@@ -58,10 +64,8 @@ func (n *IndexNode) Run() error {
 
 // Stop terminates service
 func (n *IndexNode) Stop() error {
-	if err := n.svr.Stop(); err != nil {
-		return err
-	}
-	return nil
+	timeout := paramtable.Get().IndexNodeCfg.GracefulStopTimeout.GetAsDuration(time.Second)
+	return exitWhenStopTimeout(n.svr.Stop, timeout)
 }
 
 // GetComponentStates returns IndexNode's states

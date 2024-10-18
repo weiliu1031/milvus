@@ -21,24 +21,44 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
-	storage "github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/pkg/util/metautil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
+// ResourceUsage is used to estimate the resource usage of a sealed segment.
+type ResourceUsage struct {
+	MemorySize     uint64
+	DiskSize       uint64
+	MmapFieldCount int
+}
+
+// Segment is the interface of a segment implementation.
+// Some methods can not apply to all segment types，such as LoadInfo, ResourceUsageEstimate.
+// Add more interface to represent different segment types is a better implementation.
 type Segment interface {
+	// ResourceUsageEstimate() ResourceUsage
+
 	// Properties
 	ID() int64
+	DatabaseName() string
+	ResourceGroup() string
 	Collection() int64
 	Partition() int64
-	Shard() string
+	Shard() metautil.Channel
 	Version() int64
 	CASVersion(int64, int64) bool
 	StartPosition() *msgpb.MsgPosition
 	Type() SegmentType
 	Level() datapb.SegmentLevel
-	RLock() error
-	RUnlock()
+	IsSorted() bool
+	LoadInfo() *querypb.SegmentLoadInfo
+	// PinIfNotReleased the segment to prevent it from being released
+	PinIfNotReleased() error
+	// Unpin the segment to allow it to be released
+	Unpin()
 
 	// Stats related
 	// InsertCount returns the number of inserted rows, not effected by deletion
@@ -46,6 +66,8 @@ type Segment interface {
 	// RowNum returns the number of rows, it's slow, so DO NOT call it in a loop
 	RowNum() int64
 	MemSize() int64
+	// ResourceUsageEstimate returns the estimated resource usage of the segment
+	ResourceUsageEstimate() ResourceUsage
 
 	// Index related
 	GetIndex(fieldID int64) *IndexedFieldInfo
@@ -54,17 +76,29 @@ type Segment interface {
 	HasRawData(fieldID int64) bool
 
 	// Modification related
-	Insert(rowIDs []int64, timestamps []typeutil.Timestamp, record *segcorepb.InsertRecord) error
-	Delete(primaryKeys []storage.PrimaryKey, timestamps []typeutil.Timestamp) error
-	LoadDeltaData(deltaData *storage.DeleteData) error
+	Insert(ctx context.Context, rowIDs []int64, timestamps []typeutil.Timestamp, record *segcorepb.InsertRecord) error
+	Delete(ctx context.Context, primaryKeys []storage.PrimaryKey, timestamps []typeutil.Timestamp) error
+	LoadDeltaData(ctx context.Context, deltaData *storage.DeleteData) error
 	LastDeltaTimestamp() uint64
-	Release()
+	Release(ctx context.Context, opts ...releaseOption)
 
 	// Bloom filter related
 	UpdateBloomFilter(pks []storage.PrimaryKey)
-	MayPkExist(pk storage.PrimaryKey) bool
+	MayPkExist(lc *storage.LocationsCache) bool
+	BatchPkExist(lc *storage.BatchLocationsCache) []bool
+
+	// BM25 stats
+	UpdateBM25Stats(stats map[int64]*storage.BM25Stats)
+	GetBM25Stats() map[int64]*storage.BM25Stats
 
 	// Read operations
 	Search(ctx context.Context, searchReq *SearchRequest) (*SearchResult, error)
 	Retrieve(ctx context.Context, plan *RetrievePlan) (*segcorepb.RetrieveResults, error)
+	RetrieveByOffsets(ctx context.Context, plan *RetrievePlan, offsets []int64) (*segcorepb.RetrieveResults, error)
+	IsLazyLoad() bool
+	ResetIndexesLazyLoad(lazyState bool)
+
+	// lazy load related
+	NeedUpdatedVersion() int64
+	RemoveUnusedFieldFiles() error
 }
