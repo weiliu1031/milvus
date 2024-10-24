@@ -9,26 +9,23 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
-#include <boost/format.hpp>
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <memory>
 #include <regex>
 #include <vector>
-#include <chrono>
 
 #include "common/Types.h"
-#include "query/Expr.h"
 #include "query/Plan.h"
-#include "query/generated/ExecExprVisitor.h"
+#include "query/ExecPlanNodeVisitor.h"
 #include "segcore/SegmentGrowingImpl.h"
 #include "test_utils/DataGen.h"
 
 using namespace milvus;
+using namespace milvus::query;
+using namespace milvus::segcore;
 
 TEST(Expr, IntegerOverflow) {
-    using namespace milvus::query;
-    using namespace milvus::segcore;
     std::vector<std::tuple<std::string, std::function<bool(int8_t)>>> testcases = {
         /////////////////////////////////////////////////////////// term
         {
@@ -615,8 +612,6 @@ binary_arith_op_eval_range_expr: <
     }
 
     auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
-    ExecExprVisitor visitor(
-        *seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
     for (auto [clause, ref_func] : testcases) {
         auto loc = raw_plan_tmp.find("@@@@");
         auto raw_plan = raw_plan_tmp;
@@ -624,7 +619,14 @@ binary_arith_op_eval_range_expr: <
         auto plan_str = translate_text_plan_to_binary_plan(raw_plan.c_str());
         auto plan =
             CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size());
-        auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
+        BitsetType final;
+        // vectorsearch node => mvcc node => filter node
+        // just test filter node
+        final = ExecuteQueryExpr(
+            (plan->plan_node_->plannodes_->sources()[0])->sources()[0],
+            seg_promote,
+            N * num_iters,
+            MAX_TIMESTAMP);
         EXPECT_EQ(final.size(), N * num_iters);
 
         for (int i = 0; i < N * num_iters; ++i) {

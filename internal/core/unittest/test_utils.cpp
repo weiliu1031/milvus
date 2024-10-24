@@ -9,6 +9,10 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
+#include <vector>
+#include <memory>
+#include <cstring>
+
 #include <gtest/gtest.h>
 #include <string.h>
 #include <boost/uuid/uuid.hpp>
@@ -16,10 +20,13 @@
 #include <boost/uuid/uuid_generators.hpp>
 
 #include "common/EasyAssert.h"
+#include "common/Types.h"
 #include "common/Utils.h"
+#include "common/Exception.h"
+#include "knowhere/sparse_utils.h"
+#include "pb/schema.pb.h"
 #include "query/Utils.h"
 #include "test_utils/DataGen.h"
-#include "common/Types.h"
 
 TEST(Util, StringMatch) {
     using namespace milvus;
@@ -55,7 +62,7 @@ TEST(Util, GetDeleteBitmap) {
     auto i64_fid = schema->AddDebugField("age", DataType::INT64);
     schema->set_primary_field_id(i64_fid);
     auto N = 10;
-
+    uint64_t seg_id = 101;
     InsertRecord insert_record(*schema, N);
     DeletedRecord delete_record;
 
@@ -69,7 +76,7 @@ TEST(Util, GetDeleteBitmap) {
     }
     auto insert_offset = insert_record.reserved.fetch_add(N);
     insert_record.timestamps_.set_data_raw(insert_offset, tss.data(), N);
-    auto field_data = insert_record.get_field_data_base(i64_fid);
+    auto field_data = insert_record.get_data_base(i64_fid);
     field_data->set_data_raw(insert_offset, age_data.data(), N);
     insert_record.ack_responder_.AddSegment(insert_offset, insert_offset + N);
 
@@ -130,8 +137,7 @@ TEST(Util, upper_bound) {
 
     std::vector<Timestamp> data{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     ConcurrentVector<Timestamp> timestamps(1);
-    timestamps.grow_to_at_least(data.size());
-    timestamps.set_data(0, data.data(), data.size());
+    timestamps.set_data_raw(0, data.data(), data.size());
 
     ASSERT_EQ(1, upper_bound(timestamps, 0, data.size(), 0));
     ASSERT_EQ(5, upper_bound(timestamps, 0, data.size(), 4));
@@ -144,13 +150,16 @@ struct TmpFileWrapper {
     std::string filename;
 
     TmpFileWrapper(const std::string& _filename) : filename{_filename} {
-        fd = open(
-            filename.c_str(), O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR | S_IXUSR);
+        fd = open(filename.c_str(),
+                  O_RDWR | O_CREAT | O_EXCL,
+                  S_IRUSR | S_IWUSR | S_IXUSR);
     }
     TmpFileWrapper(const TmpFileWrapper&) = delete;
     TmpFileWrapper(TmpFileWrapper&&) = delete;
-    TmpFileWrapper& operator =(const TmpFileWrapper&) = delete;
-    TmpFileWrapper& operator =(TmpFileWrapper&&) = delete;
+    TmpFileWrapper&
+    operator=(const TmpFileWrapper&) = delete;
+    TmpFileWrapper&
+    operator=(TmpFileWrapper&&) = delete;
     ~TmpFileWrapper() {
         if (fd != -1) {
             close(fd);
@@ -181,8 +190,35 @@ TEST(Util, read_from_fd) {
         tmp_file.fd, read_buf.get(), data_size * max_loop));
 
     // On Linux, read() (and similar system calls) will transfer at most 0x7ffff000 (2,147,479,552) bytes once
-    EXPECT_THROW(milvus::index::ReadDataFromFD(
-                     tmp_file.fd, read_buf.get(), data_size * max_loop, INT_MAX),
-                 milvus::SegcoreError);
+    EXPECT_THROW(
+        milvus::index::ReadDataFromFD(
+            tmp_file.fd, read_buf.get(), data_size * max_loop, INT_MAX),
+        milvus::SegcoreError);
 }
 
+TEST(Util, get_common_prefix) {
+    std::string str1 = "";
+    std::string str2 = "milvus";
+    auto common_prefix = milvus::GetCommonPrefix(str1, str2);
+    EXPECT_STREQ(common_prefix.c_str(), "");
+
+    str1 = "milvus";
+    str2 = "milvus is great";
+    common_prefix = milvus::GetCommonPrefix(str1, str2);
+    EXPECT_STREQ(common_prefix.c_str(), "milvus");
+
+    str1 = "milvus";
+    str2 = "";
+    common_prefix = milvus::GetCommonPrefix(str1, str2);
+    EXPECT_STREQ(common_prefix.c_str(), "");
+}
+
+TEST(Util, dis_closer) {
+    EXPECT_TRUE(milvus::query::dis_closer(0.1, 0.2, "L2"));
+    EXPECT_FALSE(milvus::query::dis_closer(0.2, 0.1, "L2"));
+    EXPECT_FALSE(milvus::query::dis_closer(0.1, 0.1, "L2"));
+
+    EXPECT_TRUE(milvus::query::dis_closer(0.2, 0.1, "IP"));
+    EXPECT_FALSE(milvus::query::dis_closer(0.1, 0.2, "IP"));
+    EXPECT_FALSE(milvus::query::dis_closer(0.1, 0.1, "IP"));
+}

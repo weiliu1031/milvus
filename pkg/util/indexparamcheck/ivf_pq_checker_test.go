@@ -46,6 +46,10 @@ func Test_ivfPQChecker_CheckTrain(t *testing.T) {
 
 	invalidParamsNbits := copyParams(validParams)
 	invalidParamsNbits[NBITS] = "NAN"
+	invalidParamsNbitsLower := copyParams(validParams)
+	invalidParamsNbitsLower[NBITS] = "0"
+	invalidParamsNbitsUpper := copyParams(validParams)
+	invalidParamsNbitsUpper[NBITS] = "65"
 
 	invalidParamsWithoutIVF := map[string]string{
 		DIM:    strconv.Itoa(128),
@@ -56,9 +60,6 @@ func Test_ivfPQChecker_CheckTrain(t *testing.T) {
 
 	invalidParamsIVF := copyParams(validParams)
 	invalidParamsIVF[IVFM] = "NAN"
-
-	invalidParamsM := copyParams(validParams)
-	invalidParamsM[DIM] = strconv.Itoa(65536)
 
 	invalidParamsMzero := copyParams(validParams)
 	invalidParamsMzero[IVFM] = "0"
@@ -126,9 +127,10 @@ func Test_ivfPQChecker_CheckTrain(t *testing.T) {
 		{validParamsWithoutDim, false},
 		{invalidParamsDim, false},
 		{invalidParamsNbits, false},
+		{invalidParamsNbitsLower, false},
+		{invalidParamsNbitsUpper, false},
 		{invalidParamsWithoutIVF, false},
 		{invalidParamsIVF, false},
-		{invalidParamsM, false},
 		{invalidParamsMzero, false},
 		{p1, true},
 		{p2, true},
@@ -211,7 +213,7 @@ func Test_ivfPQChecker_CheckValidDataType(t *testing.T) {
 
 	c := newIVFPQChecker()
 	for _, test := range cases {
-		err := c.CheckValidDataType(test.dType)
+		err := c.CheckValidDataType(&schemapb.FieldSchema{DataType: test.dType})
 		if test.errIsNil {
 			assert.NoError(t, err)
 		} else {

@@ -10,18 +10,23 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include "segcore/Utils.h"
+#include <arrow/record_batch.h>
 
+#include <future>
 #include <memory>
 #include <string>
+#include <vector>
 
-#include "index/ScalarIndex.h"
-#include "log/Log.h"
-#include "storage/FieldData.h"
-#include "storage/RemoteChunkManagerSingleton.h"
 #include "common/Common.h"
-#include "storage/ThreadPool.h"
-#include "storage/Util.h"
+#include "common/FieldData.h"
+#include "common/Types.h"
+#include "index/ScalarIndex.h"
 #include "mmap/Utils.h"
+#include "log/Log.h"
+#include "storage/DataCodec.h"
+#include "storage/RemoteChunkManagerSingleton.h"
+#include "storage/ThreadPools.h"
+#include "storage/Util.h"
 
 namespace milvus::segcore {
 
@@ -50,7 +55,7 @@ ParsePksFromFieldData(std::vector<PkType>& pks, const DataArray& data) {
 void
 ParsePksFromFieldData(DataType data_type,
                       std::vector<PkType>& pks,
-                      const std::vector<storage::FieldDataPtr>& datas) {
+                      const std::vector<FieldDataPtr>& datas) {
     int64_t offset = 0;
 
     for (auto& field_data : datas) {
@@ -122,7 +127,7 @@ GetRawDataSizeOfDataArray(const DataArray* data,
                           int64_t num_rows) {
     int64_t result = 0;
     auto data_type = field_meta.get_data_type();
-    if (!datatype_is_variable(data_type)) {
+    if (!IsVariableDataType(data_type)) {
         result = field_meta.get_sizeof() * num_rows;
     } else {
         switch (data_type) {
@@ -202,6 +207,11 @@ GetRawDataSizeOfDataArray(const DataArray* data,
 
                 break;
             }
+            case DataType::VECTOR_SPARSE_FLOAT: {
+                // TODO(SPARSE, size)
+                result += data->vectors().sparse_float_vector().ByteSizeLong();
+                break;
+            }
             default: {
                 PanicInfo(
                     DataTypeInvalid,
@@ -223,6 +233,10 @@ CreateScalarDataArray(int64_t count, const FieldMeta& field_meta) {
     data_array->set_field_id(field_meta.get_id().get());
     data_array->set_type(static_cast<milvus::proto::schema::DataType>(
         field_meta.get_data_type()));
+
+    if (field_meta.is_nullable()) {
+        data_array->mutable_valid_data()->Resize(count, false);
+    }
 
     auto scalar_array = data_array->mutable_scalars();
     switch (data_type) {
@@ -306,8 +320,11 @@ CreateVectorDataArray(int64_t count, const FieldMeta& field_meta) {
         field_meta.get_data_type()));
 
     auto vector_array = data_array->mutable_vectors();
-    auto dim = field_meta.get_dim();
-    vector_array->set_dim(dim);
+    auto dim = 0;
+    if (data_type != DataType::VECTOR_SPARSE_FLOAT) {
+        dim = field_meta.get_dim();
+        vector_array->set_dim(dim);
+    }
     switch (data_type) {
         case DataType::VECTOR_FLOAT: {
             auto length = count * dim;
@@ -329,6 +346,16 @@ CreateVectorDataArray(int64_t count, const FieldMeta& field_meta) {
             obj->resize(length * sizeof(float16));
             break;
         }
+        case DataType::VECTOR_BFLOAT16: {
+            auto length = count * dim;
+            auto obj = vector_array->mutable_bfloat16_vector();
+            obj->resize(length * sizeof(bfloat16));
+            break;
+        }
+        case DataType::VECTOR_SPARSE_FLOAT: {
+            // does nothing here
+            break;
+        }
         default: {
             PanicInfo(DataTypeInvalid,
                       fmt::format("unsupported datatype {}", data_type));
@@ -339,6 +366,7 @@ CreateVectorDataArray(int64_t count, const FieldMeta& field_meta) {
 
 std::unique_ptr<DataArray>
 CreateScalarDataArrayFrom(const void* data_raw,
+                          const void* valid_data,
                           int64_t count,
                           const FieldMeta& field_meta) {
     auto data_type = field_meta.get_data_type();
@@ -346,6 +374,11 @@ CreateScalarDataArrayFrom(const void* data_raw,
     data_array->set_field_id(field_meta.get_id().get());
     data_array->set_type(static_cast<milvus::proto::schema::DataType>(
         field_meta.get_data_type()));
+    if (field_meta.is_nullable()) {
+        auto valid_data_ = reinterpret_cast<const bool*>(valid_data);
+        auto obj = data_array->mutable_valid_data();
+        obj->Add(valid_data_, valid_data_ + count);
+    }
 
     auto scalar_array = data_array->mutable_scalars();
     switch (data_type) {
@@ -437,8 +470,11 @@ CreateVectorDataArrayFrom(const void* data_raw,
         field_meta.get_data_type()));
 
     auto vector_array = data_array->mutable_vectors();
-    auto dim = field_meta.get_dim();
-    vector_array->set_dim(dim);
+    auto dim = 0;
+    if (!IsSparseFloatVectorDataType(data_type)) {
+        dim = field_meta.get_dim();
+        vector_array->set_dim(dim);
+    }
     switch (data_type) {
         case DataType::VECTOR_FLOAT: {
             auto length = count * dim;
@@ -463,6 +499,26 @@ CreateVectorDataArrayFrom(const void* data_raw,
             obj->assign(data, length * sizeof(float16));
             break;
         }
+        case DataType::VECTOR_BFLOAT16: {
+            auto length = count * dim;
+            auto data = reinterpret_cast<const char*>(data_raw);
+            auto obj = vector_array->mutable_bfloat16_vector();
+            obj->assign(data, length * sizeof(bfloat16));
+            break;
+        }
+        case DataType::VECTOR_SPARSE_FLOAT: {
+            SparseRowsToProto(
+                [&](size_t i) {
+                    return reinterpret_cast<
+                               const knowhere::sparse::SparseRow<float>*>(
+                               data_raw) +
+                           i;
+                },
+                count,
+                vector_array->mutable_sparse_float_vector());
+            vector_array->set_dim(vector_array->sparse_float_vector().dim());
+            break;
+        }
         default: {
             PanicInfo(DataTypeInvalid,
                       fmt::format("unsupported datatype {}", data_type));
@@ -473,12 +529,14 @@ CreateVectorDataArrayFrom(const void* data_raw,
 
 std::unique_ptr<DataArray>
 CreateDataArrayFrom(const void* data_raw,
+                    const void* valid_data,
                     int64_t count,
                     const FieldMeta& field_meta) {
     auto data_type = field_meta.get_data_type();
 
-    if (!datatype_is_vector(data_type)) {
-        return CreateScalarDataArrayFrom(data_raw, count, field_meta);
+    if (!IsVectorDataType(data_type)) {
+        return CreateScalarDataArrayFrom(
+            data_raw, valid_data, count, field_meta);
     }
 
     return CreateVectorDataArrayFrom(data_raw, count, field_meta);
@@ -486,30 +544,41 @@ CreateDataArrayFrom(const void* data_raw,
 
 // TODO remove merge dataArray, instead fill target entity when get data slice
 std::unique_ptr<DataArray>
-MergeDataArray(
-    std::vector<std::pair<milvus::SearchResult*, int64_t>>& result_offsets,
-    const FieldMeta& field_meta) {
+MergeDataArray(std::vector<MergeBase>& merge_bases,
+               const FieldMeta& field_meta) {
     auto data_type = field_meta.get_data_type();
     auto data_array = std::make_unique<DataArray>();
     data_array->set_field_id(field_meta.get_id().get());
+    auto nullable = field_meta.is_nullable();
     data_array->set_type(static_cast<milvus::proto::schema::DataType>(
         field_meta.get_data_type()));
 
-    for (auto& result_pair : result_offsets) {
-        auto src_field_data =
-            result_pair.first->output_fields_data_[field_meta.get_id()].get();
-        auto src_offset = result_pair.second;
+    for (auto& merge_base : merge_bases) {
+        auto src_field_data = merge_base.get_field_data(field_meta.get_id());
+        auto src_offset = merge_base.getOffset();
         AssertInfo(data_type == DataType(src_field_data->type()),
                    "merge field data type not consistent");
         if (field_meta.is_vector()) {
             auto vector_array = data_array->mutable_vectors();
-            auto dim = field_meta.get_dim();
-            vector_array->set_dim(dim);
+            auto dim = 0;
+            if (!IsSparseFloatVectorDataType(data_type)) {
+                dim = field_meta.get_dim();
+                vector_array->set_dim(dim);
+            }
             if (field_meta.get_data_type() == DataType::VECTOR_FLOAT) {
                 auto data = VEC_FIELD_DATA(src_field_data, float).data();
                 auto obj = vector_array->mutable_float_vector();
                 obj->mutable_data()->Add(data + src_offset * dim,
                                          data + (src_offset + 1) * dim);
+            } else if (field_meta.get_data_type() == DataType::VECTOR_FLOAT16) {
+                auto data = VEC_FIELD_DATA(src_field_data, float16);
+                auto obj = vector_array->mutable_float16_vector();
+                obj->assign(data, dim * sizeof(float16));
+            } else if (field_meta.get_data_type() ==
+                       DataType::VECTOR_BFLOAT16) {
+                auto data = VEC_FIELD_DATA(src_field_data, bfloat16);
+                auto obj = vector_array->mutable_bfloat16_vector();
+                obj->assign(data, dim * sizeof(bfloat16));
             } else if (field_meta.get_data_type() == DataType::VECTOR_BINARY) {
                 AssertInfo(
                     dim % 8 == 0,
@@ -518,11 +587,26 @@ MergeDataArray(
                 auto data = VEC_FIELD_DATA(src_field_data, binary);
                 auto obj = vector_array->mutable_binary_vector();
                 obj->assign(data + src_offset * num_bytes, num_bytes);
+            } else if (field_meta.get_data_type() ==
+                       DataType::VECTOR_SPARSE_FLOAT) {
+                auto src = src_field_data->vectors().sparse_float_vector();
+                auto dst = vector_array->mutable_sparse_float_vector();
+                if (src.dim() > dst->dim()) {
+                    dst->set_dim(src.dim());
+                }
+                vector_array->set_dim(dst->dim());
+                *dst->mutable_contents() = src.contents();
             } else {
                 PanicInfo(DataTypeInvalid,
                           fmt::format("unsupported datatype {}", data_type));
             }
             continue;
+        }
+
+        if (nullable) {
+            auto data = src_field_data->valid_data().data();
+            auto obj = data_array->mutable_valid_data();
+            *(obj->Add()) = data[src_offset];
         }
 
         auto scalar_array = data_array->mutable_scalars();
@@ -585,7 +669,6 @@ MergeDataArray(
             }
         }
     }
-
     return data_array;
 }
 
@@ -600,6 +683,11 @@ ReverseDataFromIndex(const index::IndexBase* index,
     data_array->set_field_id(field_meta.get_id().get());
     data_array->set_type(static_cast<milvus::proto::schema::DataType>(
         field_meta.get_data_type()));
+    auto nullable = field_meta.is_nullable();
+    std::vector<bool> valid_data;
+    if (nullable) {
+        valid_data.resize(count);
+    }
 
     auto scalar_array = data_array->mutable_scalars();
     switch (data_type) {
@@ -608,7 +696,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<bool> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_bool_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -619,7 +716,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<int8_t> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_int_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -630,7 +736,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<int16_t> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_int_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -641,7 +756,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<int32_t> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_int_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -652,7 +776,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<int64_t> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_long_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -663,7 +796,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<float> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_float_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -674,7 +816,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<double> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_double_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -685,7 +836,16 @@ ReverseDataFromIndex(const index::IndexBase* index,
             auto ptr = dynamic_cast<const IndexType*>(index);
             std::vector<std::string> raw_data(count);
             for (int64_t i = 0; i < count; ++i) {
-                raw_data[i] = ptr->Reverse_Lookup(seg_offsets[i]);
+                auto raw = ptr->Reverse_Lookup(seg_offsets[i]);
+                // if has no value, means nullable must be true, no need to check nullable again here
+                if (!raw.has_value()) {
+                    valid_data[i] = false;
+                    continue;
+                }
+                if (nullable) {
+                    valid_data[i] = true;
+                }
+                raw_data[i] = raw.value();
             }
             auto obj = scalar_array->mutable_string_data();
             *(obj->mutable_data()) = {raw_data.begin(), raw_data.end()};
@@ -697,89 +857,84 @@ ReverseDataFromIndex(const index::IndexBase* index,
         }
     }
 
+    if (nullable) {
+        *(data_array->mutable_valid_data()) = {valid_data.begin(),
+                                               valid_data.end()};
+    }
+
     return data_array;
 }
-void
-LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,
-                          SchemaPtr schema,
-                          FieldDataInfo& field_data_info) {
-    // log all schema ids
-    for (auto& field : schema->get_fields()) {
-    }
-    auto res = space->ScanData();
-    if (!res.ok()) {
-        PanicInfo(S3Error, "failed to create scan iterator");
-    }
-    auto reader = res.value();
-    for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
-        if (!rec.ok()) {
-            PanicInfo(DataFormatBroken, "failed to read data");
-        }
-        auto data = rec.ValueUnsafe();
-        auto total_num_rows = data->num_rows();
-        for (auto& field : schema->get_fields()) {
-            if (field.second.get_id().get() != field_data_info.field_id) {
-                continue;
-            }
-            auto col_data =
-                data->GetColumnByName(field.second.get_name().get());
-            auto field_data = storage::CreateFieldData(
-                field.second.get_data_type(),
-                field.second.is_vector() ? field.second.get_dim() : 0,
-                total_num_rows);
-            field_data->FillFieldData(col_data);
-            field_data_info.channel->push(field_data);
-        }
-    }
-    field_data_info.channel->close();
-}
+
 // init segcore storage config first, and create default remote chunk manager
 // segcore use default remote chunk manager to load data from minio/s3
 void
-LoadFieldDatasFromRemote(std::vector<std::string>& remote_files,
-                         storage::FieldDataChannelPtr channel) {
+LoadArrowReaderFromRemote(const std::vector<std::string>& remote_files,
+                          std::shared_ptr<ArrowReaderChannel> channel) {
     try {
-        auto parallel_degree = static_cast<uint64_t>(
-            DEFAULT_FIELD_MAX_MEMORY_LIMIT / FILE_SLICE_SIZE);
-
         auto rcm = storage::RemoteChunkManagerSingleton::GetInstance()
                        .GetRemoteChunkManager();
-        std::sort(remote_files.begin(),
-                  remote_files.end(),
-                  [](const std::string& a, const std::string& b) {
-                      return std::stol(a.substr(a.find_last_of('/') + 1)) <
-                             std::stol(b.substr(b.find_last_of('/') + 1));
-                  });
+        auto& pool = ThreadPools::GetThreadPool(ThreadPoolPriority::HIGH);
 
-        std::vector<std::string> batch_files;
-
-        auto FetchRawData = [&]() {
-            auto result = storage::GetObjectData(rcm.get(), batch_files);
-            for (auto& data : result) {
-                channel->push(data);
-            }
-        };
-
-        for (auto& file : remote_files) {
-            if (batch_files.size() >= parallel_degree) {
-                FetchRawData();
-                batch_files.clear();
-            }
-
-            batch_files.emplace_back(file);
+        std::vector<std::future<std::shared_ptr<milvus::ArrowDataWrapper>>>
+            futures;
+        futures.reserve(remote_files.size());
+        for (const auto& file : remote_files) {
+            auto future = pool.Submit([&]() {
+                auto fileSize = rcm->Size(file);
+                auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[fileSize]);
+                rcm->Read(file, buf.get(), fileSize);
+                auto result =
+                    storage::DeserializeFileData(buf, fileSize, false);
+                result->SetData(buf);
+                return result->GetReader();
+            });
+            futures.emplace_back(std::move(future));
         }
 
-        if (batch_files.size() > 0) {
-            FetchRawData();
+        for (auto& future : futures) {
+            auto field_data = future.get();
+            channel->push(field_data);
         }
 
         channel->close();
-    } catch (std::exception e) {
-        LOG_SEGCORE_INFO_ << "failed to load data from remote: " << e.what();
-        channel->close(std::move(e));
+    } catch (std::exception& e) {
+        LOG_INFO("failed to load data from remote: {}", e.what());
+        channel->close(std::current_exception());
     }
 }
 
+void
+LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
+                         FieldDataChannelPtr channel) {
+    try {
+        auto rcm = storage::RemoteChunkManagerSingleton::GetInstance()
+                       .GetRemoteChunkManager();
+        auto& pool = ThreadPools::GetThreadPool(ThreadPoolPriority::HIGH);
+
+        std::vector<std::future<FieldDataPtr>> futures;
+        futures.reserve(remote_files.size());
+        for (const auto& file : remote_files) {
+            auto future = pool.Submit([&]() {
+                auto fileSize = rcm->Size(file);
+                auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[fileSize]);
+                rcm->Read(file, buf.get(), fileSize);
+                auto result = storage::DeserializeFileData(buf, fileSize);
+                return result->GetFieldData();
+            });
+            futures.emplace_back(std::move(future));
+        }
+
+        for (auto& future : futures) {
+            auto field_data = future.get();
+            channel->push(field_data);
+        }
+
+        channel->close();
+    } catch (std::exception& e) {
+        LOG_INFO("failed to load data from remote: {}", e.what());
+        channel->close(std::current_exception());
+    }
+}
 int64_t
 upper_bound(const ConcurrentVector<Timestamp>& timestamps,
             int64_t first,

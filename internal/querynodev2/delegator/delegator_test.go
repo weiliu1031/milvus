@@ -32,6 +32,7 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
@@ -39,6 +40,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/cluster"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tsafe"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/streamrpc"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
@@ -63,7 +65,9 @@ type DelegatorSuite struct {
 	loader        *segments.MockLoader
 	mq            *msgstream.MockMsgStream
 
-	delegator ShardDelegator
+	delegator    ShardDelegator
+	chunkManager storage.ChunkManager
+	rootPath     string
 }
 
 func (s *DelegatorSuite) SetupSuite() {
@@ -94,7 +98,7 @@ func (s *DelegatorSuite) SetupTest() {
 			ms.EXPECT().Collection().Return(info.GetCollectionID())
 			ms.EXPECT().Indexes().Return(nil)
 			ms.EXPECT().RowNum().Return(info.GetNumOfRows())
-			ms.EXPECT().Delete(mock.Anything, mock.Anything).Return(nil)
+			ms.EXPECT().Delete(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			return ms
 		})
 	}, nil)
@@ -153,6 +157,11 @@ func (s *DelegatorSuite) SetupTest() {
 	})
 
 	s.mq = &msgstream.MockMsgStream{}
+	s.rootPath = "delegator_test"
+
+	// init chunkManager
+	chunkManagerFactory := storage.NewTestChunkManagerFactory(paramtable.Get(), s.rootPath)
+	s.chunkManager, _ = chunkManagerFactory.NewPersistentStorageChunkManager(context.Background())
 
 	var err error
 	//	s.delegator, err = NewShardDelegator(s.collectionID, s.replicaID, s.vchannelName, s.version, s.workerManager, s.manager, s.tsafeManager, s.loader)
@@ -160,13 +169,91 @@ func (s *DelegatorSuite) SetupTest() {
 		NewMsgStreamFunc: func(_ context.Context) (msgstream.MsgStream, error) {
 			return s.mq, nil
 		},
-	}, 10000, nil)
+	}, 10000, nil, s.chunkManager)
 	s.Require().NoError(err)
 }
 
 func (s *DelegatorSuite) TearDownTest() {
 	s.delegator.Close()
 	s.delegator = nil
+}
+
+func (s *DelegatorSuite) TestCreateDelegatorWithFunction() {
+	s.Run("init function failed", func() {
+		manager := segments.NewManager()
+		manager.Collection.PutOrRef(s.collectionID, &schemapb.CollectionSchema{
+			Name: "TestCollection",
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:         "id",
+					FieldID:      100,
+					IsPrimaryKey: true,
+					DataType:     schemapb.DataType_Int64,
+					AutoID:       true,
+				}, {
+					Name:         "vector",
+					FieldID:      101,
+					IsPrimaryKey: false,
+					DataType:     schemapb.DataType_SparseFloatVector,
+				},
+			},
+			Functions: []*schemapb.FunctionSchema{{
+				Type:           schemapb.FunctionType_BM25,
+				InputFieldIds:  []int64{102},
+				OutputFieldIds: []int64{101, 103}, // invalid output field
+			}},
+		}, nil, nil)
+
+		_, err := NewShardDelegator(context.Background(), s.collectionID, s.replicaID, s.vchannelName, s.version, s.workerManager, manager, s.tsafeManager, s.loader, &msgstream.MockMqFactory{
+			NewMsgStreamFunc: func(_ context.Context) (msgstream.MsgStream, error) {
+				return s.mq, nil
+			},
+		}, 10000, nil, s.chunkManager)
+		s.Error(err)
+	})
+
+	s.Run("init function failed", func() {
+		manager := segments.NewManager()
+		manager.Collection.PutOrRef(s.collectionID, &schemapb.CollectionSchema{
+			Name: "TestCollection",
+			Fields: []*schemapb.FieldSchema{
+				{
+					Name:         "id",
+					FieldID:      100,
+					IsPrimaryKey: true,
+					DataType:     schemapb.DataType_Int64,
+					AutoID:       true,
+				}, {
+					Name:         "vector",
+					FieldID:      101,
+					IsPrimaryKey: false,
+					DataType:     schemapb.DataType_SparseFloatVector,
+				}, {
+					Name:     "text",
+					FieldID:  102,
+					DataType: schemapb.DataType_VarChar,
+					TypeParams: []*commonpb.KeyValuePair{
+						{
+							Key:   common.MaxLengthKey,
+							Value: "256",
+						},
+					},
+				},
+			},
+			Functions: []*schemapb.FunctionSchema{{
+				Type:           schemapb.FunctionType_BM25,
+				InputFieldIds:  []int64{102},
+				OutputFieldIds: []int64{101},
+			}},
+		}, nil, nil)
+
+		_, err := NewShardDelegator(context.Background(), s.collectionID, s.replicaID, s.vchannelName, s.version, s.workerManager, manager, s.tsafeManager, s.loader, &msgstream.MockMqFactory{
+			NewMsgStreamFunc: func(_ context.Context) (msgstream.MsgStream, error) {
+				return s.mq, nil
+			},
+		}, 10000, nil, s.chunkManager)
+		s.NoError(err)
+	})
 }
 
 func (s *DelegatorSuite) TestBasicInfo() {
@@ -244,7 +331,7 @@ func (s *DelegatorSuite) initSegments() {
 			Version:     2001,
 		},
 	)
-	s.delegator.SyncTargetVersion(2001, []int64{1004}, []int64{1000, 1001, 1002, 1003}, []int64{})
+	s.delegator.SyncTargetVersion(2001, []int64{1004}, []int64{1000, 1001, 1002, 1003}, []int64{}, &msgpb.MsgPosition{})
 }
 
 func (s *DelegatorSuite) TestSearch() {
@@ -265,7 +352,7 @@ func (s *DelegatorSuite) TestSearch() {
 		worker1.EXPECT().SearchSegments(mock.Anything, mock.AnythingOfType("*querypb.SearchRequest")).
 			Run(func(_ context.Context, req *querypb.SearchRequest) {
 				s.EqualValues(1, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				if req.GetScope() == querypb.DataScope_Streaming {
 					s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 					s.ElementsMatch([]int64{1004}, req.GetSegmentIDs())
@@ -278,7 +365,7 @@ func (s *DelegatorSuite) TestSearch() {
 		worker2.EXPECT().SearchSegments(mock.Anything, mock.AnythingOfType("*querypb.SearchRequest")).
 			Run(func(_ context.Context, req *querypb.SearchRequest) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -333,7 +420,7 @@ func (s *DelegatorSuite) TestSearch() {
 		worker2.EXPECT().SearchSegments(mock.Anything, mock.AnythingOfType("*querypb.SearchRequest")).
 			Run(func(_ context.Context, req *querypb.SearchRequest) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -373,7 +460,7 @@ func (s *DelegatorSuite) TestSearch() {
 		worker2.EXPECT().SearchSegments(mock.Anything, mock.AnythingOfType("*querypb.SearchRequest")).
 			Run(func(_ context.Context, req *querypb.SearchRequest) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -486,7 +573,7 @@ func (s *DelegatorSuite) TestQuery() {
 		worker1.EXPECT().QuerySegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest")).
 			Run(func(_ context.Context, req *querypb.QueryRequest) {
 				s.EqualValues(1, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				if req.GetScope() == querypb.DataScope_Streaming {
 					s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 					s.ElementsMatch([]int64{1004}, req.GetSegmentIDs())
@@ -499,7 +586,7 @@ func (s *DelegatorSuite) TestQuery() {
 		worker2.EXPECT().QuerySegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest")).
 			Run(func(_ context.Context, req *querypb.QueryRequest) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -553,7 +640,7 @@ func (s *DelegatorSuite) TestQuery() {
 		worker2.EXPECT().QuerySegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest")).
 			Run(func(_ context.Context, req *querypb.QueryRequest) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -590,7 +677,7 @@ func (s *DelegatorSuite) TestQuery() {
 		worker2.EXPECT().QuerySegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest")).
 			Run(func(_ context.Context, req *querypb.QueryRequest) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -683,7 +770,7 @@ func (s *DelegatorSuite) TestQueryStream() {
 		worker1.EXPECT().QueryStreamSegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest"), mock.Anything).
 			Run(func(ctx context.Context, req *querypb.QueryRequest, srv streamrpc.QueryStreamServer) {
 				s.EqualValues(1, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				if req.GetScope() == querypb.DataScope_Streaming {
 					s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 					s.ElementsMatch([]int64{1004}, req.GetSegmentIDs())
@@ -706,7 +793,7 @@ func (s *DelegatorSuite) TestQueryStream() {
 		worker2.EXPECT().QueryStreamSegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest"), mock.Anything).
 			Run(func(ctx context.Context, req *querypb.QueryRequest, srv streamrpc.QueryStreamServer) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -839,7 +926,7 @@ func (s *DelegatorSuite) TestQueryStream() {
 		worker2.EXPECT().QueryStreamSegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest"), mock.Anything).
 			Run(func(ctx context.Context, req *querypb.QueryRequest, srv streamrpc.QueryStreamServer) {
 				s.EqualValues(2, req.Req.GetBase().GetTargetID())
-				s.True(req.GetFromShardLeader())
+
 				s.Equal(querypb.DataScope_Historical, req.GetScope())
 				s.EqualValues([]string{s.vchannelName}, req.GetDmlChannels())
 				s.ElementsMatch([]int64{1002, 1003}, req.GetSegmentIDs())
@@ -1179,4 +1266,24 @@ func TestDelegatorTSafeListenerClosed(t *testing.T) {
 	sd.Close()
 	assert.Equal(t, sd.Serviceable(), false)
 	assert.Equal(t, sd.Stopped(), true)
+}
+
+func TestDelegatorSearchBM25InvalidMetricType(t *testing.T) {
+	paramtable.Init()
+	searchReq := &querypb.SearchRequest{
+		Req: &internalpb.SearchRequest{
+			Base: commonpbutil.NewMsgBase(),
+		},
+	}
+
+	searchReq.Req.FieldId = 101
+	searchReq.Req.MetricType = metric.IP
+
+	sd := &shardDelegator{
+		isBM25Field: map[int64]bool{101: true},
+	}
+
+	_, err := sd.search(context.Background(), searchReq, []SnapshotItem{}, []SegmentEntry{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use BM25 metric type when searching against BM25 Function output field")
 }

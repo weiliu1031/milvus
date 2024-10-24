@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/lingdor/stackerror"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -87,7 +86,7 @@ func TestAllError(t *testing.T) {
 	ctx := context.Background()
 
 	testFn := func() error {
-		return stackerror.New("some error")
+		return errors.New("some error")
 	}
 
 	err := Do(ctx, testFn, Attempts(3))
@@ -151,4 +150,81 @@ func TestWrap(t *testing.T) {
 	fmt.Println(err2)
 	assert.True(t, errors.Is(err2, merr.ErrSegmentNotFound))
 	assert.False(t, IsRecoverable(err2))
+}
+
+func TestRetryErrorParam(t *testing.T) {
+	{
+		mockErr := errors.New("mock not retry error")
+		runTimes := 0
+		err := Do(context.Background(), func() error {
+			runTimes++
+			return mockErr
+		}, RetryErr(func(err error) bool {
+			return err != mockErr
+		}))
+
+		assert.Error(t, err)
+		assert.Equal(t, 1, runTimes)
+	}
+
+	{
+		mockErr := errors.New("mock retry error")
+		runTimes := 0
+		err := Do(context.Background(), func() error {
+			runTimes++
+			return mockErr
+		}, Attempts(3), RetryErr(func(err error) bool {
+			return err == mockErr
+		}))
+
+		assert.Error(t, err)
+		assert.Equal(t, 3, runTimes)
+	}
+}
+
+func TestHandle(t *testing.T) {
+	// test context done
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := Handle(ctx, func() (bool, error) {
+		return false, nil
+	}, Attempts(5))
+	assert.ErrorIs(t, err, context.Canceled)
+
+	fakeErr := errors.New("mock retry error")
+	// test return error and retry
+	counter := 0
+	err = Handle(context.Background(), func() (bool, error) {
+		counter++
+		if counter < 3 {
+			return true, fakeErr
+		}
+		return false, nil
+	}, Attempts(10))
+	assert.NoError(t, err)
+
+	// test ctx done before return retry success
+	counter = 0
+	ctx1, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = Handle(ctx1, func() (bool, error) {
+		counter++
+		if counter < 5 {
+			return true, fakeErr
+		}
+		return false, nil
+	}, Attempts(10))
+	assert.ErrorIs(t, err, fakeErr)
+
+	// test return error and not retry
+	err = Handle(context.Background(), func() (bool, error) {
+		return false, fakeErr
+	}, Attempts(10))
+	assert.ErrorIs(t, err, fakeErr)
+
+	// test return nil
+	err = Handle(context.Background(), func() (bool, error) {
+		return false, nil
+	}, Attempts(10))
+	assert.NoError(t, err)
 }

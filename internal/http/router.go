@@ -24,3 +24,53 @@ const LogLevelRouterPath = "/log/level"
 
 // EventLogRouterPath is path for eventlog control.
 const EventLogRouterPath = "/eventlog"
+
+// ExprPath is path for expression.
+const ExprPath = "/expr"
+
+// StaticPath is path for the static view.
+const StaticPath = "/static/"
+
+const RootPath = "/"
+
+// Prometheus restful api path
+const (
+	MetricsPath        = "/metrics"
+	MetricsDefaultPath = "/metrics_default"
+)
+
+// for every component, register it's own api to trigger stop and check ready
+const (
+	RouteTriggerStopPath     = "/management/stop"
+	RouteCheckComponentReady = "/management/check/ready"
+	RouteWebUI               = "/webui/"
+)
+
+// proxy management restful api root path
+const (
+	RouteGcPause  = "/management/datacoord/garbage_collection/pause"
+	RouteGcResume = "/management/datacoord/garbage_collection/resume"
+
+	RouteSuspendQueryCoordBalance = "/management/querycoord/balance/suspend"
+	RouteResumeQueryCoordBalance  = "/management/querycoord/balance/resume"
+	RouteTransferSegment          = "/management/querycoord/transfer/segment"
+	RouteTransferChannel          = "/management/querycoord/transfer/channel"
+
+	RouteSuspendQueryNode           = "/management/querycoord/node/suspend"
+	RouteResumeQueryNode            = "/management/querycoord/node/resume"
+	RouteListQueryNode              = "/management/querycoord/node/list"
+	RouteGetQueryNodeDistribution   = "/management/querycoord/distribution/get"
+	RouteCheckQueryNodeDistribution = "/management/querycoord/distribution/check"
+)
+
+// for WebUI restful api root path
+const (
+	ClusterInfoPath         = "/_cluster/info"
+	ClusterConfigsPath      = "/_cluster/configs"
+	ClusterClientsPath      = "/_cluster/clients"
+	ClusterDependenciesPath = "/_cluster/dependencies"
+	HookConfigsPath         = "/_hook/configs"
+	QcoordSegmentsPath      = "/_qcoord/segments"
+	QcoordChannelsPath      = "/_qcoord/channels"
+	QcoordTasksPath         = "/_qcoord/tasks"
+)

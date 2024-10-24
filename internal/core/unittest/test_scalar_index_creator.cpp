@@ -86,7 +86,7 @@ class TypedScalarIndexCreatorTest : public ::testing::Test {
 using ScalarT = ::testing::
     Types<bool, int8_t, int16_t, int32_t, int64_t, float, double, std::string>;
 
-TYPED_TEST_CASE_P(TypedScalarIndexCreatorTest);
+TYPED_TEST_SUITE_P(TypedScalarIndexCreatorTest);
 
 TYPED_TEST_P(TypedScalarIndexCreatorTest, Dummy) {
     using T = TypeParam;
@@ -138,7 +138,7 @@ TYPED_TEST_P(TypedScalarIndexCreatorTest, Codec) {
             milvus::DataType(dtype),
             config,
             milvus::storage::FileManagerContext());
-        auto arr = GenArr<T>(nb);
+        auto arr = GenSortedArr<T>(nb);
         build_index<T>(creator, arr);
         auto binary_set = creator->Serialize();
         auto copy_creator = milvus::indexbuilder::CreateScalarIndex(
@@ -149,11 +149,11 @@ TYPED_TEST_P(TypedScalarIndexCreatorTest, Codec) {
     }
 }
 
-REGISTER_TYPED_TEST_CASE_P(TypedScalarIndexCreatorTest,
-                           Dummy,
-                           Constructor,
-                           Codec);
+REGISTER_TYPED_TEST_SUITE_P(TypedScalarIndexCreatorTest,
+                            Dummy,
+                            Constructor,
+                            Codec);
 
-INSTANTIATE_TYPED_TEST_CASE_P(ArithmeticCheck,
-                              TypedScalarIndexCreatorTest,
-                              ScalarT);
+INSTANTIATE_TYPED_TEST_SUITE_P(ArithmeticCheck,
+                               TypedScalarIndexCreatorTest,
+                               ScalarT);

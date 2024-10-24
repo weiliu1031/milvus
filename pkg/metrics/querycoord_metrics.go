@@ -17,6 +17,8 @@
 package metrics
 
 import (
+	"fmt"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -26,10 +28,16 @@ const (
 	SegmentGrowTaskLabel   = "segment_grow"
 	SegmentReduceTaskLabel = "segment_reduce"
 	SegmentMoveTaskLabel   = "segment_move"
+	SegmentUpdateTaskLabel = "segment_update"
 
 	ChannelGrowTaskLabel   = "channel_grow"
 	ChannelReduceTaskLabel = "channel_reduce"
 	ChannelMoveTaskLabel   = "channel_move"
+
+	LeaderGrowTaskLabel   = "leader_grow"
+	LeaderReduceTaskLabel = "leader_reduce"
+
+	UnknownTaskLabel = "unknown"
 
 	QueryCoordTaskType = "querycoord_task_type"
 )
@@ -104,6 +112,26 @@ var (
 			Name:      "querynode_num",
 			Help:      "number of QueryNodes managered by QueryCoord",
 		}, []string{})
+
+	QueryCoordCurrentTargetCheckpointUnixSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.QueryCoordRole,
+			Name:      "current_target_checkpoint_unix_seconds",
+			Help:      "current target checkpoint timestamp in unix seconds",
+		}, []string{
+			nodeIDLabelName,
+			channelNameLabelName,
+		})
+
+	QueryCoordTaskLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.QueryCoordRole,
+			Name:      "task_latency",
+			Help:      "latency of all kind of task in query coord scheduler scheduler",
+			Buckets:   longTaskBuckets,
+		}, []string{collectionIDLabelName, taskTypeLabel, channelNameLabelName})
 )
 
 // RegisterQueryCoord registers QueryCoord metrics
@@ -116,4 +144,12 @@ func RegisterQueryCoord(registry *prometheus.Registry) {
 	registry.MustRegister(QueryCoordReleaseLatency)
 	registry.MustRegister(QueryCoordTaskNum)
 	registry.MustRegister(QueryCoordNumQueryNodes)
+	registry.MustRegister(QueryCoordCurrentTargetCheckpointUnixSeconds)
+	registry.MustRegister(QueryCoordTaskLatency)
+}
+
+func CleanQueryCoordMetricsWithCollectionID(collectionID int64) {
+	QueryCoordTaskLatency.DeletePartialMatch(prometheus.Labels{
+		collectionIDLabelName: fmt.Sprint(collectionID),
+	})
 }

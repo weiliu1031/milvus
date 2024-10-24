@@ -19,27 +19,35 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "storage/FieldData.h"
+#include "arrow/record_batch.h"
+#include "common/FieldData.h"
+#include "storage/DataCodec.h"
 
 namespace milvus {
 
 struct FieldDataInfo {
     FieldDataInfo() {
-        channel = std::make_shared<storage::FieldDataChannel>();
+        channel = std::make_shared<FieldDataChannel>();
+        arrow_reader_channel = std::make_shared<ArrowReaderChannel>();
     }
 
     FieldDataInfo(int64_t field_id,
                   size_t row_count,
-                  std::string mmap_dir_path = "")
+                  std::string mmap_dir_path = "",
+                  bool growing = true)
         : field_id(field_id),
           row_count(row_count),
           mmap_dir_path(std::move(mmap_dir_path)) {
-        channel = std::make_shared<storage::FieldDataChannel>();
+        if (growing) {
+            channel = std::make_shared<FieldDataChannel>();
+        } else {
+            arrow_reader_channel = std::make_shared<ArrowReaderChannel>();
+        }
     }
 
     FieldDataInfo(int64_t field_id,
                   size_t row_count,
-                  storage::FieldDataChannelPtr channel)
+                  FieldDataChannelPtr channel)
         : field_id(field_id),
           row_count(row_count),
           channel(std::move(channel)) {
@@ -48,7 +56,7 @@ struct FieldDataInfo {
     FieldDataInfo(int64_t field_id,
                   size_t row_count,
                   std::string mmap_dir_path,
-                  storage::FieldDataChannelPtr channel)
+                  FieldDataChannelPtr channel)
         : field_id(field_id),
           row_count(row_count),
           mmap_dir_path(std::move(mmap_dir_path)),
@@ -57,23 +65,35 @@ struct FieldDataInfo {
 
     FieldDataInfo(int64_t field_id,
                   size_t row_count,
-                  const std::vector<storage::FieldDataPtr>& batch)
+                  const std::vector<FieldDataPtr>& batch)
         : field_id(field_id), row_count(row_count) {
-        channel = std::make_shared<storage::FieldDataChannel>();
+        channel = std::make_shared<FieldDataChannel>();
         for (auto& data : batch) {
             channel->push(data);
         }
         channel->close();
     }
 
+    FieldDataInfo(
+        int64_t field_id,
+        size_t row_count,
+        const std::vector<std::shared_ptr<milvus::ArrowDataWrapper>>& batch)
+        : field_id(field_id), row_count(row_count) {
+        arrow_reader_channel = std::make_shared<ArrowReaderChannel>();
+        for (auto& data : batch) {
+            arrow_reader_channel->push(data);
+        }
+        arrow_reader_channel->close();
+    }
+
     FieldDataInfo(int64_t field_id,
                   size_t row_count,
                   std::string mmap_dir_path,
-                  const std::vector<storage::FieldDataPtr>& batch)
+                  const std::vector<FieldDataPtr>& batch)
         : field_id(field_id),
           row_count(row_count),
           mmap_dir_path(std::move(mmap_dir_path)) {
-        channel = std::make_shared<storage::FieldDataChannel>();
+        channel = std::make_shared<FieldDataChannel>();
         for (auto& data : batch) {
             channel->push(data);
         }
@@ -83,6 +103,7 @@ struct FieldDataInfo {
     int64_t field_id;
     size_t row_count;
     std::string mmap_dir_path;
-    storage::FieldDataChannelPtr channel;
+    FieldDataChannelPtr channel;
+    std::shared_ptr<ArrowReaderChannel> arrow_reader_channel;
 };
 }  // namespace milvus

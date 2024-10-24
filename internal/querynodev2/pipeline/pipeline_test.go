@@ -30,9 +30,9 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tsafe"
+	"github.com/milvus-io/milvus/pkg/mq/common"
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -108,15 +108,21 @@ func (suite *PipelineTestSuite) SetupTest() {
 func (suite *PipelineTestSuite) TestBasic() {
 	// init mock
 	//	mock collection manager
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64)
-	collection := segments.NewCollection(suite.collectionID, schema, segments.GenTestIndexMeta(suite.collectionID, schema), querypb.LoadType_LoadCollection)
+	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, true)
+	collection := segments.NewCollection(suite.collectionID, schema, segments.GenTestIndexMeta(suite.collectionID, schema), &querypb.LoadMetaInfo{
+		LoadType: querypb.LoadType_LoadCollection,
+	})
 	suite.collectionManager.EXPECT().Get(suite.collectionID).Return(collection)
 
 	//  mock mq factory
-	suite.msgDispatcher.EXPECT().Register(mock.Anything, suite.channel, mock.Anything, mqwrapper.SubscriptionPositionUnknown).Return(suite.msgChan, nil)
+	suite.msgDispatcher.EXPECT().Register(mock.Anything, suite.channel, mock.Anything, common.SubscriptionPositionUnknown).Return(suite.msgChan, nil)
 	suite.msgDispatcher.EXPECT().Deregister(suite.channel)
 
 	//	mock delegator
+	suite.delegator.EXPECT().AddExcludedSegments(mock.Anything).Maybe()
+	suite.delegator.EXPECT().VerifyExcludedSegments(mock.Anything, mock.Anything).Return(true).Maybe()
+	suite.delegator.EXPECT().TryCleanExcludedSegments(mock.Anything).Maybe()
+
 	suite.delegator.EXPECT().ProcessInsert(mock.Anything).Run(
 		func(insertRecords map[int64]*delegator.InsertData) {
 			for segmentID := range insertRecords {

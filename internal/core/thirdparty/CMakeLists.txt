@@ -36,9 +36,10 @@ add_subdirectory(boost_ext)
 add_subdirectory(rocksdb)
 add_subdirectory(rdkafka)
 add_subdirectory(simdjson)
-add_subdirectory(opendal)
-
-add_subdirectory(milvus-storage)
+if (USE_OPENDAL)
+    add_subdirectory(opendal)
+endif()
+add_subdirectory(tantivy)
 
 if (LINUX)
     add_subdirectory(jemalloc)

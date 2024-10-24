@@ -54,16 +54,11 @@ type Broker interface {
 
 	WatchChannels(ctx context.Context, info *watchInfo) error
 	UnwatchChannels(ctx context.Context, info *watchInfo) error
-	Flush(ctx context.Context, cID int64, segIDs []int64) error
-	Import(ctx context.Context, req *datapb.ImportTaskRequest) (*datapb.ImportTaskResponse, error)
-	UnsetIsImportingState(context.Context, *datapb.UnsetIsImportingStateRequest) (*commonpb.Status, error)
 	GetSegmentStates(context.Context, *datapb.GetSegmentStatesRequest) (*datapb.GetSegmentStatesResponse, error)
 	GcConfirm(ctx context.Context, collectionID, partitionID UniqueID) bool
 
 	DropCollectionIndex(ctx context.Context, collID UniqueID, partIDs []UniqueID) error
-	GetSegmentIndexState(ctx context.Context, collID UniqueID, indexName string, segIDs []UniqueID) ([]*indexpb.SegmentIndexState, error)
-	DescribeIndex(ctx context.Context, colID UniqueID) (*indexpb.DescribeIndexResponse, error)
-
+	// notify observer to clean their meta cache
 	BroadcastAlteredCollection(ctx context.Context, req *milvuspb.AlterCollectionRequest) error
 }
 
@@ -188,35 +183,6 @@ func (b *ServerBroker) UnwatchChannels(ctx context.Context, info *watchInfo) err
 	return nil
 }
 
-func (b *ServerBroker) Flush(ctx context.Context, cID int64, segIDs []int64) error {
-	resp, err := b.s.dataCoord.Flush(ctx, &datapb.FlushRequest{
-		Base: commonpbutil.NewMsgBase(
-			commonpbutil.WithMsgType(commonpb.MsgType_Flush),
-			commonpbutil.WithSourceID(b.s.session.ServerID),
-		),
-		DbID:         0,
-		SegmentIDs:   segIDs,
-		CollectionID: cID,
-		IsImport:     true,
-	})
-	if err != nil {
-		return errors.New("failed to call flush to data coordinator: " + err.Error())
-	}
-	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-		return merr.Error(resp.GetStatus())
-	}
-	log.Info("flush on collection succeed", zap.Int64("collectionID", cID))
-	return nil
-}
-
-func (b *ServerBroker) Import(ctx context.Context, req *datapb.ImportTaskRequest) (*datapb.ImportTaskResponse, error) {
-	return b.s.dataCoord.Import(ctx, req)
-}
-
-func (b *ServerBroker) UnsetIsImportingState(ctx context.Context, req *datapb.UnsetIsImportingStateRequest) (*commonpb.Status, error) {
-	return b.s.dataCoord.UnsetIsImportingState(ctx, req)
-}
-
 func (b *ServerBroker) GetSegmentStates(ctx context.Context, req *datapb.GetSegmentStatesRequest) (*datapb.GetSegmentStatesResponse, error) {
 	return b.s.dataCoord.GetSegmentStates(ctx, req)
 }
@@ -259,9 +225,14 @@ func (b *ServerBroker) GetSegmentIndexState(ctx context.Context, collID UniqueID
 }
 
 func (b *ServerBroker) BroadcastAlteredCollection(ctx context.Context, req *milvuspb.AlterCollectionRequest) error {
-	log.Info("broadcasting request to alter collection", zap.String("collectionName", req.GetCollectionName()), zap.Int64("collectionID", req.GetCollectionID()))
+	log.Info("broadcasting request to alter collection", zap.String("collectionName", req.GetCollectionName()), zap.Int64("collectionID", req.GetCollectionID()), zap.Any("props", req.GetProperties()))
 
 	colMeta, err := b.s.meta.GetCollectionByID(ctx, req.GetDbName(), req.GetCollectionID(), typeutil.MaxTimestamp, false)
+	if err != nil {
+		return err
+	}
+
+	db, err := b.s.meta.GetDatabaseByName(ctx, req.GetDbName(), typeutil.MaxTimestamp)
 	if err != nil {
 		return err
 	}
@@ -277,10 +248,13 @@ func (b *ServerBroker) BroadcastAlteredCollection(ctx context.Context, req *milv
 			Description: colMeta.Description,
 			AutoID:      colMeta.AutoID,
 			Fields:      model.MarshalFieldModels(colMeta.Fields),
+			Functions:   model.MarshalFunctionModels(colMeta.Functions),
 		},
 		PartitionIDs:   partitionIDs,
 		StartPositions: colMeta.StartPositions,
-		Properties:     req.GetProperties(),
+		Properties:     colMeta.Properties,
+		DbID:           db.ID,
+		VChannels:      colMeta.VirtualChannelNames,
 	}
 
 	resp, err := b.s.dataCoord.BroadcastAlteredCollection(ctx, dcReq)
@@ -291,14 +265,8 @@ func (b *ServerBroker) BroadcastAlteredCollection(ctx context.Context, req *milv
 	if resp.ErrorCode != commonpb.ErrorCode_Success {
 		return errors.New(resp.Reason)
 	}
-	log.Info("done to broadcast request to alter collection", zap.String("collectionName", req.GetCollectionName()), zap.Int64("collectionID", req.GetCollectionID()))
+	log.Info("done to broadcast request to alter collection", zap.String("collectionName", req.GetCollectionName()), zap.Int64("collectionID", req.GetCollectionID()), zap.Any("props", req.GetProperties()))
 	return nil
-}
-
-func (b *ServerBroker) DescribeIndex(ctx context.Context, colID UniqueID) (*indexpb.DescribeIndexResponse, error) {
-	return b.s.dataCoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{
-		CollectionID: colID,
-	})
 }
 
 func (b *ServerBroker) GcConfirm(ctx context.Context, collectionID, partitionID UniqueID) bool {

@@ -27,10 +27,14 @@ namespace milvus::storage {
 
 // deserialize remote insert and index file
 std::unique_ptr<DataCodec>
-DeserializeRemoteFileData(BinlogReaderPtr reader) {
+DeserializeRemoteFileData(BinlogReaderPtr reader, bool is_field_data) {
     DescriptorEvent descriptor_event(reader);
     DataType data_type =
         DataType(descriptor_event.event_data.fix_part.data_type);
+    auto& extras = descriptor_event.event_data.extras;
+    bool nullable = (extras.find(NULLABLE) != extras.end())
+                        ? std::any_cast<bool>(extras[NULLABLE])
+                        : false;
     auto descriptor_fix_part = descriptor_event.event_data.fix_part;
     FieldDataMeta data_meta{descriptor_fix_part.collection_id,
                             descriptor_fix_part.partition_id,
@@ -41,10 +45,17 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
         case EventType::InsertEvent: {
             auto event_data_length =
                 header.event_length_ - GetEventHeaderSize(header);
-            auto insert_event_data =
-                InsertEventData(reader, event_data_length, data_type);
-            auto insert_data =
-                std::make_unique<InsertData>(insert_event_data.field_data);
+            auto insert_event_data = InsertEventData(
+                reader, event_data_length, data_type, nullable, is_field_data);
+
+            std::unique_ptr<InsertData> insert_data;
+            if (is_field_data) {
+                insert_data =
+                    std::make_unique<InsertData>(insert_event_data.field_data);
+            } else {
+                insert_data = std::make_unique<InsertData>(
+                    insert_event_data.payload_reader);
+            }
             insert_data->SetFieldDataMeta(data_meta);
             insert_data->SetTimestamps(insert_event_data.start_timestamp,
                                        insert_event_data.end_timestamp);
@@ -54,7 +65,7 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
             auto event_data_length =
                 header.event_length_ - GetEventHeaderSize(header);
             auto index_event_data =
-                IndexEventData(reader, event_data_length, data_type);
+                IndexEventData(reader, event_data_length, data_type, nullable);
             auto field_data = index_event_data.field_data;
             // for compatible with golang indexcode.Serialize, which set dataType to String
             if (data_type == DataType::STRING) {
@@ -63,7 +74,7 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
                 AssertInfo(
                     field_data->get_num_rows() == 1,
                     "wrong length of string num in old index binlog file");
-                auto new_field_data = CreateFieldData(DataType::INT8);
+                auto new_field_data = CreateFieldData(DataType::INT8, nullable);
                 new_field_data->FillFieldData(
                     (*static_cast<const std::string*>(field_data->RawValue(0)))
                         .c_str(),
@@ -79,7 +90,8 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
             auto& extras = descriptor_event.event_data.extras;
             AssertInfo(extras.find(INDEX_BUILD_ID_KEY) != extras.end(),
                        "index build id not exist");
-            index_meta.build_id = std::stol(extras[INDEX_BUILD_ID_KEY]);
+            index_meta.build_id = std::stol(
+                std::any_cast<std::string>(extras[INDEX_BUILD_ID_KEY]));
             index_data->set_index_meta(index_meta);
             index_data->SetTimestamps(index_event_data.start_timestamp,
                                       index_event_data.end_timestamp);
@@ -100,20 +112,25 @@ DeserializeLocalFileData(BinlogReaderPtr reader) {
 
 std::unique_ptr<DataCodec>
 DeserializeFileData(const std::shared_ptr<uint8_t[]> input_data,
-                    int64_t length) {
+                    int64_t length,
+                    bool is_field_data) {
     auto binlog_reader = std::make_shared<BinlogReader>(input_data, length);
     auto medium_type = ReadMediumType(binlog_reader);
+    std::unique_ptr<DataCodec> res;
     switch (medium_type) {
         case StorageType::Remote: {
-            return DeserializeRemoteFileData(binlog_reader);
+            res = DeserializeRemoteFileData(binlog_reader, is_field_data);
+            break;
         }
         case StorageType::LocalDisk: {
-            return DeserializeLocalFileData(binlog_reader);
+            res = DeserializeLocalFileData(binlog_reader);
+            break;
         }
         default:
             PanicInfo(DataFormatBroken,
                       fmt::format("unsupported medium type {}", medium_type));
     }
+    return res;
 }
 
 }  // namespace milvus::storage

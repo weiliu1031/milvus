@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <map>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -39,4 +40,5 @@ struct BuildIndexInfo {
     std::string index_store_path;
     int64_t dim;
     int32_t index_engine_version;
+    milvus::OptFieldT opt_fields;
 };

@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/grpcclient"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -52,7 +53,7 @@ type Client struct {
 // metaRoot is the path in etcd for root coordinator registration
 // etcdEndpoints are the address list for etcd end points
 // timeout is default setting for each grpc call
-func NewClient(ctx context.Context) (*Client, error) {
+func NewClient(ctx context.Context) (types.RootCoordClient, error) {
 	sess := sessionutil.NewSession(ctx)
 	if sess == nil {
 		err := fmt.Errorf("new session error, maybe can not connect to etcd")
@@ -345,6 +346,18 @@ func (c *Client) ShowSegments(ctx context.Context, in *milvuspb.ShowSegmentsRequ
 	})
 }
 
+// GetVChannels returns all vchannels belonging to the pchannel.
+func (c *Client) GetPChannelInfo(ctx context.Context, in *rootcoordpb.GetPChannelInfoRequest, opts ...grpc.CallOption) (*rootcoordpb.GetPChannelInfoResponse, error) {
+	in = typeutil.Clone(in)
+	commonpbutil.UpdateMsgBase(
+		in.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*rootcoordpb.GetPChannelInfoResponse, error) {
+		return client.GetPChannelInfo(ctx, in)
+	})
+}
+
 // InvalidateCollectionMetaCache notifies RootCoord to release the collection cache in Proxies.
 func (c *Client) InvalidateCollectionMetaCache(ctx context.Context, in *proxypb.InvalidateCollMetaCacheRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	in = typeutil.Clone(in)
@@ -417,31 +430,27 @@ func (c *Client) AlterAlias(ctx context.Context, req *milvuspb.AlterAliasRequest
 	})
 }
 
-// Import data files(json, numpy, etc.) on MinIO/S3 storage, read and parse them into sealed segments
-func (c *Client) Import(ctx context.Context, req *milvuspb.ImportRequest, opts ...grpc.CallOption) (*milvuspb.ImportResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*milvuspb.ImportResponse, error) {
-		return client.Import(ctx, req)
+// DescribeAlias describe alias
+func (c *Client) DescribeAlias(ctx context.Context, req *milvuspb.DescribeAliasRequest, opts ...grpc.CallOption) (*milvuspb.DescribeAliasResponse, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(
+		req.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*milvuspb.DescribeAliasResponse, error) {
+		return client.DescribeAlias(ctx, req)
 	})
 }
 
-// Check import task state from datanode
-func (c *Client) GetImportState(ctx context.Context, req *milvuspb.GetImportStateRequest, opts ...grpc.CallOption) (*milvuspb.GetImportStateResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*milvuspb.GetImportStateResponse, error) {
-		return client.GetImportState(ctx, req)
-	})
-}
-
-// List id array of all import tasks
-func (c *Client) ListImportTasks(ctx context.Context, req *milvuspb.ListImportTasksRequest, opts ...grpc.CallOption) (*milvuspb.ListImportTasksResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*milvuspb.ListImportTasksResponse, error) {
-		return client.ListImportTasks(ctx, req)
-	})
-}
-
-// Report impot task state to rootcoord
-func (c *Client) ReportImport(ctx context.Context, req *rootcoordpb.ImportResult, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*commonpb.Status, error) {
-		return client.ReportImport(ctx, req)
+// ListAliases list all aliases of db or collection
+func (c *Client) ListAliases(ctx context.Context, req *milvuspb.ListAliasesRequest, opts ...grpc.CallOption) (*milvuspb.ListAliasesResponse, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(
+		req.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*milvuspb.ListAliasesResponse, error) {
+		return client.ListAliases(ctx, req)
 	})
 }
 
@@ -650,4 +659,50 @@ func (c *Client) ListDatabases(ctx context.Context, in *milvuspb.ListDatabasesRe
 		return nil, err
 	}
 	return ret.(*milvuspb.ListDatabasesResponse), err
+}
+
+func (c *Client) DescribeDatabase(ctx context.Context, req *rootcoordpb.DescribeDatabaseRequest, opts ...grpc.CallOption) (*rootcoordpb.DescribeDatabaseResponse, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(
+		req.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*rootcoordpb.DescribeDatabaseResponse, error) {
+		return client.DescribeDatabase(ctx, req)
+	})
+}
+
+func (c *Client) AlterDatabase(ctx context.Context, request *rootcoordpb.AlterDatabaseRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	request = typeutil.Clone(request)
+	commonpbutil.UpdateMsgBase(
+		request.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*commonpb.Status, error) {
+		return client.AlterDatabase(ctx, request)
+	})
+}
+
+func (c *Client) BackupRBAC(ctx context.Context, in *milvuspb.BackupRBACMetaRequest, opts ...grpc.CallOption) (*milvuspb.BackupRBACMetaResponse, error) {
+	in = typeutil.Clone(in)
+	commonpbutil.UpdateMsgBase(
+		in.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.sess.ServerID)),
+	)
+
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*milvuspb.BackupRBACMetaResponse, error) {
+		return client.BackupRBAC(ctx, in)
+	})
+}
+
+func (c *Client) RestoreRBAC(ctx context.Context, in *milvuspb.RestoreRBACMetaRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	in = typeutil.Clone(in)
+	commonpbutil.UpdateMsgBase(
+		in.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.sess.ServerID)),
+	)
+
+	return wrapGrpcCall(ctx, c, func(client rootcoordpb.RootCoordClient) (*commonpb.Status, error) {
+		return client.RestoreRBAC(ctx, in)
+	})
 }

@@ -40,7 +40,7 @@ type Handler interface {
 	// GetDataVChanPositions gets the information recovery needed of a channel for DataNode
 	GetDataVChanPositions(ch RWChannel, partitionID UniqueID) *datapb.VchannelInfo
 	CheckShouldDropChannel(ch string) bool
-	FinishDropChannel(ch string) error
+	FinishDropChannel(ch string, collectionID int64) error
 	GetCollection(ctx context.Context, collectionID UniqueID) (*collectionInfo, error)
 }
 
@@ -56,9 +56,7 @@ func newServerHandler(s *Server) *ServerHandler {
 
 // GetDataVChanPositions gets vchannel latest positions with provided dml channel names for DataNode.
 func (h *ServerHandler) GetDataVChanPositions(channel RWChannel, partitionID UniqueID) *datapb.VchannelInfo {
-	segments := h.s.meta.SelectSegments(func(s *SegmentInfo) bool {
-		return s.InsertChannel == channel.GetName() && !s.GetIsFake()
-	})
+	segments := h.s.meta.GetRealSegmentsForChannel(channel.GetName())
 	log.Info("GetDataVChanPositions",
 		zap.Int64("collectionID", channel.GetCollectionID()),
 		zap.String("channel", channel.GetName()),
@@ -76,6 +74,10 @@ func (h *ServerHandler) GetDataVChanPositions(channel RWChannel, partitionID Uni
 		}
 		if s.GetIsImporting() {
 			// Skip bulk insert segments.
+			continue
+		}
+		if s.GetIsInvisible() {
+			// skip invisible segments
 			continue
 		}
 
@@ -99,68 +101,80 @@ func (h *ServerHandler) GetDataVChanPositions(channel RWChannel, partitionID Uni
 	}
 }
 
-// GetQueryVChanPositions gets vchannel latest positions with provided dml channel names for QueryCoord,
-// we expect QueryCoord gets the indexed segments to load, so the flushed segments below are actually the indexed segments,
-// the unflushed segments are actually the segments without index, even they are flushed.
+// GetQueryVChanPositions gets vchannel latest positions with provided dml channel names for QueryCoord.
+// unflushend segmentIDs ---> L1, growing segments
+// flushend segmentIDs   ---> L1&L2, flushed segments, including indexed or unindexed
+// dropped segmentIDs    ---> dropped segments
+// level zero segmentIDs ---> L0 segments
 func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs ...UniqueID) *datapb.VchannelInfo {
-	// cannot use GetSegmentsByChannel since dropped segments are needed here
-	segments := h.s.meta.SelectSegments(func(s *SegmentInfo) bool {
-		return s.InsertChannel == channel.GetName() && !s.GetIsFake()
-	})
-	segmentInfos := make(map[int64]*SegmentInfo)
-	indexedSegments := FilterInIndexedSegments(h, h.s.meta, segments...)
-	indexed := make(typeutil.UniqueSet)
-	for _, segment := range indexedSegments {
-		indexed.Insert(segment.GetID())
+	partStatsVersionsMap := make(map[int64]int64)
+	validPartitions := lo.Filter(partitionIDs, func(partitionID int64, _ int) bool { return partitionID > allPartitionID })
+	if len(validPartitions) <= 0 {
+		collInfo, err := h.s.handler.GetCollection(h.s.ctx, channel.GetCollectionID())
+		if err != nil || collInfo == nil {
+			log.Warn("collectionInfo is nil")
+			return nil
+		}
+		validPartitions = collInfo.Partitions
 	}
-	log.Info("GetQueryVChanPositions",
-		zap.Int64("collectionID", channel.GetCollectionID()),
-		zap.String("channel", channel.GetName()),
-		zap.Int("numOfSegments", len(segments)),
-		zap.Int("indexed segment", len(indexedSegments)),
-	)
+	for _, partitionID := range validPartitions {
+		currentPartitionStatsVersion := h.s.meta.partitionStatsMeta.GetCurrentPartitionStatsVersion(channel.GetCollectionID(), partitionID, channel.GetName())
+		partStatsVersionsMap[partitionID] = currentPartitionStatsVersion
+	}
+
 	var (
-		indexedIDs   = make(typeutil.UniqueSet)
-		unIndexedIDs = make(typeutil.UniqueSet)
-		droppedIDs   = make(typeutil.UniqueSet)
-		growingIDs   = make(typeutil.UniqueSet)
+		flushedIDs    = make(typeutil.UniqueSet)
+		droppedIDs    = make(typeutil.UniqueSet)
+		growingIDs    = make(typeutil.UniqueSet)
+		levelZeroIDs  = make(typeutil.UniqueSet)
+		newFlushedIDs = make(typeutil.UniqueSet)
 	)
 
-	validPartitions := lo.Filter(partitionIDs, func(partitionID int64, _ int) bool { return partitionID > allPartitionID })
-	partitionSet := typeutil.NewUniqueSet(validPartitions...)
+	// cannot use GetSegmentsByChannel since dropped segments are needed here
+	segments := h.s.meta.GetRealSegmentsForChannel(channel.GetName())
+
+	validSegmentInfos := make(map[int64]*SegmentInfo)
+	indexedSegments := FilterInIndexedSegments(h, h.s.meta, false, segments...)
+	indexed := typeutil.NewUniqueSet(lo.Map(indexedSegments, func(segment *SegmentInfo, _ int) int64 { return segment.GetID() })...)
+
 	for _, s := range segments {
-		if (partitionSet.Len() > 0 && !partitionSet.Contain(s.PartitionID)) ||
-			(s.GetStartPosition() == nil && s.GetDmlPosition() == nil) {
+		if s.GetStartPosition() == nil && s.GetDmlPosition() == nil {
 			continue
 		}
 		if s.GetIsImporting() {
 			// Skip bulk insert segments.
 			continue
 		}
-		segmentInfos[s.GetID()] = s
+		if s.GetIsInvisible() {
+			// skip invisible segments
+			continue
+		}
+
+		validSegmentInfos[s.GetID()] = s
 		switch {
 		case s.GetState() == commonpb.SegmentState_Dropped:
 			droppedIDs.Insert(s.GetID())
 		case !isFlushState(s.GetState()):
 			growingIDs.Insert(s.GetID())
-		case indexed.Contain(s.GetID()):
-			indexedIDs.Insert(s.GetID())
-		case s.GetNumOfRows() < Params.DataCoordCfg.MinSegmentNumRowsToEnableIndex.GetAsInt64(): // treat small flushed segment as indexed
-			indexedIDs.Insert(s.GetID())
+		case s.GetLevel() == datapb.SegmentLevel_L0:
+			levelZeroIDs.Insert(s.GetID())
+
 		default:
-			unIndexedIDs.Insert(s.GetID())
+			flushedIDs.Insert(s.GetID())
 		}
 	}
+
 	// ================================================
 	// Segments blood relationship:
 	//          a   b
 	//           \ /
 	//            c   d
 	//             \ /
-	//              e
+	//             / \
+	//            e   f
 	//
 	// GC:        a, b
-	// Indexed:   c, d, e
+	// Indexed:   c, d, e, f
 	//              ||
 	//              || (Index dropped and creating new index and not finished)
 	//              \/
@@ -171,44 +185,82 @@ func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs .
 	// ================================================
 	isValid := func(ids ...UniqueID) bool {
 		for _, id := range ids {
-			if seg, ok := segmentInfos[id]; !ok || seg == nil {
+			if seg, ok := validSegmentInfos[id]; !ok || seg == nil {
 				return false
 			}
 		}
 		return true
 	}
-	retrieveUnIndexed := func() bool {
+
+	var compactionFromExist func(segID UniqueID) bool
+
+	compactionFromExist = func(segID UniqueID) bool {
+		compactionFrom := validSegmentInfos[segID].GetCompactionFrom()
+		if len(compactionFrom) == 0 || !isValid(compactionFrom...) {
+			return false
+		}
+		for _, fromID := range compactionFrom {
+			if flushedIDs.Contain(fromID) || newFlushedIDs.Contain(fromID) {
+				return true
+			}
+			if compactionFromExist(fromID) {
+				return true
+			}
+		}
+		return false
+	}
+
+	segmentIndexed := func(segID UniqueID) bool {
+		return indexed.Contain(segID) || validSegmentInfos[segID].GetNumOfRows() < Params.DataCoordCfg.MinSegmentNumRowsToEnableIndex.GetAsInt64()
+	}
+
+	retrieve := func() bool {
 		continueRetrieve := false
-		for id := range unIndexedIDs {
-			compactionFrom := segmentInfos[id].GetCompactionFrom()
-			if len(compactionFrom) > 0 && isValid(compactionFrom...) {
+		for id := range flushedIDs {
+			compactionFrom := validSegmentInfos[id].GetCompactionFrom()
+			if len(compactionFrom) == 0 || !isValid(compactionFrom...) {
+				newFlushedIDs.Insert(id)
+				continue
+			}
+			if segmentIndexed(id) && !compactionFromExist(id) {
+				newFlushedIDs.Insert(id)
+			} else {
 				for _, fromID := range compactionFrom {
-					if indexed.Contain(fromID) {
-						indexedIDs.Insert(fromID)
-					} else {
-						unIndexedIDs.Insert(fromID)
-						continueRetrieve = true
-					}
+					newFlushedIDs.Insert(fromID)
+					continueRetrieve = true
+					droppedIDs.Remove(fromID)
 				}
-				unIndexedIDs.Remove(id)
-				droppedIDs.Remove(compactionFrom...)
 			}
 		}
 		return continueRetrieve
 	}
-	for retrieveUnIndexed() {
+
+	for retrieve() {
+		flushedIDs = newFlushedIDs
+		newFlushedIDs = make(typeutil.UniqueSet)
 	}
 
-	// unindexed is flushed segments as well
-	indexedIDs.Insert(unIndexedIDs.Collect()...)
+	flushedIDs = newFlushedIDs
+
+	log.Info("GetQueryVChanPositions",
+		zap.Int64("collectionID", channel.GetCollectionID()),
+		zap.String("channel", channel.GetName()),
+		zap.Int("numOfSegments", len(segments)),
+		zap.Int("result flushed", len(flushedIDs)),
+		zap.Int("result growing", len(growingIDs)),
+		zap.Int("result L0", len(levelZeroIDs)),
+		zap.Any("partition stats", partStatsVersionsMap),
+	)
 
 	return &datapb.VchannelInfo{
-		CollectionID:        channel.GetCollectionID(),
-		ChannelName:         channel.GetName(),
-		SeekPosition:        h.GetChannelSeekPosition(channel, partitionIDs...),
-		FlushedSegmentIds:   indexedIDs.Collect(),
-		UnflushedSegmentIds: growingIDs.Collect(),
-		DroppedSegmentIds:   droppedIDs.Collect(),
+		CollectionID:           channel.GetCollectionID(),
+		ChannelName:            channel.GetName(),
+		SeekPosition:           h.GetChannelSeekPosition(channel, partitionIDs...),
+		FlushedSegmentIds:      flushedIDs.Collect(),
+		UnflushedSegmentIds:    growingIDs.Collect(),
+		DroppedSegmentIds:      droppedIDs.Collect(),
+		LevelZeroSegmentIds:    levelZeroIDs.Collect(),
+		PartitionStatsVersions: partStatsVersionsMap,
 	}
 }
 
@@ -218,9 +270,7 @@ func (h *ServerHandler) getEarliestSegmentDMLPos(channel string, partitionIDs ..
 	var minPos *msgpb.MsgPosition
 	var minPosSegID int64
 	var minPosTs uint64
-	segments := h.s.meta.SelectSegments(func(s *SegmentInfo) bool {
-		return s.InsertChannel == channel
-	})
+	segments := h.s.meta.SelectSegments(WithChannel(channel))
 
 	validPartitions := lo.Filter(partitionIDs, func(partitionID int64, _ int) bool { return partitionID > allPartitionID })
 	partitionSet := typeutil.NewUniqueSet(validPartitions...)
@@ -389,9 +439,19 @@ func (h *ServerHandler) GetCollection(ctx context.Context, collectionID UniqueID
 	if coll != nil {
 		return coll, nil
 	}
-	err := h.s.loadCollectionFromRootCoord(ctx, collectionID)
-	if err != nil {
-		log.Warn("failed to load collection from rootcoord", zap.Int64("collectionID", collectionID), zap.Error(err))
+	ctx2, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+	if err := retry.Do(ctx2, func() error {
+		err := h.s.loadCollectionFromRootCoord(ctx2, collectionID)
+		if err != nil {
+			log.Warn("failed to load collection from rootcoord", zap.Int64("collectionID", collectionID), zap.Error(err))
+			return err
+		}
+		return nil
+	}, retry.Attempts(5)); err != nil {
+		log.Ctx(ctx2).Warn("datacoord ServerHandler GetCollection finally failed",
+			zap.Int64("collectionID", collectionID),
+			zap.Error(err))
 		return nil, err
 	}
 
@@ -405,13 +465,22 @@ func (h *ServerHandler) CheckShouldDropChannel(channel string) bool {
 
 // FinishDropChannel cleans up the remove flag for channels
 // this function is a wrapper of server.meta.FinishDropChannel
-func (h *ServerHandler) FinishDropChannel(channel string) error {
+func (h *ServerHandler) FinishDropChannel(channel string, collectionID int64) error {
 	err := h.s.meta.catalog.DropChannel(h.s.ctx, channel)
 	if err != nil {
 		log.Warn("DropChannel failed", zap.String("vChannel", channel), zap.Error(err))
 		return err
 	}
-	log.Info("DropChannel succeeded", zap.String("vChannel", channel))
+	err = h.s.meta.DropChannelCheckpoint(channel)
+	if err != nil {
+		log.Warn("DropChannel failed to drop channel checkpoint", zap.String("channel", channel), zap.Error(err))
+		return err
+	}
+	log.Info("DropChannel succeeded", zap.String("channel", channel))
 	// Channel checkpoints are cleaned up during garbage collection.
+
+	// clean collection info cache when meet drop collection info
+	h.s.meta.DropCollection(collectionID)
+
 	return nil
 }

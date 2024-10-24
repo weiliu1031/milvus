@@ -1,13 +1,14 @@
 package httpserver
 
 type CreateCollectionReq struct {
-	DbName         string `json:"dbName"`
-	CollectionName string `json:"collectionName" validate:"required"`
-	Dimension      int32  `json:"dimension" validate:"required"`
-	Description    string `json:"description"`
-	MetricType     string `json:"metricType"`
-	PrimaryField   string `json:"primaryField"`
-	VectorField    string `json:"vectorField"`
+	DbName             string `json:"dbName"`
+	CollectionName     string `json:"collectionName" validate:"required"`
+	Dimension          int32  `json:"dimension" validate:"required"`
+	Description        string `json:"description"`
+	MetricType         string `json:"metricType"`
+	PrimaryField       string `json:"primaryField"`
+	VectorField        string `json:"vectorField"`
+	EnableDynamicField bool   `json:"enableDynamicField"`
 }
 
 type DropCollectionReq struct {
@@ -63,11 +64,12 @@ type SingleUpsertReq struct {
 }
 
 type SearchReq struct {
-	DbName         string    `json:"dbName"`
-	CollectionName string    `json:"collectionName" validate:"required"`
-	Filter         string    `json:"filter"`
-	Limit          int32     `json:"limit"`
-	Offset         int32     `json:"offset"`
-	OutputFields   []string  `json:"outputFields"`
-	Vector         []float32 `json:"vector"`
+	DbName         string             `json:"dbName"`
+	CollectionName string             `json:"collectionName" validate:"required"`
+	Filter         string             `json:"filter"`
+	Limit          int32              `json:"limit"`
+	Offset         int32              `json:"offset"`
+	OutputFields   []string           `json:"outputFields"`
+	Vector         []float32          `json:"vector"`
+	Params         map[string]float64 `json:"params"`
 }

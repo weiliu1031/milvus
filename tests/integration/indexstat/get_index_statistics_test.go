@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -19,9 +19,13 @@ import (
 
 type GetIndexStatisticsSuite struct {
 	integration.MiniClusterSuite
+
+	indexType  string
+	metricType string
+	vecType    schemapb.DataType
 }
 
-func (s *GetIndexStatisticsSuite) TestGetIndexStatistics() {
+func (s *GetIndexStatisticsSuite) run() {
 	c := s.Cluster
 	ctx, cancel := context.WithCancel(c.GetContext())
 	defer cancel()
@@ -151,6 +155,13 @@ func (s *GetIndexStatisticsSuite) TestGetIndexStatistics() {
 	*/
 
 	log.Info("TestGetIndexStatistics succeed")
+}
+
+func (s *GetIndexStatisticsSuite) TestGetIndexStatistics_float() {
+	s.indexType = integration.IndexFaissIvfFlat
+	s.metricType = metric.L2
+	s.vecType = schemapb.DataType_FloatVector
+	s.run()
 }
 
 func TestGetIndexStat(t *testing.T) {

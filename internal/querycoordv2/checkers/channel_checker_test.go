@@ -19,11 +19,11 @@ package checkers
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -76,7 +77,7 @@ func (suite *ChannelCheckerTestSuite) SetupTest() {
 	distManager := meta.NewDistributionManager()
 
 	balancer := suite.createMockBalancer()
-	suite.checker = NewChannelChecker(suite.meta, distManager, targetManager, balancer)
+	suite.checker = NewChannelChecker(suite.meta, distManager, targetManager, suite.nodeMgr, func() balance.Balance { return balancer })
 
 	suite.broker.EXPECT().GetPartitions(mock.Anything, int64(1)).Return([]int64{1}, nil).Maybe()
 }
@@ -85,16 +86,28 @@ func (suite *ChannelCheckerTestSuite) TearDownTest() {
 	suite.kv.Close()
 }
 
+func (suite *ChannelCheckerTestSuite) setNodeAvailable(nodes ...int64) {
+	for _, node := range nodes {
+		nodeInfo := session.NewNodeInfo(session.ImmutableNodeInfo{
+			NodeID:   node,
+			Address:  "",
+			Hostname: "localhost",
+		})
+		nodeInfo.SetLastHeartbeat(time.Now())
+		suite.nodeMgr.Add(nodeInfo)
+	}
+}
+
 func (suite *ChannelCheckerTestSuite) createMockBalancer() balance.Balance {
 	balancer := balance.NewMockBalancer(suite.T())
-	balancer.EXPECT().AssignChannel(mock.Anything, mock.Anything).Maybe().Return(func(channels []*meta.DmChannel, nodes []int64) []balance.ChannelAssignPlan {
+	balancer.EXPECT().AssignChannel(mock.Anything, mock.Anything, mock.Anything).Maybe().Return(func(channels []*meta.DmChannel, nodes []int64, _ bool) []balance.ChannelAssignPlan {
 		plans := make([]balance.ChannelAssignPlan, 0, len(channels))
 		for i, c := range channels {
 			plan := balance.ChannelAssignPlan{
-				Channel:   c,
-				From:      -1,
-				To:        nodes[i%len(nodes)],
-				ReplicaID: -1,
+				Channel: c,
+				From:    -1,
+				To:      nodes[i%len(nodes)],
+				Replica: meta.NilReplica,
 			}
 			plans = append(plans, plan)
 		}
@@ -108,8 +121,12 @@ func (suite *ChannelCheckerTestSuite) TestLoadChannel() {
 	checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	suite.meta.CollectionManager.PutPartition(utils.CreateTestPartition(1, 1))
 	checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1}))
-	suite.nodeMgr.Add(session.NewNodeInfo(1, "localhost"))
-	checker.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   1,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	checker.meta.ResourceManager.HandleNodeUp(1)
 
 	channels := []*datapb.VchannelInfo{
 		{
@@ -151,7 +168,10 @@ func (suite *ChannelCheckerTestSuite) TestReduceChannel() {
 	checker.targetMgr.UpdateCollectionCurrentTarget(int64(1))
 
 	checker.dist.ChannelDistManager.Update(1, utils.CreateTestChannel(1, 1, 1, "test-insert-channel1"))
+	checker.dist.LeaderViewManager.Update(1, &meta.LeaderView{ID: 1, Channel: "test-insert-channel1"})
 	checker.dist.ChannelDistManager.Update(1, utils.CreateTestChannel(1, 1, 1, "test-insert-channel2"))
+	checker.dist.LeaderViewManager.Update(1, &meta.LeaderView{ID: 1, Channel: "test-insert-channel2"})
+	suite.setNodeAvailable(1)
 	tasks := checker.Check(context.TODO())
 	suite.Len(tasks, 1)
 	suite.EqualValues(1, tasks[0].ReplicaID())
@@ -191,6 +211,12 @@ func (suite *ChannelCheckerTestSuite) TestRepeatedChannels() {
 	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 2, "test-insert-channel"))
 
 	tasks := checker.Check(context.TODO())
+	suite.Len(tasks, 0)
+
+	suite.setNodeAvailable(1, 2)
+	checker.dist.LeaderViewManager.Update(1, &meta.LeaderView{ID: 1, Channel: "test-insert-channel"})
+	checker.dist.LeaderViewManager.Update(2, &meta.LeaderView{ID: 2, Channel: "test-insert-channel"})
+	tasks = checker.Check(context.TODO())
 	suite.Len(tasks, 1)
 	suite.EqualValues(1, tasks[0].ReplicaID())
 	suite.Len(tasks[0].Actions(), 1)
@@ -198,6 +224,57 @@ func (suite *ChannelCheckerTestSuite) TestRepeatedChannels() {
 	action := tasks[0].Actions()[0].(*task.ChannelAction)
 	suite.Equal(task.ActionTypeReduce, action.Type())
 	suite.EqualValues(1, action.Node())
+	suite.EqualValues("test-insert-channel", action.ChannelName())
+}
+
+func (suite *ChannelCheckerTestSuite) TestReleaseDirtyChannels() {
+	checker := suite.checker
+	err := checker.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
+	suite.meta.CollectionManager.PutPartition(utils.CreateTestPartition(1, 1))
+	suite.NoError(err)
+	err = checker.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1}))
+	suite.NoError(err)
+
+	segments := []*datapb.SegmentInfo{
+		{
+			ID:            1,
+			InsertChannel: "test-insert-channel",
+		},
+	}
+
+	channels := []*datapb.VchannelInfo{
+		{
+			CollectionID: 1,
+			ChannelName:  "test-insert-channel",
+		},
+	}
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   1,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   2,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, int64(1)).Return(
+		channels, segments, nil)
+	checker.targetMgr.UpdateCollectionNextTarget(int64(1))
+	checker.dist.ChannelDistManager.Update(1, utils.CreateTestChannel(1, 1, 2, "test-insert-channel"))
+	checker.dist.ChannelDistManager.Update(2, utils.CreateTestChannel(1, 2, 2, "test-insert-channel"))
+	checker.dist.LeaderViewManager.Update(1, &meta.LeaderView{ID: 1, Channel: "test-insert-channel"})
+	checker.dist.LeaderViewManager.Update(2, &meta.LeaderView{ID: 2, Channel: "test-insert-channel"})
+
+	tasks := checker.Check(context.TODO())
+	suite.Len(tasks, 1)
+	suite.EqualValues(-1, tasks[0].ReplicaID())
+	suite.Len(tasks[0].Actions(), 1)
+	suite.IsType((*task.ChannelAction)(nil), tasks[0].Actions()[0])
+	action := tasks[0].Actions()[0].(*task.ChannelAction)
+	suite.Equal(task.ActionTypeReduce, action.Type())
+	suite.EqualValues(int64(2), action.Node())
 	suite.EqualValues("test-insert-channel", action.ChannelName())
 }
 

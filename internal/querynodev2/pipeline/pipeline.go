@@ -17,44 +17,26 @@
 package pipeline
 
 import (
-	"go.uber.org/zap"
-
-	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	base "github.com/milvus-io/milvus/internal/util/pipeline"
-	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 // pipeline used for querynode
 type Pipeline interface {
 	base.StreamPipeline
-	ExcludedSegments(segInfos ...*datapb.SegmentInfo)
 }
 
 type pipeline struct {
 	base.StreamPipeline
 
-	excludedSegments *typeutil.ConcurrentMap[int64, *datapb.SegmentInfo]
-	collectionID     UniqueID
-}
-
-func (p *pipeline) ExcludedSegments(segInfos ...*datapb.SegmentInfo) {
-	for _, segInfo := range segInfos {
-		log.Debug("pipeline add exclude info",
-			zap.Int64("segmentID", segInfo.GetID()),
-			zap.Uint64("ts", segInfo.GetDmlPosition().GetTimestamp()),
-		)
-		p.excludedSegments.Insert(segInfo.GetID(), segInfo)
-	}
+	collectionID  UniqueID
+	embeddingNode embeddingNode
 }
 
 func (p *pipeline) Close() {
 	p.StreamPipeline.Close()
-	metrics.CleanupQueryNodeCollectionMetrics(paramtable.GetNodeID(), p.collectionID)
 }
 
 func NewPipeLine(
@@ -66,17 +48,28 @@ func NewPipeLine(
 	delegator delegator.ShardDelegator,
 ) (Pipeline, error) {
 	pipelineQueueLength := paramtable.Get().QueryNodeCfg.FlowGraphMaxQueueLength.GetAsInt32()
-	excludedSegments := typeutil.NewConcurrentMap[int64, *datapb.SegmentInfo]()
 
 	p := &pipeline{
-		collectionID:     collectionID,
-		excludedSegments: excludedSegments,
-		StreamPipeline:   base.NewPipelineWithStream(dispatcher, nodeCtxTtInterval, enableTtChecker, channel),
+		collectionID:   collectionID,
+		StreamPipeline: base.NewPipelineWithStream(dispatcher, nodeCtxTtInterval, enableTtChecker, channel),
 	}
 
-	filterNode := newFilterNode(collectionID, channel, manager, excludedSegments, pipelineQueueLength)
+	filterNode := newFilterNode(collectionID, channel, manager, delegator, pipelineQueueLength)
+
+	embeddingNode, err := newEmbeddingNode(collectionID, channel, manager, pipelineQueueLength)
+	if err != nil {
+		return nil, err
+	}
+
 	insertNode := newInsertNode(collectionID, channel, manager, delegator, pipelineQueueLength)
 	deleteNode := newDeleteNode(collectionID, channel, manager, tSafeManager, delegator, pipelineQueueLength)
-	p.Add(filterNode, insertNode, deleteNode)
+
+	// skip add embedding node when collection has no function.
+	if embeddingNode != nil {
+		p.Add(filterNode, embeddingNode, insertNode, deleteNode)
+	} else {
+		p.Add(filterNode, insertNode, deleteNode)
+	}
+
 	return p, nil
 }

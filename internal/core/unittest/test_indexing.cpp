@@ -22,16 +22,16 @@
 
 #include "arrow/type.h"
 #include "common/EasyAssert.h"
+#include "common/Tracer.h"
 #include "common/Types.h"
 #include "index/Index.h"
 #include "knowhere/comp/index_param.h"
 #include "nlohmann/json.hpp"
 #include "query/SearchBruteForce.h"
-#include "segcore/Reduce.h"
+#include "segcore/reduce/Reduce.h"
 #include "index/IndexFactory.h"
 #include "common/QueryResult.h"
 #include "segcore/Types.h"
-#include "storage/options.h"
 #include "test_utils/indexbuilder_test_utils.h"
 #include "test_utils/storage_test_utils.h"
 #include "test_utils/DataGen.h"
@@ -172,8 +172,16 @@ TEST(Indexing, BinaryBruteForce) {
         query_data  //
     };
 
-    auto sub_result = query::BruteForceSearch(
-        search_dataset, bin_vec.data(), N, knowhere::Json(), nullptr);
+    SearchInfo search_info;
+    search_info.topk_ = topk;
+    search_info.round_decimal_ = round_decimal;
+    search_info.metric_type_ = metric_type;
+    auto sub_result = query::BruteForceSearch(search_dataset,
+                                              bin_vec.data(),
+                                              N,
+                                              search_info,
+                                              nullptr,
+                                              DataType::VECTOR_BINARY);
 
     SearchResult sr;
     sr.total_nq_ = num_queries;
@@ -283,14 +291,11 @@ TEST(Indexing, Naive) {
     searchInfo.metric_type_ = knowhere::metric::L2;
     searchInfo.search_params_ = search_conf;
     auto vec_index = dynamic_cast<index::VectorIndex*>(index.get());
-    auto result = vec_index->Query(query_ds, searchInfo, view);
+    SearchResult result;
+    vec_index->Query(query_ds, searchInfo, view, result);
 
     for (int i = 0; i < TOPK; ++i) {
-        if (result->seg_offsets_[i] < N / 2) {
-            std::cout << "WRONG: ";
-        }
-        std::cout << result->seg_offsets_[i] << "->" << result->distances_[i]
-                  << std::endl;
+        ASSERT_FALSE(result.seg_offsets_[i] < N / 2);
     }
 }
 
@@ -305,7 +310,6 @@ class IndexTest : public ::testing::TestWithParam<Param> {
         auto param = GetParam();
         index_type = param.first;
         metric_type = param.second;
-        NB = 3000;
 
         // try to reduce the test time,
         // but the large dataset is needed for the case below.
@@ -320,35 +324,42 @@ class IndexTest : public ::testing::TestWithParam<Param> {
         search_conf = generate_search_conf(index_type, metric_type);
         range_search_conf = generate_range_search_conf(index_type, metric_type);
 
-        std::map<knowhere::MetricType, bool> is_binary_map = {
-            {knowhere::IndexEnum::INDEX_FAISS_IDMAP, false},
-            {knowhere::IndexEnum::INDEX_FAISS_IVFPQ, false},
-            {knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, false},
-            {knowhere::IndexEnum::INDEX_FAISS_IVFSQ8, false},
-            {knowhere::IndexEnum::INDEX_FAISS_BIN_IVFFLAT, true},
-            {knowhere::IndexEnum::INDEX_FAISS_BIN_IDMAP, true},
-            {knowhere::IndexEnum::INDEX_HNSW, false},
-            {knowhere::IndexEnum::INDEX_DISKANN, false},
-        };
-
-        is_binary = is_binary_map[index_type];
-        if (is_binary) {
+        if (index_type == knowhere::IndexEnum::INDEX_SPARSE_INVERTED_INDEX ||
+            index_type == knowhere::IndexEnum::INDEX_SPARSE_WAND) {
+            is_sparse = true;
+            vec_field_data_type = milvus::DataType::VECTOR_SPARSE_FLOAT;
+        } else if (IsBinaryVectorMetricType(metric_type)) {
+            is_binary = true;
             vec_field_data_type = milvus::DataType::VECTOR_BINARY;
         } else {
             vec_field_data_type = milvus::DataType::VECTOR_FLOAT;
         }
 
-        auto dataset = GenDataset(NB, metric_type, is_binary);
-        if (!is_binary) {
-            xb_data = dataset.get_col<float>(milvus::FieldId(100));
-            xb_dataset = knowhere::GenDataSet(NB, DIM, xb_data.data());
-            xq_dataset = knowhere::GenDataSet(
-                NQ, DIM, xb_data.data() + DIM * query_offset);
-        } else {
+        auto dataset =
+            GenDatasetWithDataType(NB, metric_type, vec_field_data_type);
+        if (is_binary) {
+            // binary vector
             xb_bin_data = dataset.get_col<uint8_t>(milvus::FieldId(100));
             xb_dataset = knowhere::GenDataSet(NB, DIM, xb_bin_data.data());
             xq_dataset = knowhere::GenDataSet(
                 NQ, DIM, xb_bin_data.data() + DIM * query_offset);
+        } else if (is_sparse) {
+            // sparse vector
+            xb_sparse_data =
+                dataset.get_col<knowhere::sparse::SparseRow<float>>(
+                    milvus::FieldId(100));
+            xb_dataset =
+                knowhere::GenDataSet(NB, kTestSparseDim, xb_sparse_data.data());
+            xb_dataset->SetIsSparse(true);
+            xq_dataset = knowhere::GenDataSet(
+                NQ, kTestSparseDim, xb_sparse_data.data() + query_offset);
+            xq_dataset->SetIsSparse(true);
+        } else {
+            // float vector
+            xb_data = dataset.get_col<float>(milvus::FieldId(100));
+            xb_dataset = knowhere::GenDataSet(NB, DIM, xb_data.data());
+            xq_dataset = knowhere::GenDataSet(
+                NQ, DIM, xb_data.data() + DIM * query_offset);
         }
     }
 
@@ -358,7 +369,8 @@ class IndexTest : public ::testing::TestWithParam<Param> {
 
  protected:
     std::string index_type, metric_type;
-    bool is_binary;
+    bool is_binary = false;
+    bool is_sparse = false;
     milvus::Config build_conf;
     milvus::Config load_conf;
     milvus::Config search_conf;
@@ -367,13 +379,14 @@ class IndexTest : public ::testing::TestWithParam<Param> {
     knowhere::DataSetPtr xb_dataset;
     FixedVector<float> xb_data;
     FixedVector<uint8_t> xb_bin_data;
+    FixedVector<knowhere::sparse::SparseRow<float>> xb_sparse_data;
     knowhere::DataSetPtr xq_dataset;
     int64_t query_offset = 100;
-    int64_t NB = 3000;
+    int64_t NB = 3000;  // will be updated to 27000 for mmap+hnsw
     StorageConfig storage_config_;
 };
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     IndexTypeParameters,
     IndexTest,
     ::testing::Values(
@@ -387,10 +400,67 @@ INSTANTIATE_TEST_CASE_P(
                   knowhere::metric::JACCARD),
         std::pair(knowhere::IndexEnum::INDEX_FAISS_BIN_IDMAP,
                   knowhere::metric::JACCARD),
+        std::pair(knowhere::IndexEnum::INDEX_SPARSE_INVERTED_INDEX,
+                  knowhere::metric::IP),
+        std::pair(knowhere::IndexEnum::INDEX_SPARSE_WAND, knowhere::metric::IP),
 #ifdef BUILD_DISK_ANN
         std::pair(knowhere::IndexEnum::INDEX_DISKANN, knowhere::metric::L2),
 #endif
         std::pair(knowhere::IndexEnum::INDEX_HNSW, knowhere::metric::L2)));
+
+TEST(Indexing, Iterator) {
+    constexpr int N = 10240;
+    constexpr int TOPK = 100;
+    constexpr int dim = 128;
+
+    auto [raw_data, timestamps, uids] = generate_data<dim>(N);
+    milvus::index::CreateIndexInfo create_index_info;
+    create_index_info.field_type = DataType::VECTOR_FLOAT;
+    create_index_info.metric_type = knowhere::metric::L2;
+    create_index_info.index_type = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT_CC;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
+    auto index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, milvus::storage::FileManagerContext());
+
+    auto build_conf = knowhere::Json{
+        {knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
+        {knowhere::meta::DIM, std::to_string(dim)},
+        {knowhere::indexparam::NLIST, "128"},
+    };
+
+    auto search_conf = knowhere::Json{
+        {knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
+        {knowhere::indexparam::NPROBE, 4},
+    };
+
+    index->BuildWithDataset(knowhere::GenDataSet(N, dim, raw_data.data()),
+                            build_conf);
+
+    auto bitmap = BitsetType(N, false);
+
+    BitsetView view = bitmap;
+    auto query_ds = knowhere::GenDataSet(1, dim, raw_data.data());
+
+    milvus::SearchInfo searchInfo;
+    searchInfo.topk_ = TOPK;
+    searchInfo.metric_type_ = knowhere::metric::L2;
+    searchInfo.search_params_ = search_conf;
+    auto vec_index = dynamic_cast<index::VectorIndex*>(index.get());
+
+    knowhere::expected<std::vector<knowhere::IndexNode::IteratorPtr>>
+        kw_iterators = vec_index->VectorIterators(
+            query_ds, searchInfo.search_params_, view);
+    ASSERT_TRUE(kw_iterators.has_value());
+    ASSERT_EQ(kw_iterators.value().size(), 1);
+    auto iterator = kw_iterators.value()[0];
+    ASSERT_TRUE(iterator->HasNext());
+    while (iterator->HasNext()) {
+        auto [off, dis] = iterator->Next();
+        ASSERT_TRUE(off >= 0);
+        ASSERT_TRUE(dis >= 0);
+    }
+}
 
 TEST_P(IndexTest, BuildAndQuery) {
     milvus::index::CreateIndexInfo create_index_info;
@@ -426,24 +496,35 @@ TEST_P(IndexTest, BuildAndQuery) {
     }
     load_conf = generate_load_conf(index_type, metric_type, 0);
     load_conf["index_files"] = index_files;
-    ASSERT_NO_THROW(vec_index->Load(load_conf));
+    ASSERT_NO_THROW(vec_index->Load(milvus::tracer::TraceContext{}, load_conf));
     EXPECT_EQ(vec_index->Count(), NB);
-    EXPECT_EQ(vec_index->GetDim(), DIM);
+    if (!is_sparse) {
+        EXPECT_EQ(vec_index->GetDim(), DIM);
+    }
 
     milvus::SearchInfo search_info;
     search_info.topk_ = K;
     search_info.metric_type_ = metric_type;
     search_info.search_params_ = search_conf;
-    auto result = vec_index->Query(xq_dataset, search_info, nullptr);
-    EXPECT_EQ(result->total_nq_, NQ);
-    EXPECT_EQ(result->unity_topK_, K);
-    EXPECT_EQ(result->distances_.size(), NQ * K);
-    EXPECT_EQ(result->seg_offsets_.size(), NQ * K);
-    if (!is_binary) {
-        EXPECT_EQ(result->seg_offsets_[0], query_offset);
+    SearchResult result;
+    vec_index->Query(xq_dataset, search_info, nullptr, result);
+    EXPECT_EQ(result.total_nq_, NQ);
+    EXPECT_EQ(result.unity_topK_, K);
+    EXPECT_EQ(result.distances_.size(), NQ * K);
+    EXPECT_EQ(result.seg_offsets_.size(), NQ * K);
+    if (metric_type == knowhere::metric::L2) {
+        // for L2 metric each vector is closest to itself
+        for (int i = 0; i < NQ; i++) {
+            EXPECT_EQ(result.seg_offsets_[i * K], query_offset + i);
+        }
+        // for other metrics we can't verify the correctness unless we perform
+        // brute force search to get the ground truth.
     }
-    search_info.search_params_ = range_search_conf;
-    vec_index->Query(xq_dataset, search_info, nullptr);
+    if (!is_sparse) {
+        // sparse doesn't support range search yet
+        search_info.search_params_ = range_search_conf;
+        vec_index->Query(xq_dataset, search_info, nullptr, result);
+    }
 }
 
 TEST_P(IndexTest, Mmap) {
@@ -484,24 +565,25 @@ TEST_P(IndexTest, Mmap) {
     load_conf = generate_load_conf(index_type, metric_type, 0);
     load_conf["index_files"] = index_files;
     load_conf["mmap_filepath"] = "mmap/test_index_mmap_" + index_type;
-    vec_index->Load(load_conf);
+    vec_index->Load(milvus::tracer::TraceContext{}, load_conf);
     EXPECT_EQ(vec_index->Count(), NB);
-    EXPECT_EQ(vec_index->GetDim(), DIM);
+    EXPECT_EQ(vec_index->GetDim(), is_sparse ? kTestSparseDim : DIM);
 
     milvus::SearchInfo search_info;
     search_info.topk_ = K;
     search_info.metric_type_ = metric_type;
     search_info.search_params_ = search_conf;
-    auto result = vec_index->Query(xq_dataset, search_info, nullptr);
-    EXPECT_EQ(result->total_nq_, NQ);
-    EXPECT_EQ(result->unity_topK_, K);
-    EXPECT_EQ(result->distances_.size(), NQ * K);
-    EXPECT_EQ(result->seg_offsets_.size(), NQ * K);
+    SearchResult result;
+    vec_index->Query(xq_dataset, search_info, nullptr, result);
+    EXPECT_EQ(result.total_nq_, NQ);
+    EXPECT_EQ(result.unity_topK_, K);
+    EXPECT_EQ(result.distances_.size(), NQ * K);
+    EXPECT_EQ(result.seg_offsets_.size(), NQ * K);
     if (!is_binary) {
-        EXPECT_EQ(result->seg_offsets_[0], query_offset);
+        EXPECT_EQ(result.seg_offsets_[0], query_offset);
     }
     search_info.search_params_ = range_search_conf;
-    vec_index->Query(xq_dataset, search_info, nullptr);
+    vec_index->Query(xq_dataset, search_info, nullptr, result);
 }
 
 TEST_P(IndexTest, GetVector) {
@@ -541,9 +623,11 @@ TEST_P(IndexTest, GetVector) {
         vec_index->Load(binary_set, load_conf);
         EXPECT_EQ(vec_index->Count(), NB);
     } else {
-        vec_index->Load(load_conf);
+        vec_index->Load(milvus::tracer::TraceContext{}, load_conf);
     }
-    EXPECT_EQ(vec_index->GetDim(), DIM);
+    if (!is_sparse) {
+        EXPECT_EQ(vec_index->GetDim(), DIM);
+    }
     EXPECT_EQ(vec_index->Count(), NB);
 
     if (!vec_index->HasRawData()) {
@@ -551,35 +635,115 @@ TEST_P(IndexTest, GetVector) {
     }
 
     auto ids_ds = GenRandomIds(NB);
-    auto results = vec_index->GetVector(ids_ds);
-    EXPECT_TRUE(results.size() > 0);
-    if (!is_binary) {
-        std::vector<float> result_vectors(results.size() / (sizeof(float)));
-        memcpy(result_vectors.data(), results.data(), results.size());
-        EXPECT_TRUE(result_vectors.size() == xb_data.size());
-        for (size_t i = 0; i < NB; ++i) {
-            auto id = ids_ds->GetIds()[i];
-            for (size_t j = 0; j < DIM; ++j) {
-                EXPECT_TRUE(result_vectors[i * DIM + j] ==
-                            xb_data[id * DIM + j]);
-            }
-        }
-    } else {
-        EXPECT_TRUE(results.size() == xb_bin_data.size());
+    if (is_binary) {
+        auto results = vec_index->GetVector(ids_ds);
+        EXPECT_EQ(results.size(), xb_bin_data.size());
         const auto data_bytes = DIM / 8;
         for (size_t i = 0; i < NB; ++i) {
             auto id = ids_ds->GetIds()[i];
             for (size_t j = 0; j < data_bytes; ++j) {
-                EXPECT_TRUE(results[i * data_bytes + j] ==
-                            xb_bin_data[id * data_bytes + j]);
+                ASSERT_EQ(results[i * data_bytes + j],
+                          xb_bin_data[id * data_bytes + j]);
             }
+        }
+    } else if (is_sparse) {
+        auto sparse_rows = vec_index->GetSparseVector(ids_ds);
+        for (size_t i = 0; i < NB; ++i) {
+            auto id = ids_ds->GetIds()[i];
+            auto& row = sparse_rows[i];
+            ASSERT_EQ(row.size(), xb_sparse_data[id].size());
+            for (size_t j = 0; j < row.size(); ++j) {
+                ASSERT_EQ(row[j].id, xb_sparse_data[id][j].id);
+                ASSERT_EQ(row[j].val, xb_sparse_data[id][j].val);
+            }
+        }
+    } else {
+        auto results = vec_index->GetVector(ids_ds);
+        std::vector<float> result_vectors(results.size() / (sizeof(float)));
+        memcpy(result_vectors.data(), results.data(), results.size());
+        ASSERT_EQ(result_vectors.size(), xb_data.size());
+        for (size_t i = 0; i < NB; ++i) {
+            auto id = ids_ds->GetIds()[i];
+            for (size_t j = 0; j < DIM; ++j) {
+                ASSERT_EQ(result_vectors[i * DIM + j], xb_data[id * DIM + j]);
+            }
+        }
+    }
+}
+
+// This ut runs for sparse only. And will not use the default xb_sparse_dataset.
+TEST_P(IndexTest, GetVector_EmptySparseVector) {
+    if (index_type != knowhere::IndexEnum::INDEX_SPARSE_INVERTED_INDEX &&
+        index_type != knowhere::IndexEnum::INDEX_SPARSE_WAND) {
+        return;
+    }
+    NB = 3;
+
+    std::vector<knowhere::sparse::SparseRow<float>> vec;
+    vec.reserve(NB);
+    vec.emplace_back(2);
+    vec[0].set_at(0, 1, 1.0);
+    vec[0].set_at(1, 2, 2.0);
+    // row1 is an explicit empty row
+    vec.emplace_back(0);
+    // row2 is an implicit empty row(provided dim has a value of 0)
+    vec.emplace_back(1);
+    vec[2].set_at(0, 1, 0);
+
+    auto dataset = knowhere::GenDataSet(NB, 3, vec.data());
+
+    milvus::index::CreateIndexInfo create_index_info;
+    create_index_info.index_type = index_type;
+    create_index_info.metric_type = metric_type;
+    create_index_info.field_type = vec_field_data_type;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
+    index::IndexBasePtr index;
+
+    milvus::storage::FieldDataMeta field_data_meta{1, 2, 3, 100};
+    milvus::storage::IndexMeta index_meta{3, 100, 1000, 1};
+    auto chunk_manager = milvus::storage::CreateChunkManager(storage_config_);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
+    index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
+
+    // use custom dataset instead of xb_dataset
+    ASSERT_NO_THROW(index->BuildWithDataset(dataset, build_conf));
+    milvus::index::IndexBasePtr new_index;
+    milvus::index::VectorIndex* vec_index = nullptr;
+
+    auto binary_set = index->Upload();
+    index.reset();
+    std::vector<std::string> index_files;
+    for (auto& binary : binary_set.binary_map_) {
+        index_files.emplace_back(binary.first);
+    }
+    new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
+    load_conf = generate_load_conf(index_type, metric_type, 0);
+    load_conf["index_files"] = index_files;
+
+    vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
+    vec_index->Load(milvus::tracer::TraceContext{}, load_conf);
+    EXPECT_EQ(vec_index->Count(), NB);
+
+    auto ids_ds = GenRandomIds(NB);
+    auto sparse_rows = vec_index->GetSparseVector(ids_ds);
+    for (size_t i = 0; i < NB; ++i) {
+        auto id = ids_ds->GetIds()[i];
+        auto& row = sparse_rows[i];
+        ASSERT_EQ(row.size(), vec[id].size());
+        for (size_t j = 0; j < row.size(); ++j) {
+            ASSERT_EQ(row[j].id, vec[id][j].id);
+            ASSERT_EQ(row[j].val, vec[id][j].val);
         }
     }
 }
 
 #ifdef BUILD_DISK_ANN
 TEST(Indexing, SearchDiskAnnWithInvalidParam) {
-    int64_t NB = 10000;
+    int64_t NB = 1000;
     IndexType index_type = knowhere::IndexEnum::INDEX_DISKANN;
     MetricType metric_type = knowhere::metric::L2;
     milvus::index::CreateIndexInfo create_index_info;
@@ -610,8 +774,8 @@ TEST(Indexing, SearchDiskAnnWithInvalidParam) {
     auto build_conf = Config{
         {knowhere::meta::METRIC_TYPE, metric_type},
         {knowhere::meta::DIM, std::to_string(DIM)},
-        {milvus::index::DISK_ANN_MAX_DEGREE, std::to_string(48)},
-        {milvus::index::DISK_ANN_SEARCH_LIST_SIZE, std::to_string(128)},
+        {milvus::index::DISK_ANN_MAX_DEGREE, std::to_string(24)},
+        {milvus::index::DISK_ANN_SEARCH_LIST_SIZE, std::to_string(56)},
         {milvus::index::DISK_ANN_PQ_CODE_BUDGET, std::to_string(0.001)},
         {milvus::index::DISK_ANN_BUILD_DRAM_BUDGET, std::to_string(2)},
         {milvus::index::DISK_ANN_BUILD_THREAD_NUM, std::to_string(2)},
@@ -638,7 +802,7 @@ TEST(Indexing, SearchDiskAnnWithInvalidParam) {
     }
     auto load_conf = generate_load_conf(index_type, metric_type, NB);
     load_conf["index_files"] = index_files;
-    vec_index->Load(load_conf);
+    vec_index->Load(milvus::tracer::TraceContext{}, load_conf);
     EXPECT_EQ(vec_index->Count(), NB);
 
     // search disk index with search_list == limit
@@ -653,264 +817,172 @@ TEST(Indexing, SearchDiskAnnWithInvalidParam) {
         {knowhere::meta::METRIC_TYPE, metric_type},
         {milvus::index::DISK_ANN_QUERY_LIST, K - 1},
     };
-    EXPECT_THROW(vec_index->Query(xq_dataset, search_info, nullptr),
+    SearchResult result;
+    EXPECT_THROW(vec_index->Query(xq_dataset, search_info, nullptr, result),
                  std::runtime_error);
 }
-#endif
 
-class IndexTestV2
-    : public ::testing::TestWithParam<std::tuple<Param, int64_t, bool>> {
- protected:
-    std::shared_ptr<arrow::Schema>
-    TestSchema(int vec_size) {
-        arrow::FieldVector fields;
-        fields.push_back(arrow::field("pk", arrow::int64()));
-        fields.push_back(arrow::field("ts", arrow::int64()));
-        fields.push_back(
-            arrow::field("vec", arrow::fixed_size_binary(vec_size)));
-        return std::make_shared<arrow::Schema>(fields);
-    }
-
-    std::shared_ptr<arrow::RecordBatchReader>
-    TestRecords(int vec_size, GeneratedData& dataset) {
-        arrow::Int64Builder pk_builder;
-        arrow::Int64Builder ts_builder;
-        arrow::FixedSizeBinaryBuilder vec_builder(
-            arrow::fixed_size_binary(vec_size));
-        if (!is_binary) {
-            xb_data = dataset.get_col<float>(milvus::FieldId(100));
-            auto data = reinterpret_cast<char*>(xb_data.data());
-            for (auto i = 0; i < NB; ++i) {
-                EXPECT_TRUE(pk_builder.Append(i).ok());
-                EXPECT_TRUE(ts_builder.Append(i).ok());
-                EXPECT_TRUE(vec_builder.Append(data + i * vec_size).ok());
-            }
-        } else {
-            xb_bin_data = dataset.get_col<uint8_t>(milvus::FieldId(100));
-            for (auto i = 0; i < NB; ++i) {
-                EXPECT_TRUE(pk_builder.Append(i).ok());
-                EXPECT_TRUE(ts_builder.Append(i).ok());
-                EXPECT_TRUE(
-                    vec_builder.Append(xb_bin_data.data() + i * vec_size).ok());
-            }
-        }
-        std::shared_ptr<arrow::Array> pk_array;
-        EXPECT_TRUE(pk_builder.Finish(&pk_array).ok());
-        std::shared_ptr<arrow::Array> ts_array;
-        EXPECT_TRUE(ts_builder.Finish(&ts_array).ok());
-        std::shared_ptr<arrow::Array> vec_array;
-        EXPECT_TRUE(vec_builder.Finish(&vec_array).ok());
-        auto schema = TestSchema(vec_size);
-        auto rec_batch = arrow::RecordBatch::Make(
-            schema, NB, {pk_array, ts_array, vec_array});
-        auto reader =
-            arrow::RecordBatchReader::Make({rec_batch}, schema).ValueOrDie();
-        return reader;
-    }
-
-    std::shared_ptr<milvus_storage::Space>
-    TestSpace(int vec_size, GeneratedData& dataset) {
-        auto arrow_schema = TestSchema(vec_size);
-        auto schema_options = std::make_shared<milvus_storage::SchemaOptions>();
-        schema_options->primary_column = "pk";
-        schema_options->version_column = "ts";
-        schema_options->vector_column = "vec";
-        auto schema = std::make_shared<milvus_storage::Schema>(arrow_schema,
-                                                               schema_options);
-        EXPECT_TRUE(schema->Validate().ok());
-
-        auto space_res = milvus_storage::Space::Open(
-            "file://" + boost::filesystem::canonical(temp_path).string(),
-            milvus_storage::Options{schema});
-        EXPECT_TRUE(space_res.has_value());
-
-        auto space = std::move(space_res.value());
-        auto rec = TestRecords(vec_size, dataset);
-        auto write_opt = milvus_storage::WriteOption{NB};
-        space->Write(rec.get(), &write_opt);
-        return std::move(space);
-    }
-
-    void
-    SetUp() override {
-        temp_path = boost::filesystem::temp_directory_path() /
-                    boost::filesystem::unique_path();
-        boost::filesystem::create_directory(temp_path);
-        storage_config_ = get_default_local_storage_config();
-
-        auto param = GetParam();
-        index_type = std::get<0>(param).first;
-        metric_type = std::get<0>(param).second;
-        file_slice_size = std::get<1>(param);
-        enable_mmap = index_type != knowhere::IndexEnum::INDEX_DISKANN &&
-                      std::get<2>(param);
-        if (enable_mmap) {
-            mmap_file_path = boost::filesystem::temp_directory_path() /
-                             boost::filesystem::unique_path();
-        }
-        NB = 3000;
-
-        // try to reduce the test time,
-        // but the large dataset is needed for the case below.
-        auto test_name = std::string(
-            testing::UnitTest::GetInstance()->current_test_info()->name());
-        if (test_name == "Mmap" &&
-            index_type == knowhere::IndexEnum::INDEX_HNSW) {
-            NB = 270000;
-        }
-        build_conf = generate_build_conf(index_type, metric_type);
-        load_conf = generate_load_conf(index_type, metric_type, NB);
-        search_conf = generate_search_conf(index_type, metric_type);
-        range_search_conf = generate_range_search_conf(index_type, metric_type);
-
-        std::map<knowhere::MetricType, bool> is_binary_map = {
-            {knowhere::IndexEnum::INDEX_FAISS_IDMAP, false},
-            {knowhere::IndexEnum::INDEX_FAISS_IVFPQ, false},
-            {knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, false},
-            {knowhere::IndexEnum::INDEX_FAISS_IVFSQ8, false},
-            {knowhere::IndexEnum::INDEX_FAISS_BIN_IVFFLAT, true},
-            {knowhere::IndexEnum::INDEX_FAISS_BIN_IDMAP, true},
-            {knowhere::IndexEnum::INDEX_HNSW, false},
-            {knowhere::IndexEnum::INDEX_DISKANN, false},
-        };
-
-        is_binary = is_binary_map[index_type];
-        int vec_size;
-        if (is_binary) {
-            vec_size = DIM / 8;
-            vec_field_data_type = milvus::DataType::VECTOR_BINARY;
-        } else {
-            vec_size = DIM * 4;
-            vec_field_data_type = milvus::DataType::VECTOR_FLOAT;
-        }
-
-        auto dataset = GenDataset(NB, metric_type, is_binary);
-        space = TestSpace(vec_size, dataset);
-
-        if (!is_binary) {
-            xb_data = dataset.get_col<float>(milvus::FieldId(100));
-            xq_dataset = knowhere::GenDataSet(
-                NQ, DIM, xb_data.data() + DIM * query_offset);
-        } else {
-            xb_bin_data = dataset.get_col<uint8_t>(milvus::FieldId(100));
-            xq_dataset = knowhere::GenDataSet(
-                NQ, DIM, xb_bin_data.data() + DIM * query_offset);
-        }
-    }
-
-    void
-    TearDown() override {
-        boost::filesystem::remove_all(temp_path);
-        if (enable_mmap) {
-            boost::filesystem::remove_all(mmap_file_path);
-        }
-    }
-
- protected:
-    std::string index_type, metric_type;
-    bool is_binary;
-    milvus::Config build_conf;
-    milvus::Config load_conf;
-    milvus::Config search_conf;
-    milvus::Config range_search_conf;
-    milvus::DataType vec_field_data_type;
-    knowhere::DataSetPtr xb_dataset;
-    FixedVector<float> xb_data;
-    FixedVector<uint8_t> xb_bin_data;
-    knowhere::DataSetPtr xq_dataset;
-    int64_t query_offset = 100;
-    int64_t NB = 3000;
-    StorageConfig storage_config_;
-
-    boost::filesystem::path temp_path;
-    std::shared_ptr<milvus_storage::Space> space;
-    int64_t file_slice_size = DEFAULT_INDEX_FILE_SLICE_SIZE;
-    bool enable_mmap;
-    boost::filesystem::path mmap_file_path;
-};
-
-INSTANTIATE_TEST_CASE_P(
-    IndexTypeParameters,
-    IndexTestV2,
-    testing::Combine(
-        ::testing::Values(
-            std::pair(knowhere::IndexEnum::INDEX_FAISS_IDMAP,
-                      knowhere::metric::L2),
-            std::pair(knowhere::IndexEnum::INDEX_FAISS_IVFPQ,
-                      knowhere::metric::L2),
-            std::pair(knowhere::IndexEnum::INDEX_FAISS_IVFFLAT,
-                      knowhere::metric::L2),
-            std::pair(knowhere::IndexEnum::INDEX_FAISS_IVFSQ8,
-                      knowhere::metric::L2),
-            std::pair(knowhere::IndexEnum::INDEX_FAISS_BIN_IVFFLAT,
-                      knowhere::metric::JACCARD),
-            std::pair(knowhere::IndexEnum::INDEX_FAISS_BIN_IDMAP,
-                      knowhere::metric::JACCARD),
-#ifdef BUILD_DISK_ANN
-            std::pair(knowhere::IndexEnum::INDEX_DISKANN, knowhere::metric::L2),
-#endif
-            std::pair(knowhere::IndexEnum::INDEX_HNSW, knowhere::metric::L2)),
-        testing::Values(DEFAULT_INDEX_FILE_SLICE_SIZE, 5000L),
-        testing::Bool()));
-
-TEST_P(IndexTestV2, BuildAndQuery) {
-    FILE_SLICE_SIZE = file_slice_size;
+TEST(Indexing, SearchDiskAnnWithFloat16) {
+    int64_t NB = 1000;
+    int64_t NQ = 2;
+    int64_t K = 4;
+    IndexType index_type = knowhere::IndexEnum::INDEX_DISKANN;
+    MetricType metric_type = knowhere::metric::L2;
     milvus::index::CreateIndexInfo create_index_info;
     create_index_info.index_type = index_type;
     create_index_info.metric_type = metric_type;
-    create_index_info.field_type = vec_field_data_type;
-    create_index_info.field_name = "vec";
-    create_index_info.dim = DIM;
+    create_index_info.field_type = milvus::DataType::VECTOR_FLOAT16;
     create_index_info.index_engine_version =
         knowhere::Version::GetCurrentVersion().VersionNumber();
-    index::IndexBasePtr index;
 
-    milvus::storage::FieldDataMeta field_data_meta{1, 2, 3, 100};
-    milvus::storage::IndexMeta index_meta{.segment_id = 3,
-                                          .field_id = 100,
-                                          .build_id = 1000,
-                                          .index_version = 1,
-                                          .field_name = "vec",
-                                          .field_type = vec_field_data_type,
-                                          .dim = DIM};
-    auto chunk_manager = milvus::storage::CreateChunkManager(storage_config_);
+    int64_t collection_id = 1;
+    int64_t partition_id = 2;
+    int64_t segment_id = 3;
+    int64_t field_id = 100;
+    int64_t build_id = 1000;
+    int64_t index_version = 1;
+
+    StorageConfig storage_config = get_default_local_storage_config();
+    milvus::storage::FieldDataMeta field_data_meta{
+        collection_id, partition_id, segment_id, field_id};
+    milvus::storage::IndexMeta index_meta{
+        segment_id, field_id, build_id, index_version};
+    auto chunk_manager = storage::CreateChunkManager(storage_config);
     milvus::storage::FileManagerContext file_manager_context(
-        field_data_meta, index_meta, chunk_manager, space);
-    index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager_context, space);
+        field_data_meta, index_meta, chunk_manager);
+    auto index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
 
-    auto build_conf = generate_build_conf(index_type, metric_type);
-    index->BuildV2(build_conf);
-    milvus::index::IndexBasePtr new_index;
-    milvus::index::VectorIndex* vec_index = nullptr;
+    auto build_conf = Config{
+        {knowhere::meta::METRIC_TYPE, metric_type},
+        {knowhere::meta::DIM, std::to_string(DIM)},
+        {milvus::index::DISK_ANN_MAX_DEGREE, std::to_string(24)},
+        {milvus::index::DISK_ANN_SEARCH_LIST_SIZE, std::to_string(56)},
+        {milvus::index::DISK_ANN_PQ_CODE_BUDGET, std::to_string(0.001)},
+        {milvus::index::DISK_ANN_BUILD_DRAM_BUDGET, std::to_string(2)},
+        {milvus::index::DISK_ANN_BUILD_THREAD_NUM, std::to_string(2)},
+    };
 
-    auto binary_set = index->UploadV2();
+    // build disk ann index
+    auto dataset = GenDatasetWithDataType(
+        NB, metric_type, milvus::DataType::VECTOR_FLOAT16);
+    FixedVector<float16> xb_data =
+        dataset.get_col<float16>(milvus::FieldId(field_id));
+    knowhere::DataSetPtr xb_dataset =
+        knowhere::GenDataSet(NB, DIM, xb_data.data());
+    ASSERT_NO_THROW(index->BuildWithDataset(xb_dataset, build_conf));
+
+    // serialize and load disk index, disk index can only be search after loading for now
+    auto binary_set = index->Upload();
     index.reset();
 
-    new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager_context, space);
-    vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
-
-    load_conf = generate_load_conf(index_type, metric_type, 0);
-    if (enable_mmap) {
-        load_conf[kMmapFilepath] = mmap_file_path.string();
+    auto new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
+    auto vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
+    std::vector<std::string> index_files;
+    for (auto& binary : binary_set.binary_map_) {
+        index_files.emplace_back(binary.first);
     }
-    ASSERT_NO_THROW(vec_index->LoadV2(load_conf));
+    auto load_conf = generate_load_conf<float16>(index_type, metric_type, NB);
+    load_conf["index_files"] = index_files;
+    vec_index->Load(milvus::tracer::TraceContext{}, load_conf);
     EXPECT_EQ(vec_index->Count(), NB);
-    EXPECT_EQ(vec_index->GetDim(), DIM);
+
+    // search disk index with search_list == limit
+    int query_offset = 100;
+    knowhere::DataSetPtr xq_dataset =
+        knowhere::GenDataSet(NQ, DIM, xb_data.data() + DIM * query_offset);
 
     milvus::SearchInfo search_info;
     search_info.topk_ = K;
     search_info.metric_type_ = metric_type;
-    search_info.search_params_ = search_conf;
-    auto result = vec_index->Query(xq_dataset, search_info, nullptr);
-    EXPECT_EQ(result->total_nq_, NQ);
-    EXPECT_EQ(result->unity_topK_, K);
-    EXPECT_EQ(result->distances_.size(), NQ * K);
-    EXPECT_EQ(result->seg_offsets_.size(), NQ * K);
-    if (!is_binary) {
-        EXPECT_EQ(result->seg_offsets_[0], query_offset);
-    }
-    search_info.search_params_ = range_search_conf;
-    vec_index->Query(xq_dataset, search_info, nullptr);
+    search_info.search_params_ = milvus::Config{
+        {knowhere::meta::METRIC_TYPE, metric_type},
+        {milvus::index::DISK_ANN_QUERY_LIST, K * 2},
+    };
+    SearchResult result;
+    EXPECT_NO_THROW(vec_index->Query(xq_dataset, search_info, nullptr, result));
 }
+
+TEST(Indexing, SearchDiskAnnWithBFloat16) {
+    int64_t NB = 1000;
+    int64_t NQ = 2;
+    int64_t K = 4;
+    IndexType index_type = knowhere::IndexEnum::INDEX_DISKANN;
+    MetricType metric_type = knowhere::metric::L2;
+    milvus::index::CreateIndexInfo create_index_info;
+    create_index_info.index_type = index_type;
+    create_index_info.metric_type = metric_type;
+    create_index_info.field_type = milvus::DataType::VECTOR_BFLOAT16;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
+
+    int64_t collection_id = 1;
+    int64_t partition_id = 2;
+    int64_t segment_id = 3;
+    int64_t field_id = 100;
+    int64_t build_id = 1000;
+    int64_t index_version = 1;
+
+    StorageConfig storage_config = get_default_local_storage_config();
+    milvus::storage::FieldDataMeta field_data_meta{
+        collection_id, partition_id, segment_id, field_id};
+    milvus::storage::IndexMeta index_meta{
+        segment_id, field_id, build_id, index_version};
+    auto chunk_manager = storage::CreateChunkManager(storage_config);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
+    auto index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
+
+    auto build_conf = Config{
+        {knowhere::meta::METRIC_TYPE, metric_type},
+        {knowhere::meta::DIM, std::to_string(DIM)},
+        {milvus::index::DISK_ANN_MAX_DEGREE, std::to_string(24)},
+        {milvus::index::DISK_ANN_SEARCH_LIST_SIZE, std::to_string(56)},
+        {milvus::index::DISK_ANN_PQ_CODE_BUDGET, std::to_string(0.001)},
+        {milvus::index::DISK_ANN_BUILD_DRAM_BUDGET, std::to_string(2)},
+        {milvus::index::DISK_ANN_BUILD_THREAD_NUM, std::to_string(2)},
+    };
+
+    // build disk ann index
+    auto dataset = GenDatasetWithDataType(
+        NB, metric_type, milvus::DataType::VECTOR_BFLOAT16);
+    FixedVector<bfloat16> xb_data =
+        dataset.get_col<bfloat16>(milvus::FieldId(field_id));
+    knowhere::DataSetPtr xb_dataset =
+        knowhere::GenDataSet(NB, DIM, xb_data.data());
+    ASSERT_NO_THROW(index->BuildWithDataset(xb_dataset, build_conf));
+
+    // serialize and load disk index, disk index can only be search after loading for now
+    auto binary_set = index->Upload();
+    index.reset();
+
+    auto new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
+    auto vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
+    std::vector<std::string> index_files;
+    for (auto& binary : binary_set.binary_map_) {
+        index_files.emplace_back(binary.first);
+    }
+    auto load_conf = generate_load_conf<bfloat16>(index_type, metric_type, NB);
+    load_conf["index_files"] = index_files;
+    vec_index->Load(milvus::tracer::TraceContext{}, load_conf);
+    EXPECT_EQ(vec_index->Count(), NB);
+
+    // search disk index with search_list == limit
+    int query_offset = 100;
+    knowhere::DataSetPtr xq_dataset =
+        knowhere::GenDataSet(NQ, DIM, xb_data.data() + DIM * query_offset);
+
+    milvus::SearchInfo search_info;
+    search_info.topk_ = K;
+    search_info.metric_type_ = metric_type;
+    search_info.search_params_ = milvus::Config{
+        {knowhere::meta::METRIC_TYPE, metric_type},
+        {milvus::index::DISK_ANN_QUERY_LIST, K * 2},
+    };
+    SearchResult result;
+    EXPECT_NO_THROW(vec_index->Query(xq_dataset, search_info, nullptr, result));
+}
+#endif

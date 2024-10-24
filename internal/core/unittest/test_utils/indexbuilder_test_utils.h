@@ -18,12 +18,14 @@
 #include <google/protobuf/text_format.h>
 
 #include "DataGen.h"
+#include "index/Meta.h"
 #include "index/ScalarIndex.h"
 #include "index/StringIndex.h"
 #include "index/Utils.h"
 #include "indexbuilder/ScalarIndexCreator.h"
 #include "indexbuilder/VecIndexCreator.h"
 #include "indexbuilder/index_c.h"
+#include "knowhere/comp/index_param.h"
 #include "pb/index_cgo_msg.pb.h"
 #include "storage/Types.h"
 
@@ -97,11 +99,26 @@ generate_build_conf(const milvus::IndexType& index_type,
             {milvus::index::DISK_ANN_BUILD_DRAM_BUDGET, std::to_string(32)},
             {milvus::index::DISK_ANN_BUILD_THREAD_NUM, std::to_string(2)},
         };
+    } else if (index_type == knowhere::IndexEnum::INDEX_SPARSE_INVERTED_INDEX ||
+               index_type == knowhere::IndexEnum::INDEX_SPARSE_WAND) {
+        if (metric_type == knowhere::metric::BM25) {
+            return knowhere::Json{
+                {knowhere::meta::METRIC_TYPE, metric_type},
+                {knowhere::indexparam::DROP_RATIO_BUILD, "0.1"},
+                {knowhere::meta::BM25_K1, "1.2"},
+                {knowhere::meta::BM25_B, "0.75"},
+                {knowhere::meta::BM25_AVGDL, "100"}};
+        }
+        return knowhere::Json{
+            {knowhere::meta::METRIC_TYPE, metric_type},
+            {knowhere::indexparam::DROP_RATIO_BUILD, "0.1"},
+        };
     }
     return knowhere::Json();
 }
 
-auto
+template <typename DataType = float>
+inline auto
 generate_load_conf(const milvus::IndexType& index_type,
                    const milvus::MetricType& metric_type,
                    int64_t nb) {
@@ -111,7 +128,8 @@ generate_load_conf(const milvus::IndexType& index_type,
             {knowhere::meta::DIM, std::to_string(DIM)},
             {milvus::index::DISK_ANN_LOAD_THREAD_NUM, std::to_string(2)},
             {milvus::index::DISK_ANN_SEARCH_CACHE_BUDGET,
-             std::to_string(0.0002)},
+             std::to_string(0.05 * sizeof(DataType) * nb /
+                            (1024.0 * 1024.0 * 1024.0))},
         };
     }
     return knowhere::Json{
@@ -208,6 +226,35 @@ GenDataset(int64_t N,
     if (!is_binary) {
         schema->AddDebugField(
             "fakevec", milvus::DataType::VECTOR_FLOAT, dim, metric_type);
+        return milvus::segcore::DataGen(schema, N);
+    } else {
+        schema->AddDebugField(
+            "fakebinvec", milvus::DataType::VECTOR_BINARY, dim, metric_type);
+        return milvus::segcore::DataGen(schema, N);
+    }
+}
+
+auto
+GenDatasetWithDataType(int64_t N,
+                       const knowhere::MetricType& metric_type,
+                       milvus::DataType data_type,
+                       int64_t dim = DIM) {
+    auto schema = std::make_shared<milvus::Schema>();
+    if (data_type == milvus::DataType::VECTOR_FLOAT16) {
+        schema->AddDebugField(
+            "fakevec", milvus::DataType::VECTOR_FLOAT16, dim, metric_type);
+        return milvus::segcore::DataGen(schema, N);
+    } else if (data_type == milvus::DataType::VECTOR_BFLOAT16) {
+        schema->AddDebugField(
+            "fakevec", milvus::DataType::VECTOR_BFLOAT16, dim, metric_type);
+        return milvus::segcore::DataGen(schema, N);
+    } else if (data_type == milvus::DataType::VECTOR_FLOAT) {
+        schema->AddDebugField(
+            "fakevec", milvus::DataType::VECTOR_FLOAT, dim, metric_type);
+        return milvus::segcore::DataGen(schema, N);
+    } else if (data_type == milvus::DataType::VECTOR_SPARSE_FLOAT) {
+        schema->AddDebugField(
+            "fakevec", milvus::DataType::VECTOR_SPARSE_FLOAT, 0, metric_type);
         return milvus::segcore::DataGen(schema, N);
     } else {
         schema->AddDebugField(
@@ -348,7 +395,7 @@ template <typename T,
           typename = typename std::enable_if_t<std::is_arithmetic_v<T> ||
                                                std::is_same_v<T, std::string>>>
 inline std::vector<T>
-GenArr(int64_t n) {
+GenSortedArr(int64_t n) {
     auto max_i8 = std::numeric_limits<int8_t>::max() - 1;
     std::vector<T> arr;
     arr.resize(n);
@@ -374,15 +421,14 @@ GenStrArr(int64_t n) {
 
 template <>
 inline std::vector<std::string>
-GenArr<std::string>(int64_t n) {
+GenSortedArr<std::string>(int64_t n) {
     return GenStrArr(n);
 }
 
 std::vector<ScalarTestParams>
 GenBoolParams() {
     std::vector<ScalarTestParams> ret;
-    ret.emplace_back(
-        ScalarTestParams(MapParams(), {{"index_type", "inverted_index"}}));
+    ret.emplace_back(ScalarTestParams(MapParams(), {{"index_type", "sort"}}));
     ret.emplace_back(ScalarTestParams(MapParams(), {{"index_type", "flat"}}));
     return ret;
 }
@@ -408,8 +454,7 @@ GenParams() {
     }
 
     std::vector<ScalarTestParams> ret;
-    ret.emplace_back(
-        ScalarTestParams(MapParams(), {{"index_type", "inverted_index"}}));
+    ret.emplace_back(ScalarTestParams(MapParams(), {{"index_type", "sort"}}));
     ret.emplace_back(ScalarTestParams(MapParams(), {{"index_type", "flat"}}));
     return ret;
 }
@@ -442,13 +487,27 @@ GenDsFromPB(const google::protobuf::Message& msg) {
 template <typename T>
 inline std::vector<std::string>
 GetIndexTypes() {
-    return std::vector<std::string>{"inverted_index"};
+    return std::vector<std::string>{"sort", milvus::index::BITMAP_INDEX_TYPE};
 }
 
 template <>
 inline std::vector<std::string>
 GetIndexTypes<std::string>() {
-    return std::vector<std::string>{"marisa"};
+    return std::vector<std::string>{
+        "sort", "marisa", milvus::index::BITMAP_INDEX_TYPE};
+}
+
+template <typename T>
+inline std::vector<std::string>
+GetIndexTypesV2() {
+    return std::vector<std::string>{"sort", milvus::index::INVERTED_INDEX_TYPE};
+}
+
+template <>
+inline std::vector<std::string>
+GetIndexTypesV2<std::string>() {
+    return std::vector<std::string>{"marisa",
+                                    milvus::index::INVERTED_INDEX_TYPE};
 }
 
 }  // namespace

@@ -50,7 +50,7 @@ func genInsertMsgsByPartition(ctx context.Context,
 
 	// create empty insert message
 	createInsertMsg := func(segmentID UniqueID, channelName string) *msgstream.InsertMsg {
-		insertReq := msgpb.InsertRequest{
+		insertReq := &msgpb.InsertRequest{
 			Base: commonpbutil.NewMsgBase(
 				commonpbutil.WithMsgType(commonpb.MsgType_Insert),
 				commonpbutil.WithTimeStamp(insertMsg.BeginTimestamp), // entity's timestamp was set to equal it.BeginTimestamp in preExecute()
@@ -63,9 +63,8 @@ func genInsertMsgsByPartition(ctx context.Context,
 			SegmentID:      segmentID,
 			ShardName:      channelName,
 			Version:        msgpb.InsertDataVersion_ColumnBased,
+			FieldsData:     make([]*schemapb.FieldData, len(insertMsg.GetFieldsData())),
 		}
-		insertReq.FieldsData = make([]*schemapb.FieldData, len(insertMsg.GetFieldsData()))
-
 		msg := &msgstream.InsertMsg{
 			BaseMsg: msgstream.BaseMsg{
 				Ctx: ctx,
@@ -231,7 +230,7 @@ func repackInsertDataWithPartitionKey(ctx context.Context,
 	}
 
 	channel2RowOffsets := assignChannelsByPK(result.IDs, channelNames, insertMsg)
-	partitionNames, err := getDefaultPartitionNames(ctx, insertMsg.GetDbName(), insertMsg.CollectionName)
+	partitionNames, err := getDefaultPartitionsInPartitionKeyMode(ctx, insertMsg.GetDbName(), insertMsg.CollectionName)
 	if err != nil {
 		log.Warn("get default partition names failed in partition key mode",
 			zap.String("collectionName", insertMsg.CollectionName),

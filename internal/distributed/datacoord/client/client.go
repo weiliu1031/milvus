@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
@@ -34,7 +35,9 @@ import (
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -50,7 +53,7 @@ type Client struct {
 }
 
 // NewClient creates a new client instance
-func NewClient(ctx context.Context) (*Client, error) {
+func NewClient(ctx context.Context) (types.DataCoordClient, error) {
 	sess := sessionutil.NewSession(ctx)
 	if sess == nil {
 		err := fmt.Errorf("new session error, maybe can not connect to etcd")
@@ -162,6 +165,12 @@ func (c *Client) Flush(ctx context.Context, req *datapb.FlushRequest, opts ...gr
 func (c *Client) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error) {
 	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*datapb.AssignSegmentIDResponse, error) {
 		return client.AssignSegmentID(ctx, req)
+	})
+}
+
+func (c *Client) AllocSegment(ctx context.Context, in *datapb.AllocSegmentRequest, opts ...grpc.CallOption) (*datapb.AllocSegmentResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*datapb.AllocSegmentResponse, error) {
+		return client.AllocSegment(ctx, in)
 	})
 }
 
@@ -338,6 +347,18 @@ func (c *Client) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 	})
 }
 
+// GetChannelRecoveryInfo returns the corresponding vchannel info.
+func (c *Client) GetChannelRecoveryInfo(ctx context.Context, req *datapb.GetChannelRecoveryInfoRequest, opts ...grpc.CallOption) (*datapb.GetChannelRecoveryInfoResponse, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(
+		req.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.sess.ServerID)),
+	)
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*datapb.GetChannelRecoveryInfoResponse, error) {
+		return client.GetChannelRecoveryInfo(ctx, req)
+	})
+}
+
 // GetFlushedSegments returns flushed segment list of requested collection/parition
 //
 // ctx is the context to control request deadline and cancellation
@@ -467,18 +488,6 @@ func (c *Client) SetSegmentState(ctx context.Context, req *datapb.SetSegmentStat
 	})
 }
 
-// Import data files(json, numpy, etc.) on MinIO/S3 storage, read and parse them into sealed segments
-func (c *Client) Import(ctx context.Context, req *datapb.ImportTaskRequest, opts ...grpc.CallOption) (*datapb.ImportTaskResponse, error) {
-	req = typeutil.Clone(req)
-	commonpbutil.UpdateMsgBase(
-		req.GetBase(),
-		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
-	)
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*datapb.ImportTaskResponse, error) {
-		return client.Import(ctx, req)
-	})
-}
-
 // UpdateSegmentStatistics is the client side caller of UpdateSegmentStatistics.
 func (c *Client) UpdateSegmentStatistics(ctx context.Context, req *datapb.UpdateSegmentStatisticsRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	req = typeutil.Clone(req)
@@ -500,29 +509,6 @@ func (c *Client) UpdateChannelCheckpoint(ctx context.Context, req *datapb.Update
 	)
 	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
 		return client.UpdateChannelCheckpoint(ctx, req)
-	})
-}
-
-// SaveImportSegment is the DataCoord client side code for SaveImportSegment call.
-func (c *Client) SaveImportSegment(ctx context.Context, req *datapb.SaveImportSegmentRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	req = typeutil.Clone(req)
-	commonpbutil.UpdateMsgBase(
-		req.GetBase(),
-		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
-	)
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
-		return client.SaveImportSegment(ctx, req)
-	})
-}
-
-func (c *Client) UnsetIsImportingState(ctx context.Context, req *datapb.UnsetIsImportingStateRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	req = typeutil.Clone(req)
-	commonpbutil.UpdateMsgBase(
-		req.GetBase(),
-		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
-	)
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
-		return client.UnsetIsImportingState(ctx, req)
 	})
 }
 
@@ -559,62 +545,226 @@ func (c *Client) GcConfirm(ctx context.Context, req *datapb.GcConfirmRequest, op
 
 // CreateIndex sends the build index request to IndexCoord.
 func (c *Client) CreateIndex(ctx context.Context, req *indexpb.CreateIndexRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	var resp *commonpb.Status
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
+			return client.CreateIndex(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
+	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
+}
+
+// AlterIndex sends the alter index request to IndexCoord.
+func (c *Client) AlterIndex(ctx context.Context, req *indexpb.AlterIndexRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
-		return client.CreateIndex(ctx, req)
+		return client.AlterIndex(ctx, req)
 	})
 }
 
 // GetIndexState gets the index states from IndexCoord.
 func (c *Client) GetIndexState(ctx context.Context, req *indexpb.GetIndexStateRequest, opts ...grpc.CallOption) (*indexpb.GetIndexStateResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexStateResponse, error) {
-		return client.GetIndexState(ctx, req)
+	var resp *indexpb.GetIndexStateResponse
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexStateResponse, error) {
+			return client.GetIndexState(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 // GetSegmentIndexState gets the index states from IndexCoord.
 func (c *Client) GetSegmentIndexState(ctx context.Context, req *indexpb.GetSegmentIndexStateRequest, opts ...grpc.CallOption) (*indexpb.GetSegmentIndexStateResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetSegmentIndexStateResponse, error) {
-		return client.GetSegmentIndexState(ctx, req)
+	var resp *indexpb.GetSegmentIndexStateResponse
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetSegmentIndexStateResponse, error) {
+			return client.GetSegmentIndexState(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 // GetIndexInfos gets the index file paths from IndexCoord.
 func (c *Client) GetIndexInfos(ctx context.Context, req *indexpb.GetIndexInfoRequest, opts ...grpc.CallOption) (*indexpb.GetIndexInfoResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexInfoResponse, error) {
-		return client.GetIndexInfos(ctx, req)
+	var resp *indexpb.GetIndexInfoResponse
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexInfoResponse, error) {
+			return client.GetIndexInfos(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 // DescribeIndex describe the index info of the collection.
 func (c *Client) DescribeIndex(ctx context.Context, req *indexpb.DescribeIndexRequest, opts ...grpc.CallOption) (*indexpb.DescribeIndexResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.DescribeIndexResponse, error) {
-		return client.DescribeIndex(ctx, req)
+	var resp *indexpb.DescribeIndexResponse
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.DescribeIndexResponse, error) {
+			return client.DescribeIndex(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 // GetIndexStatistics get the statistics of the index.
 func (c *Client) GetIndexStatistics(ctx context.Context, req *indexpb.GetIndexStatisticsRequest, opts ...grpc.CallOption) (*indexpb.GetIndexStatisticsResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexStatisticsResponse, error) {
-		return client.GetIndexStatistics(ctx, req)
+	var resp *indexpb.GetIndexStatisticsResponse
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexStatisticsResponse, error) {
+			return client.GetIndexStatistics(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 // GetIndexBuildProgress describe the progress of the index.
 func (c *Client) GetIndexBuildProgress(ctx context.Context, req *indexpb.GetIndexBuildProgressRequest, opts ...grpc.CallOption) (*indexpb.GetIndexBuildProgressResponse, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexBuildProgressResponse, error) {
-		return client.GetIndexBuildProgress(ctx, req)
+	var resp *indexpb.GetIndexBuildProgressResponse
+	var err error
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.GetIndexBuildProgressResponse, error) {
+			return client.GetIndexBuildProgress(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 // DropIndex sends the drop index request to IndexCoord.
 func (c *Client) DropIndex(ctx context.Context, req *indexpb.DropIndexRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
-		return client.DropIndex(ctx, req)
+	var resp *commonpb.Status
+	var err error
+
+	retryErr := retry.Do(ctx, func() error {
+		resp, err = wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
+			return client.DropIndex(ctx, req)
+		})
+
+		// retry on un implemented, to be compatible with 2.2.x
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			return err
+		}
+		return nil
 	})
+	if retryErr != nil {
+		return resp, retryErr
+	}
+
+	return resp, err
 }
 
 func (c *Client) ReportDataNodeTtMsgs(ctx context.Context, req *datapb.ReportDataNodeTtMsgsRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
 		return client.ReportDataNodeTtMsgs(ctx, req)
+	})
+}
+
+func (c *Client) GcControl(ctx context.Context, req *datapb.GcControlRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*commonpb.Status, error) {
+		return client.GcControl(ctx, req)
+	})
+}
+
+func (c *Client) ImportV2(ctx context.Context, in *internalpb.ImportRequestInternal, opts ...grpc.CallOption) (*internalpb.ImportResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*internalpb.ImportResponse, error) {
+		return client.ImportV2(ctx, in)
+	})
+}
+
+func (c *Client) GetImportProgress(ctx context.Context, in *internalpb.GetImportProgressRequest, opts ...grpc.CallOption) (*internalpb.GetImportProgressResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*internalpb.GetImportProgressResponse, error) {
+		return client.GetImportProgress(ctx, in)
+	})
+}
+
+func (c *Client) ListImports(ctx context.Context, in *internalpb.ListImportsRequestInternal, opts ...grpc.CallOption) (*internalpb.ListImportsResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*internalpb.ListImportsResponse, error) {
+		return client.ListImports(ctx, in)
+	})
+}
+
+func (c *Client) ListIndexes(ctx context.Context, in *indexpb.ListIndexesRequest, opts ...grpc.CallOption) (*indexpb.ListIndexesResponse, error) {
+	return wrapGrpcCall(ctx, c, func(client datapb.DataCoordClient) (*indexpb.ListIndexesResponse, error) {
+		return client.ListIndexes(ctx, in)
 	})
 }

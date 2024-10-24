@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	stdout "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -35,26 +36,33 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
-func Init() {
+func Init() error {
 	params := paramtable.Get()
 
-	var exp sdk.SpanExporter
-	var err error
-	switch params.TraceCfg.Exporter.GetValue() {
-	case "jaeger":
-		exp, err = jaeger.New(jaeger.WithCollectorEndpoint(
-			jaeger.WithEndpoint(params.TraceCfg.JaegerURL.GetValue())))
-	case "otlp":
-		exp, err = otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(params.TraceCfg.OtlpEndpoint.GetValue()))
-	case "stdout":
-		exp, err = stdout.New()
-	default:
-		err = errors.New("Empty Trace")
-	}
+	exp, err := CreateTracerExporter(params)
 	if err != nil {
 		log.Warn("Init tracer faield", zap.Error(err))
-		return
+		return err
 	}
+
+	SetTracerProvider(exp, params.TraceCfg.SampleFraction.GetAsFloat())
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	log.Info("Init tracer finished", zap.String("Exporter", params.TraceCfg.Exporter.GetValue()))
+	return nil
+}
+
+func CloseTracerProvider(ctx context.Context) error {
+	provider, ok := otel.GetTracerProvider().(*sdk.TracerProvider)
+	if ok {
+		err := provider.Shutdown(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func SetTracerProvider(exp sdk.SpanExporter, traceIDRatio float64) {
 	tp := sdk.NewTracerProvider(
 		sdk.WithBatcher(exp),
 		sdk.WithResource(resource.NewWithAttributes(
@@ -63,10 +71,49 @@ func Init() {
 			attribute.Int64("NodeID", paramtable.GetNodeID()),
 		)),
 		sdk.WithSampler(sdk.ParentBased(
-			sdk.TraceIDRatioBased(params.TraceCfg.SampleFraction.GetAsFloat()),
+			sdk.TraceIDRatioBased(traceIDRatio),
 		)),
 	)
 	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-	log.Info("Init tracer finished", zap.String("Exporter", params.TraceCfg.Exporter.GetValue()))
+}
+
+func CreateTracerExporter(params *paramtable.ComponentParam) (sdk.SpanExporter, error) {
+	var exp sdk.SpanExporter
+	var err error
+
+	switch params.TraceCfg.Exporter.GetValue() {
+	case "jaeger":
+		exp, err = jaeger.New(jaeger.WithCollectorEndpoint(
+			jaeger.WithEndpoint(params.TraceCfg.JaegerURL.GetValue())))
+	case "otlp":
+		secure := params.TraceCfg.OtlpSecure.GetAsBool()
+		switch params.TraceCfg.OtlpMethod.GetValue() {
+		case "", "grpc":
+			opts := []otlptracegrpc.Option{
+				otlptracegrpc.WithEndpoint(params.TraceCfg.OtlpEndpoint.GetValue()),
+			}
+			if !secure {
+				opts = append(opts, otlptracegrpc.WithInsecure())
+			}
+			exp, err = otlptracegrpc.New(context.Background(), opts...)
+		case "http":
+			opts := []otlptracehttp.Option{
+				otlptracehttp.WithEndpoint(params.TraceCfg.OtlpEndpoint.GetValue()),
+			}
+			if !secure {
+				opts = append(opts, otlptracehttp.WithInsecure())
+			}
+			exp, err = otlptracehttp.New(context.Background(), opts...)
+		default:
+			return nil, errors.Newf("otlp method not supported: %s", params.TraceCfg.OtlpMethod.GetValue())
+		}
+	case "stdout":
+		exp, err = stdout.New()
+	case "noop":
+		return nil, nil
+	default:
+		err = errors.New("Empty Trace")
+	}
+
+	return exp, err
 }

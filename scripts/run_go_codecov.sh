@@ -28,10 +28,22 @@ echo "mode: atomic" > ${FILE_COVERAGE_INFO}
 # run unittest
 echo "Running unittest under ./internal & ./pkg"
 
+TEST_CMD=$@
+if [ -z "$TEST_CMD" ]; then
+   TEST_CMD="go test" 
+fi
+
 # starting the timer
 beginTime=`date +%s`
+pushd cmd/tools
+$TEST_CMD -race -tags dynamic,test -v -coverpkg=./... -coverprofile=profile.out -covermode=atomic ./...
+if [ -f profile.out ]; then
+    grep -v kafka profile.out | grep -v planparserv2/generated | grep -v mocks | sed '1d' >> ../${FILE_COVERAGE_INFO}
+    rm profile.out
+fi
+popd
 for d in $(go list ./internal/... | grep -v -e vendor -e kafka -e planparserv2/generated -e mocks); do
-    go test -race -tags dynamic -v -coverpkg=./... -coverprofile=profile.out -covermode=atomic "$d"
+    $TEST_CMD -race -tags dynamic,test -v -coverpkg=./... -coverprofile=profile.out -covermode=atomic "$d"
     if [ -f profile.out ]; then
         grep -v kafka profile.out | grep -v planparserv2/generated | grep -v mocks | sed '1d' >> ${FILE_COVERAGE_INFO}
         rm profile.out
@@ -39,7 +51,17 @@ for d in $(go list ./internal/... | grep -v -e vendor -e kafka -e planparserv2/g
 done
 pushd pkg
 for d in $(go list ./... | grep -v -e vendor -e kafka -e planparserv2/generated -e mocks); do
-    go test -race -tags dynamic -v -coverpkg=./... -coverprofile=profile.out -covermode=atomic "$d"
+    $TEST_CMD -race -tags dynamic,test -v -coverpkg=./... -coverprofile=profile.out -covermode=atomic "$d"
+    if [ -f profile.out ]; then
+        grep -v kafka profile.out | grep -v planparserv2/generated | grep -v mocks | sed '1d' >> ../${FILE_COVERAGE_INFO}
+        rm profile.out
+    fi
+done
+popd
+# milvusclient
+pushd client
+for d in $(go list ./... | grep -v -e vendor -e kafka -e planparserv2/generated -e mocks); do
+    $TEST_CMD -race -tags dynamic -v -coverpkg=./... -coverprofile=profile.out -covermode=atomic "$d"
     if [ -f profile.out ]; then
         grep -v kafka profile.out | grep -v planparserv2/generated | grep -v mocks | sed '1d' >> ../${FILE_COVERAGE_INFO}
         rm profile.out

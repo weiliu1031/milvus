@@ -14,17 +14,10 @@ default_nq = 2
 default_limit = 10
 default_batch_size = 1000
 max_limit = 16384
-default_search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
-default_search_ip_params = {"metric_type": "IP", "params": {"nprobe": 10}}
-default_search_binary_params = {"metric_type": "JACCARD", "params": {"nprobe": 10}}
-default_index = {"index_type": "IVF_SQ8", "metric_type": "COSINE", "params": {"nlist": 64}}
-default_binary_index = {"index_type": "BIN_IVF_FLAT", "params": {"nlist": 128}, "metric_type": "JACCARD"}
-default_diskann_index = {"index_type": "DISKANN", "metric_type": "COSINE", "params": {}}
-default_diskann_search_params = {"metric_type": "COSINE", "params": {"search_list": 30}}
 max_top_k = 16384
-max_partition_num = 4096
+max_partition_num = 1024
 max_role_num = 10
-default_partition_num = 64   # default num_partitions for partition key feature
+default_partition_num = 16   # default num_partitions for partition key feature
 default_segment_row_limit = 1000
 default_server_segment_row_limit = 1024 * 512
 default_alias = "default"
@@ -44,8 +37,19 @@ default_int32_array_field_name = "int32_array"
 default_float_array_field_name = "float_array"
 default_string_array_field_name = "string_array"
 default_float_vec_field_name = "float_vector"
+default_float16_vec_field_name = "float16_vector"
+default_bfloat16_vec_field_name = "bfloat16_vector"
 another_float_vec_field_name = "float_vector1"
 default_binary_vec_field_name = "binary_vector"
+float_type = "FLOAT_VECTOR"
+float16_type = "FLOAT16_VECTOR"
+bfloat16_type = "BFLOAT16_VECTOR"
+sparse_vector = "SPARSE_FLOAT_VECTOR"
+text_sparse_vector = "TEXT_SPARSE_VECTOR"
+append_vector_type = [float16_type, bfloat16_type, sparse_vector]
+all_dense_vector_types = [float_type, float16_type, bfloat16_type]
+all_vector_data_types = [float_type, float16_type, bfloat16_type, sparse_vector]
+default_sparse_vec_field_name = "sparse_vector"
 default_partition_name = "_default"
 default_resource_group_name = '__default_resource_group'
 default_resource_group_capacity = 1000000
@@ -63,7 +67,10 @@ float_field_desc = "float type field"
 float_vec_field_desc = "float vector type field"
 binary_vec_field_desc = "binary vector type field"
 max_dim = 32768
-min_dim = 1
+min_dim = 2
+max_binary_vector_dim = 262144
+max_sparse_vector_dim = 4294967294
+min_sparse_vector_dim = 1
 gracefulTime = 1
 default_nlist = 128
 compact_segment_num_threshold = 3
@@ -71,6 +78,7 @@ compact_delta_ratio_reciprocal = 5  # compact_delta_binlog_ratio is 0.2
 compact_retention_duration = 40  # compaction travel time retention range 20s
 max_compaction_interval = 60  # the max time interval (s) from the last compaction
 max_field_num = 64  # Maximum number of fields in a collection
+max_vector_field_num = 4  # Maximum number of vector fields in a collection
 max_name_length = 255  # Maximum length of name for a collection or alias
 default_replica_num = 1
 default_graceful_time = 5  #
@@ -80,6 +88,7 @@ default_db = "default"
 max_database_num = 64
 max_collections_per_db = 65536
 max_collection_num = 65536
+max_hybrid_search_req_num = 1024
 
 
 IMAGE_REPOSITORY_MILVUS = "harbor.milvus.io/dockerhub/milvusdb/milvus"
@@ -95,42 +104,32 @@ code = "code"
 err_code = "err_code"
 err_msg = "err_msg"
 in_cluster_env = "IN_CLUSTER"
-
-default_flat_index = {"index_type": "FLAT", "params": {}, "metric_type": "COSINE"}
-default_bin_flat_index = {"index_type": "BIN_FLAT", "params": {}, "metric_type": "JACCARD"}
 default_count_output = "count(*)"
 
-"""" List of parameters used to pass """
-get_invalid_strs = [
-    [],
-    1,
-    [1, "2", 3],
-    (1,),
-    {1: 1},
-    None,
-    "",
-    " ",
-    "12-s",
-    "12 s",
-    "(mn)",
-    "中文",
-    "%$#",
-    "".join("a" for i in range(max_name_length + 1))]
+rows_all_data_type_file_path = "/tmp/rows_all_data_type"
 
-get_invalid_type_fields = [
-    1,
-    [1, "2", 3],
-    (1,),
-    {1: 1},
-    None,
-    "",
-    " ",
-    "12-s",
-    "12 s",
-    "(mn)",
-    "中文",
-    "%$#",
-    "".join("a" for i in range(max_name_length + 1))]
+"""" List of parameters used to pass """
+invalid_resource_names = [
+    None,               # None
+    " ",                # space
+    "",                 # empty
+    "12name",           # start with number
+    "n12 ame",          # contain space
+    "n-ame",            # contain hyphen
+    "nam(e)",           # contain special character
+    "name中文",          # contain Chinese character
+    "name%$#",          # contain special character
+    "".join("a" for i in range(max_name_length + 1))]           # exceed max length
+
+valid_resource_names = [
+    "name",             # valid name
+    "_name",            # start with underline
+    "_12name",          # start with underline and contains number
+    "n12ame_",          # end with letter and contains number and underline
+    "nam_e",             # contains underline
+    "".join("a" for i in range(max_name_length))]       # max length
+
+invalid_dims = [min_dim-1, 32.1, -32, "vii", "十六", max_dim+1]
 
 get_not_string = [
     [],
@@ -140,16 +139,6 @@ get_not_string = [
     1,
     1.0,
     [1, "2", 3]
-]
-
-get_not_string_value = [
-    " ",
-    "12-s",
-    "12 s",
-    "(mn)",
-    "中文",
-    "%$#",
-    "a".join("a" for i in range(256))
 ]
 
 get_invalid_vectors = [
@@ -233,23 +222,50 @@ get_wrong_format_dict = [
 ]
 
 """ Specially defined list """
-all_index_types = ["FLAT", "IVF_FLAT", "IVF_SQ8", "IVF_PQ", "HNSW", "SCANN", "DISKANN", "BIN_FLAT", "BIN_IVF_FLAT",
+L0_index_types = ["IVF_SQ8", "HNSW", "DISKANN"]
+all_index_types = ["FLAT", "IVF_FLAT", "IVF_SQ8", "IVF_PQ",
+                   "HNSW", "SCANN", "DISKANN",
+                   "BIN_FLAT", "BIN_IVF_FLAT",
+                   "SPARSE_INVERTED_INDEX", "SPARSE_WAND",
                    "GPU_IVF_FLAT", "GPU_IVF_PQ"]
 
-default_index_params = [{"nlist": 128}, {"nlist": 128}, {"nlist": 128}, {"nlist": 128, "m": 16, "nbits": 8},
-                        {"M": 48, "efConstruction": 500}, {"nlist": 128}, {}, {"nlist": 128}, {"nlist": 128},
-                        {"nlist": 64}, {"nlist": 64, "m": 16, "nbits": 8}]
+default_all_indexes_params = [{}, {"nlist": 128}, {"nlist": 128}, {"nlist": 128, "m": 16, "nbits": 8},
+                              {"M": 32, "efConstruction": 360}, {"nlist": 128}, {},
+                              {}, {"nlist": 64},
+                              {"drop_ratio_build": 0.2}, {"drop_ratio_build": 0.2},
+                              {"nlist": 64}, {"nlist": 64, "m": 16, "nbits": 8}]
+
+default_all_search_params_params = [{}, {"nprobe": 32}, {"nprobe": 32}, {"nprobe": 32},
+                                    {"ef": 100}, {"nprobe": 32, "reorder_k": 100}, {"search_list": 30},
+                                    {}, {"nprobe": 32},
+                                    {"drop_ratio_search": "0.2"}, {"drop_ratio_search": "0.2"},
+                                    {}, {}]
 
 Handler_type = ["GRPC", "HTTP"]
 binary_support = ["BIN_FLAT", "BIN_IVF_FLAT"]
-delete_support = ["FLAT", "IVF_FLAT", "IVF_SQ8", "IVF_PQ"]
-ivf = ["FLAT", "IVF_FLAT", "IVF_SQ8", "IVF_PQ"]
-skip_pq = ["IVF_PQ"]
+sparse_support = ["SPARSE_INVERTED_INDEX", "SPARSE_WAND"]
+default_L0_metric = "COSINE"
 float_metrics = ["L2", "IP", "COSINE"]
 binary_metrics = ["JACCARD", "HAMMING", "SUBSTRUCTURE", "SUPERSTRUCTURE"]
 structure_metrics = ["SUBSTRUCTURE", "SUPERSTRUCTURE"]
 all_scalar_data_types = ['int8', 'int16', 'int32', 'int64', 'float', 'double', 'bool', 'varchar']
 
+
+default_flat_index = {"index_type": "FLAT", "params": {}, "metric_type": default_L0_metric}
+default_bin_flat_index = {"index_type": "BIN_FLAT", "params": {}, "metric_type": "JACCARD"}
+default_sparse_inverted_index = {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP",
+                                 "params": {"drop_ratio_build": 0.2}}
+default_text_sparse_inverted_index = {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25",
+                                 "params": {"drop_ratio_build": 0.2, "bm25_k1": 1.5, "bm25_b": 0.75,}}
+default_search_params = {"params": default_all_search_params_params[2].copy()}
+default_search_ip_params = {"metric_type": "IP", "params": default_all_search_params_params[2].copy()}
+default_search_binary_params = {"metric_type": "JACCARD", "params": {"nprobe": 32}}
+default_index = {"index_type": "IVF_SQ8", "metric_type": default_L0_metric, "params": default_all_indexes_params[2].copy()}
+default_binary_index = {"index_type": "BIN_IVF_FLAT", "metric_type": "JACCARD", "params": default_all_indexes_params[8].copy()}
+default_diskann_index = {"index_type": "DISKANN", "metric_type": default_L0_metric, "params": {}}
+default_diskann_search_params = {"params": {"search_list": 30}}
+default_sparse_search_params = {"metric_type": "IP", "params": {"drop_ratio_search": "0.2"}}
+default_text_sparse_search_params = {"metric_type": "BM25", "params": {}}
 
 class CheckTasks:
     """ The name of the method used to check the result """
@@ -269,9 +285,11 @@ class CheckTasks:
     check_merge_compact = "check_merge_compact"
     check_role_property = "check_role_property"
     check_permission_deny = "check_permission_deny"
+    check_auth_failure = "check_auth_failure"
     check_value_equal = "check_value_equal"
     check_rg_property = "check_resource_group_property"
     check_describe_collection_property = "check_describe_collection_property"
+    check_insert_result = "check_insert_result"
 
 
 class BulkLoadStates:

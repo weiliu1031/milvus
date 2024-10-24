@@ -1,5 +1,7 @@
 package tasks
 
+import "github.com/milvus-io/milvus/internal/proto/internalpb"
+
 const (
 	schedulePolicyNameFIFO            = "fifo"
 	schedulePolicyNameUserTaskPolling = "user-task-polling"
@@ -82,6 +84,9 @@ type Task interface {
 	// Return "" if the task do not contain any user info.
 	Username() string
 
+	// Return whether the task would be running on GPU.
+	IsGpuIndex() bool
+
 	// PreExecute the task, only call once.
 	PreExecute() error
 
@@ -101,4 +106,6 @@ type Task interface {
 
 	// Return the NQ of task.
 	NQ() int64
+
+	SearchResult() *internalpb.SearchResults
 }

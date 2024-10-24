@@ -37,10 +37,16 @@ void
 InitLowPriorityThreadCoreCoefficient(const int64_t);
 
 void
+InitDefaultExprEvalBatchSize(int64_t val);
+
+void
 InitCpuNum(const int);
 
 void
 InitTrace(CTraceConfig* config);
+
+void
+SetTrace(CTraceConfig* config);
 
 #ifdef __cplusplus
 };

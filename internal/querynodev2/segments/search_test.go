@@ -18,6 +18,7 @@ package segments
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -61,7 +62,7 @@ func (suite *SearchSuite) SetupTest() {
 	suite.segmentID = 1
 
 	suite.manager = NewManager()
-	schema := GenTestCollectionSchema("test-reduce", schemapb.DataType_Int64)
+	schema := GenTestCollectionSchema("test-reduce", schemapb.DataType_Int64, true)
 	indexMeta := GenTestIndexMeta(suite.collectionID, schema)
 	suite.manager.Collection.PutOrRef(suite.collectionID,
 		schema,
@@ -74,16 +75,18 @@ func (suite *SearchSuite) SetupTest() {
 	)
 	suite.collection = suite.manager.Collection.Get(suite.collectionID)
 
-	suite.sealed, err = NewSegment(suite.collection,
-		suite.segmentID,
-		suite.partitionID,
-		suite.collectionID,
-		"dml",
+	suite.sealed, err = NewSegment(ctx,
+		suite.collection,
 		SegmentTypeSealed,
 		0,
-		nil,
-		nil,
-		datapb.SegmentLevel_Legacy,
+		&querypb.SegmentLoadInfo{
+			SegmentID:     suite.segmentID,
+			CollectionID:  suite.collectionID,
+			PartitionID:   suite.partitionID,
+			NumOfRows:     int64(msgLength),
+			InsertChannel: fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", suite.collectionID),
+			Level:         datapb.SegmentLevel_Legacy,
+		},
 	)
 	suite.Require().NoError(err)
 
@@ -97,20 +100,21 @@ func (suite *SearchSuite) SetupTest() {
 	)
 	suite.Require().NoError(err)
 	for _, binlog := range binlogs {
-		err = suite.sealed.(*LocalSegment).LoadFieldData(binlog.FieldID, int64(msgLength), binlog, false)
+		err = suite.sealed.(*LocalSegment).LoadFieldData(ctx, binlog.FieldID, int64(msgLength), binlog)
 		suite.Require().NoError(err)
 	}
 
-	suite.growing, err = NewSegment(suite.collection,
-		suite.segmentID+1,
-		suite.partitionID,
-		suite.collectionID,
-		"dml",
+	suite.growing, err = NewSegment(ctx,
+		suite.collection,
 		SegmentTypeGrowing,
 		0,
-		nil,
-		nil,
-		datapb.SegmentLevel_Legacy,
+		&querypb.SegmentLoadInfo{
+			SegmentID:     suite.segmentID + 1,
+			CollectionID:  suite.collectionID,
+			PartitionID:   suite.partitionID,
+			InsertChannel: fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", suite.collectionID),
+			Level:         datapb.SegmentLevel_Legacy,
+		},
 	)
 	suite.Require().NoError(err)
 
@@ -118,14 +122,14 @@ func (suite *SearchSuite) SetupTest() {
 	suite.Require().NoError(err)
 	insertRecord, err := storage.TransferInsertMsgToInsertRecord(suite.collection.Schema(), insertMsg)
 	suite.Require().NoError(err)
-	suite.growing.Insert(insertMsg.RowIDs, insertMsg.Timestamps, insertRecord)
+	suite.growing.Insert(ctx, insertMsg.RowIDs, insertMsg.Timestamps, insertRecord)
 
-	suite.manager.Segment.Put(SegmentTypeSealed, suite.sealed)
-	suite.manager.Segment.Put(SegmentTypeGrowing, suite.growing)
+	suite.manager.Segment.Put(context.Background(), SegmentTypeSealed, suite.sealed)
+	suite.manager.Segment.Put(context.Background(), SegmentTypeGrowing, suite.growing)
 }
 
 func (suite *SearchSuite) TearDownTest() {
-	suite.sealed.Release()
+	suite.sealed.Release(context.Background())
 	DeleteCollection(suite.collection)
 	ctx := context.Background()
 	suite.chunkManager.RemoveWithPrefix(ctx, paramtable.Get().MinioCfg.RootPath.GetValue())

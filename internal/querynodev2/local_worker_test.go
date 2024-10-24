@@ -18,6 +18,7 @@ package querynodev2
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/samber/lo"
@@ -70,7 +71,7 @@ func (suite *LocalWorkerTestSuite) BeforeTest(suiteName, testName string) {
 	paramtable.Init()
 	suite.params = paramtable.Get()
 	// close GC at test to avoid data race
-	suite.params.Save(suite.params.QueryNodeCfg.GCEnabled.Key, "false")
+	suite.params.Save(suite.params.CommonCfg.GCEnabled.Key, "false")
 
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 	// init node
@@ -92,9 +93,11 @@ func (suite *LocalWorkerTestSuite) BeforeTest(suiteName, testName string) {
 	err = suite.node.Start()
 	suite.NoError(err)
 
-	suite.schema = segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64)
+	suite.schema = segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, true)
 	suite.indexMeta = segments.GenTestIndexMeta(suite.collectionID, suite.schema)
-	collection := segments.NewCollection(suite.collectionID, suite.schema, suite.indexMeta, querypb.LoadType_LoadCollection)
+	collection := segments.NewCollection(suite.collectionID, suite.schema, suite.indexMeta, &querypb.LoadMetaInfo{
+		LoadType: querypb.LoadType_LoadCollection,
+	})
 	loadMata := &querypb.LoadMetaInfo{
 		LoadType:     querypb.LoadType_LoadCollection,
 		CollectionID: suite.collectionID,
@@ -111,7 +114,7 @@ func (suite *LocalWorkerTestSuite) AfterTest(suiteName, testName string) {
 
 func (suite *LocalWorkerTestSuite) TestLoadSegment() {
 	// load empty
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64)
+	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, true)
 	req := &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			TargetID: suite.node.session.GetServerID(),
@@ -119,9 +122,10 @@ func (suite *LocalWorkerTestSuite) TestLoadSegment() {
 		CollectionID: suite.collectionID,
 		Infos: lo.Map(suite.segmentIDs, func(segID int64, _ int) *querypb.SegmentLoadInfo {
 			return &querypb.SegmentLoadInfo{
-				CollectionID: suite.collectionID,
-				PartitionID:  suite.partitionIDs[segID%2],
-				SegmentID:    segID,
+				CollectionID:  suite.collectionID,
+				PartitionID:   suite.partitionIDs[segID%2],
+				SegmentID:     segID,
+				InsertChannel: fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", suite.collectionID),
 			}
 		}),
 		Schema:        schema,

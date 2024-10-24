@@ -17,14 +17,16 @@
 package segments
 
 import (
+	"context"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/suite"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 type PlanSuite struct {
@@ -41,8 +43,10 @@ func (suite *PlanSuite) SetupTest() {
 	suite.collectionID = 100
 	suite.partitionID = 10
 	suite.segmentID = 1
-	schema := GenTestCollectionSchema("plan-suite", schemapb.DataType_Int64)
-	suite.collection = NewCollection(suite.collectionID, schema, GenTestIndexMeta(suite.collectionID, schema), querypb.LoadType_LoadCollection)
+	schema := GenTestCollectionSchema("plan-suite", schemapb.DataType_Int64, true)
+	suite.collection = NewCollection(suite.collectionID, schema, GenTestIndexMeta(suite.collectionID, schema), &querypb.LoadMetaInfo{
+		LoadType: querypb.LoadType_LoadCollection,
+	})
 	suite.collection.AddPartition(suite.partitionID)
 }
 
@@ -57,7 +61,7 @@ func (suite *PlanSuite) TestPlanCreateByExpr() {
 	expr, err := proto.Marshal(planNode)
 	suite.NoError(err)
 
-	_, err = createSearchPlanByExpr(suite.collection, expr, "")
+	_, err = createSearchPlanByExpr(context.Background(), suite.collection, expr)
 	suite.Error(err)
 }
 
@@ -66,16 +70,17 @@ func (suite *PlanSuite) TestPlanFail() {
 		id: -1,
 	}
 
-	_, err := createSearchPlanByExpr(collection, nil, "")
+	_, err := createSearchPlanByExpr(context.Background(), collection, nil)
 	suite.Error(err)
 }
 
 func (suite *PlanSuite) TestQueryPlanCollectionReleased() {
 	collection := &Collection{id: suite.collectionID}
-	_, err := NewRetrievePlan(collection, nil, 0, 0)
+	_, err := NewRetrievePlan(context.Background(), collection, nil, 0, 0)
 	suite.Error(err)
 }
 
 func TestPlan(t *testing.T) {
+	paramtable.Init()
 	suite.Run(t, new(PlanSuite))
 }

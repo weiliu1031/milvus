@@ -19,6 +19,7 @@ package task
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/samber/lo"
@@ -30,9 +31,9 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -98,6 +99,25 @@ func GetTaskType(task Task) Type {
 	return 0
 }
 
+func mergeCollectonProps(schemaProps []*commonpb.KeyValuePair, collectionProps []*commonpb.KeyValuePair) []*commonpb.KeyValuePair {
+	// Merge the collectionProps and schemaProps maps, giving priority to the values in schemaProps if there are duplicate keys.
+	props := make(map[string]string)
+	for _, p := range collectionProps {
+		props[p.GetKey()] = p.GetValue()
+	}
+	for _, p := range schemaProps {
+		props[p.GetKey()] = p.GetValue()
+	}
+	var ret []*commonpb.KeyValuePair
+	for k, v := range props {
+		ret = append(ret, &commonpb.KeyValuePair{
+			Key:   k,
+			Value: v,
+		})
+	}
+	return ret
+}
+
 func packLoadSegmentRequest(
 	task *SegmentTask,
 	action Action,
@@ -112,16 +132,21 @@ func packLoadSegmentRequest(
 		loadScope = querypb.LoadScope_Index
 	}
 
+	if task.Source() == utils.LeaderChecker {
+		loadScope = querypb.LoadScope_Delta
+	}
 	// field mmap enabled if collection-level mmap enabled or the field mmap enabled
-	collectionMmapEnabled := common.IsMmapEnabled(collectionProperties...)
+	collectionMmapEnabled, exist := common.IsMmapDataEnabled(collectionProperties...)
 	for _, field := range schema.GetFields() {
-		if collectionMmapEnabled {
+		if exist {
 			field.TypeParams = append(field.TypeParams, &commonpb.KeyValuePair{
 				Key:   common.MmapEnabledKey,
-				Value: "true",
+				Value: strconv.FormatBool(collectionMmapEnabled),
 			})
 		}
 	}
+
+	schema.Properties = mergeCollectonProps(schema.Properties, collectionProperties)
 
 	return &querypb.LoadSegmentsRequest{
 		Base: commonpbutil.NewMsgBase(
@@ -158,12 +183,14 @@ func packReleaseSegmentRequest(task *SegmentTask, action *SegmentAction) *queryp
 	}
 }
 
-func packLoadMeta(loadType querypb.LoadType, metricType string, collectionID int64, partitions ...int64) *querypb.LoadMetaInfo {
+func packLoadMeta(loadType querypb.LoadType, collectionID int64, databaseName string, resourceGroup string, loadFields []int64, partitions ...int64) *querypb.LoadMetaInfo {
 	return &querypb.LoadMetaInfo{
-		LoadType:     loadType,
-		CollectionID: collectionID,
-		PartitionIDs: partitions,
-		MetricType:   metricType,
+		LoadType:      loadType,
+		CollectionID:  collectionID,
+		PartitionIDs:  partitions,
+		DbName:        databaseName,
+		ResourceGroup: resourceGroup,
+		LoadFields:    loadFields,
 	}
 }
 
@@ -195,26 +222,29 @@ func fillSubChannelRequest(
 	ctx context.Context,
 	req *querypb.WatchDmChannelsRequest,
 	broker meta.Broker,
+	includeFlushed bool,
 ) error {
 	segmentIDs := typeutil.NewUniqueSet()
 	for _, vchannel := range req.GetInfos() {
-		segmentIDs.Insert(vchannel.GetFlushedSegmentIds()...)
+		if includeFlushed {
+			segmentIDs.Insert(vchannel.GetFlushedSegmentIds()...)
+		}
 		segmentIDs.Insert(vchannel.GetUnflushedSegmentIds()...)
+		segmentIDs.Insert(vchannel.GetLevelZeroSegmentIds()...)
 	}
 
 	if segmentIDs.Len() == 0 {
 		return nil
 	}
 
-	resp, err := broker.GetSegmentInfo(ctx, segmentIDs.Collect()...)
+	segmentInfos, err := broker.GetSegmentInfo(ctx, segmentIDs.Collect()...)
 	if err != nil {
 		return err
 	}
-	segmentInfos := make(map[int64]*datapb.SegmentInfo)
-	for _, info := range resp.GetInfos() {
-		segmentInfos[info.GetID()] = info
-	}
-	req.SegmentInfos = segmentInfos
+
+	req.SegmentInfos = lo.SliceToMap(segmentInfos, func(info *datapb.SegmentInfo) (int64, *datapb.SegmentInfo) {
+		return info.GetID(), info
+	})
 	return nil
 }
 
@@ -228,31 +258,4 @@ func packUnsubDmChannelRequest(task *ChannelTask, action Action) *querypb.UnsubD
 		CollectionID: task.CollectionID(),
 		ChannelName:  task.Channel(),
 	}
-}
-
-func getShardLeader(replicaMgr *meta.ReplicaManager, distMgr *meta.DistributionManager, collectionID, nodeID int64, channel string) (int64, bool) {
-	replica := replicaMgr.GetByCollectionAndNode(collectionID, nodeID)
-	if replica == nil {
-		return 0, false
-	}
-	return distMgr.GetShardLeader(replica, channel)
-}
-
-func getMetricType(indexInfos []*indexpb.IndexInfo, schema *schemapb.CollectionSchema) (string, error) {
-	vecField, err := typeutil.GetVectorFieldSchema(schema)
-	if err != nil {
-		return "", err
-	}
-	indexInfo, ok := lo.Find(indexInfos, func(info *indexpb.IndexInfo) bool {
-		return info.GetFieldID() == vecField.GetFieldID()
-	})
-	if !ok || indexInfo == nil {
-		err = fmt.Errorf("cannot find index info for %s field", vecField.GetName())
-		return "", err
-	}
-	metricType, err := funcutil.GetAttrByKeyFromRepeatedKV(common.MetricTypeKey, indexInfo.GetIndexParams())
-	if err != nil {
-		return "", err
-	}
-	return metricType, nil
 }

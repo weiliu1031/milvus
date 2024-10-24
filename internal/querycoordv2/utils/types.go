@@ -31,19 +31,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 )
 
-func SegmentBinlogs2SegmentInfo(collectionID int64, partitionID int64, segmentBinlogs *datapb.SegmentBinlogs) *datapb.SegmentInfo {
-	return &datapb.SegmentInfo{
-		ID:            segmentBinlogs.GetSegmentID(),
-		CollectionID:  collectionID,
-		PartitionID:   partitionID,
-		InsertChannel: segmentBinlogs.GetInsertChannel(),
-		NumOfRows:     segmentBinlogs.GetNumOfRows(),
-		Binlogs:       segmentBinlogs.GetFieldBinlogs(),
-		Statslogs:     segmentBinlogs.GetStatslogs(),
-		Deltalogs:     segmentBinlogs.GetDeltalogs(),
-	}
-}
-
 func MergeMetaSegmentIntoSegmentInfo(info *querypb.SegmentInfo, segments ...*meta.Segment) {
 	first := segments[0]
 	if info.GetSegmentID() == 0 {
@@ -57,6 +44,8 @@ func MergeMetaSegmentIntoSegmentInfo(info *querypb.SegmentInfo, segments ...*met
 			NodeIds:      make([]int64, 0),
 			SegmentState: commonpb.SegmentState_Sealed,
 			IndexInfos:   make([]*querypb.FieldIndexInfo, 0),
+			Level:        first.Level,
+			IsSorted:     first.GetIsSorted(),
 		}
 		for _, indexInfo := range first.IndexInfo {
 			info.IndexName = indexInfo.IndexName
@@ -85,63 +74,24 @@ func PackSegmentLoadInfo(segment *datapb.SegmentInfo, channelCheckpoint *msgpb.M
 			zap.Duration("tsLag", tsLag))
 	}
 	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:     segment.ID,
-		PartitionID:   segment.PartitionID,
-		CollectionID:  segment.CollectionID,
-		BinlogPaths:   segment.Binlogs,
-		NumOfRows:     segment.NumOfRows,
-		Statslogs:     segment.Statslogs,
-		Deltalogs:     segment.Deltalogs,
-		InsertChannel: segment.InsertChannel,
-		IndexInfos:    indexes,
-		StartPosition: segment.GetStartPosition(),
-		DeltaPosition: channelCheckpoint,
-		Level:         segment.GetLevel(),
+		SegmentID:      segment.ID,
+		PartitionID:    segment.PartitionID,
+		CollectionID:   segment.CollectionID,
+		BinlogPaths:    segment.Binlogs,
+		NumOfRows:      segment.NumOfRows,
+		Statslogs:      segment.Statslogs,
+		Deltalogs:      segment.Deltalogs,
+		Bm25Logs:       segment.Bm25Statslogs,
+		InsertChannel:  segment.InsertChannel,
+		IndexInfos:     indexes,
+		StartPosition:  segment.GetStartPosition(),
+		DeltaPosition:  channelCheckpoint,
+		Level:          segment.GetLevel(),
+		StorageVersion: segment.GetStorageVersion(),
+		IsSorted:       segment.GetIsSorted(),
+		TextStatsLogs:  segment.GetTextStatsLogs(),
 	}
-	loadInfo.SegmentSize = calculateSegmentSize(loadInfo)
 	return loadInfo
-}
-
-func calculateSegmentSize(segmentLoadInfo *querypb.SegmentLoadInfo) int64 {
-	segmentSize := int64(0)
-
-	fieldIndex := make(map[int64]*querypb.FieldIndexInfo)
-	for _, index := range segmentLoadInfo.IndexInfos {
-		if index.EnableIndex {
-			fieldID := index.FieldID
-			fieldIndex[fieldID] = index
-		}
-	}
-
-	for _, fieldBinlog := range segmentLoadInfo.BinlogPaths {
-		fieldID := fieldBinlog.FieldID
-		if index, ok := fieldIndex[fieldID]; ok {
-			segmentSize += index.IndexSize
-		} else {
-			segmentSize += getFieldSizeFromFieldBinlog(fieldBinlog)
-		}
-	}
-
-	// Get size of state data
-	for _, fieldBinlog := range segmentLoadInfo.Statslogs {
-		segmentSize += getFieldSizeFromFieldBinlog(fieldBinlog)
-	}
-
-	// Get size of delete data
-	for _, fieldBinlog := range segmentLoadInfo.Deltalogs {
-		segmentSize += getFieldSizeFromFieldBinlog(fieldBinlog)
-	}
-
-	return segmentSize
-}
-
-func getFieldSizeFromFieldBinlog(fieldBinlog *datapb.FieldBinlog) int64 {
-	fieldSize := int64(0)
-	for _, binlog := range fieldBinlog.Binlogs {
-		fieldSize += binlog.LogSize
-	}
-
-	return fieldSize
 }
 
 func MergeDmChannelInfo(infos []*datapb.VchannelInfo) *meta.DmChannel {

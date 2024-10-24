@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -31,6 +32,7 @@
 #include "common/EasyAssert.h"
 #include "knowhere/dataset.h"
 #include "knowhere/expected.h"
+#include "knowhere/sparse_utils.h"
 #include "simdjson.h"
 
 namespace milvus {
@@ -158,13 +160,15 @@ inline bool
 IsFloatMetricType(const knowhere::MetricType& metric_type) {
     return IsMetricType(metric_type, knowhere::metric::L2) ||
            IsMetricType(metric_type, knowhere::metric::IP) ||
-           IsMetricType(metric_type, knowhere::metric::COSINE);
+           IsMetricType(metric_type, knowhere::metric::COSINE) ||
+           IsMetricType(metric_type, knowhere::metric::BM25);
 }
 
 inline bool
 PositivelyRelated(const knowhere::MetricType& metric_type) {
     return IsMetricType(metric_type, knowhere::metric::IP) ||
-           IsMetricType(metric_type, knowhere::metric::COSINE);
+           IsMetricType(metric_type, knowhere::metric::COSINE) ||
+           IsMetricType(metric_type, knowhere::metric::BM25);
 }
 
 inline std::string
@@ -191,5 +195,111 @@ inline bool
 is_in_disk_list(const IndexType& index_type) {
     return is_in_list<IndexType>(index_type, DISK_INDEX_LIST);
 }
+
+template <typename T>
+std::string
+Join(const std::vector<T>& items, const std::string& delimiter) {
+    std::stringstream ss;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) {
+            ss << delimiter;
+        }
+        ss << items[i];
+    }
+    return ss.str();
+}
+
+inline std::string
+GetCommonPrefix(const std::string& str1, const std::string& str2) {
+    size_t len = std::min(str1.length(), str2.length());
+    size_t i = 0;
+    while (i < len && str1[i] == str2[i]) ++i;
+    return str1.substr(0, i);
+}
+
+inline knowhere::sparse::SparseRow<float>
+CopyAndWrapSparseRow(const void* data,
+                     size_t size,
+                     const bool validate = false) {
+    size_t num_elements =
+        size / knowhere::sparse::SparseRow<float>::element_size();
+    knowhere::sparse::SparseRow<float> row(num_elements);
+    std::memcpy(row.data(), data, size);
+    if (validate) {
+        AssertInfo(
+            size % knowhere::sparse::SparseRow<float>::element_size() == 0,
+            "Invalid size for sparse row data");
+        for (size_t i = 0; i < num_elements; ++i) {
+            auto element = row[i];
+            AssertInfo(std::isfinite(element.val),
+                       "Invalid sparse row: NaN or Inf value");
+            AssertInfo(element.val >= 0, "Invalid sparse row: negative value");
+            AssertInfo(
+                element.id < std::numeric_limits<uint32_t>::max(),
+                "Invalid sparse row: id should be smaller than uint32 max");
+            if (i > 0) {
+                AssertInfo(row[i - 1].id < element.id,
+                           "Invalid sparse row: id should be strict ascending");
+            }
+        }
+    }
+    return row;
+}
+
+// Iterable is a list of bytes, each is a byte array representation of a single
+// sparse float row. This helper function converts such byte arrays into a list
+// of knowhere::sparse::SparseRow<float>. The resulting list is a deep copy of
+// the source data.
+//
+// Here in segcore we validate the sparse row data only for search requests,
+// as the insert/upsert data are already validated in go code.
+template <typename Iterable>
+std::unique_ptr<knowhere::sparse::SparseRow<float>[]>
+SparseBytesToRows(const Iterable& rows, const bool validate = false) {
+    AssertInfo(rows.size() > 0, "at least 1 sparse row should be provided");
+    auto res =
+        std::make_unique<knowhere::sparse::SparseRow<float>[]>(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        res[i] = std::move(
+            CopyAndWrapSparseRow(rows[i].data(), rows[i].size(), validate));
+    }
+    return res;
+}
+
+// SparseRowsToProto converts a list of knowhere::sparse::SparseRow<float> to
+// a milvus::proto::schema::SparseFloatArray. The resulting proto is a deep copy
+// of the source data. source(i) returns the i-th row to be copied.
+inline void SparseRowsToProto(
+    const std::function<const knowhere::sparse::SparseRow<float>*(size_t)>&
+        source,
+    int64_t rows,
+    milvus::proto::schema::SparseFloatArray* proto) {
+    int64_t max_dim = 0;
+    for (size_t i = 0; i < rows; ++i) {
+        const auto* row = source(i);
+        if (row == nullptr) {
+            // empty row
+            proto->add_contents();
+            continue;
+        }
+        max_dim = std::max(max_dim, row->dim());
+        proto->add_contents(row->data(), row->data_byte_size());
+    }
+    proto->set_dim(max_dim);
+}
+
+class Defer {
+ public:
+    Defer(std::function<void()> fn) : fn_(fn) {
+    }
+    ~Defer() {
+        fn_();
+    }
+
+ private:
+    std::function<void()> fn_;
+};
+
+#define DeferLambda(fn) Defer Defer_##__COUNTER__(fn);
 
 }  // namespace milvus

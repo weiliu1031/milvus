@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -126,7 +127,7 @@ class Array {
         delete[] data_;
         data_ = new char[size];
         std::copy(data, data + size, data_);
-        if (datatype_is_variable(element_type_)) {
+        if (IsVariableDataType(element_type_)) {
             length_ = offsets_.size();
         } else {
             // int8, int16, int32 are all promoted to int32
@@ -134,7 +135,7 @@ class Array {
                 element_type_ == DataType::INT16) {
                 length_ = size / sizeof(int32_t);
             } else {
-                length_ = size / datatype_sizeof(element_type_);
+                length_ = size / GetDataTypeSize(element_type_);
             }
         }
     }
@@ -246,6 +247,7 @@ class Array {
             return T(data_ + offsets_[index], element_length);
         }
         if constexpr (std::is_same_v<T, int> || std::is_same_v<T, int64_t> ||
+                      std::is_same_v<T, int8_t> || std::is_same_v<T, int16_t> ||
                       std::is_same_v<T, float> || std::is_same_v<T, double>) {
             switch (element_type_) {
                 case DataType::INT8:
@@ -272,6 +274,11 @@ class Array {
 
     const std::vector<uint64_t>&
     get_offsets() const {
+        return offsets_;
+    }
+
+    std::vector<uint64_t>
+    get_offsets_in_copy() const {
         return offsets_;
     }
 
@@ -445,7 +452,7 @@ class ArrayView {
           element_type_(element_type),
           offsets_(std::move(element_offsets)) {
         data_ = data;
-        if (datatype_is_variable(element_type_)) {
+        if (IsVariableDataType(element_type_)) {
             length_ = offsets_.size();
         } else {
             // int8, int16, int32 are all promoted to int32
@@ -453,7 +460,7 @@ class ArrayView {
                 element_type_ == DataType::INT16) {
                 length_ = size / sizeof(int32_t);
             } else {
-                length_ = size / datatype_sizeof(element_type_);
+                length_ = size / GetDataTypeSize(element_type_);
             }
         }
     }
@@ -572,6 +579,11 @@ class ArrayView {
     const void*
     data() const {
         return data_;
+    }
+    // copy to result
+    std::vector<uint64_t>
+    get_offsets_in_copy() const {
+        return offsets_;
     }
 
     bool

@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -108,7 +108,7 @@ func (queue *IndexTaskQueue) AddActiveTask(t task) {
 	tName := t.Name()
 	_, ok := queue.activeTasks[tName]
 	if ok {
-		log.Debug("IndexNode task already in active task list", zap.Any("TaskID", tName))
+		log.Debug("IndexNode task already in active task list", zap.String("TaskID", tName))
 	}
 
 	queue.activeTasks[tName] = t
@@ -147,7 +147,7 @@ func (queue *IndexTaskQueue) GetTaskNum() (int, int) {
 	atNum := 0
 	// remove the finished task
 	for _, task := range queue.activeTasks {
-		if task.GetState() != commonpb.IndexState_Finished && task.GetState() != commonpb.IndexState_Failed {
+		if task.GetState() != indexpb.JobState_JobStateFinished && task.GetState() != indexpb.JobState_JobStateFailed {
 			atNum++
 		}
 	}
@@ -160,14 +160,15 @@ func NewIndexBuildTaskQueue(sched *TaskScheduler) *IndexTaskQueue {
 		unissuedTasks: list.New(),
 		activeTasks:   make(map[string]task),
 		maxTaskNum:    1024,
-		utBufChan:     make(chan int, 1024),
-		sched:         sched,
+
+		utBufChan: make(chan int, 1024),
+		sched:     sched,
 	}
 }
 
 // TaskScheduler is a scheduler of indexing tasks.
 type TaskScheduler struct {
-	IndexBuildQueue TaskQueue
+	TaskQueue TaskQueue
 
 	buildParallel int
 	wg            sync.WaitGroup
@@ -183,7 +184,7 @@ func NewTaskScheduler(ctx context.Context) *TaskScheduler {
 		cancel:        cancel,
 		buildParallel: Params.IndexNodeCfg.BuildParallel.GetAsInt(),
 	}
-	s.IndexBuildQueue = NewIndexBuildTaskQueue(s)
+	s.TaskQueue = NewIndexBuildTaskQueue(s)
 
 	return s
 }
@@ -191,13 +192,25 @@ func NewTaskScheduler(ctx context.Context) *TaskScheduler {
 func (sched *TaskScheduler) scheduleIndexBuildTask() []task {
 	ret := make([]task, 0)
 	for i := 0; i < sched.buildParallel; i++ {
-		t := sched.IndexBuildQueue.PopUnissuedTask()
+		t := sched.TaskQueue.PopUnissuedTask()
 		if t == nil {
 			return ret
 		}
 		ret = append(ret, t)
 	}
 	return ret
+}
+
+func getStateFromError(err error) indexpb.JobState {
+	if errors.Is(err, errCancel) {
+		return indexpb.JobState_JobStateRetry
+	} else if errors.Is(err, merr.ErrIoKeyNotFound) || errors.Is(err, merr.ErrSegcoreUnsupported) {
+		// NoSuchKey or unsupported error
+		return indexpb.JobState_JobStateFailed
+	} else if errors.Is(err, merr.ErrSegcorePretendFinished) {
+		return indexpb.JobState_JobStateFinished
+	}
+	return indexpb.JobState_JobStateRetry
 }
 
 func (sched *TaskScheduler) processTask(t task, q TaskQueue) {
@@ -214,24 +227,18 @@ func (sched *TaskScheduler) processTask(t task, q TaskQueue) {
 		t.Reset()
 		debug.FreeOSMemory()
 	}()
-	sched.IndexBuildQueue.AddActiveTask(t)
-	defer sched.IndexBuildQueue.PopActiveTask(t.Name())
+	sched.TaskQueue.AddActiveTask(t)
+	defer sched.TaskQueue.PopActiveTask(t.Name())
 	log.Ctx(t.Ctx()).Debug("process task", zap.String("task", t.Name()))
-	pipelines := []func(context.Context) error{t.Prepare, t.BuildIndex, t.SaveIndexFiles}
+	pipelines := []func(context.Context) error{t.PreExecute, t.Execute, t.PostExecute}
 	for _, fn := range pipelines {
 		if err := wrap(fn); err != nil {
-			if errors.Is(err, errCancel) {
-				log.Ctx(t.Ctx()).Warn("index build task canceled, retry it", zap.String("task", t.Name()))
-				t.SetState(commonpb.IndexState_Retry, err.Error())
-			} else if errors.Is(err, merr.ErrIoKeyNotFound) {
-				t.SetState(commonpb.IndexState_Failed, err.Error())
-			} else {
-				t.SetState(commonpb.IndexState_Retry, err.Error())
-			}
+			log.Ctx(t.Ctx()).Warn("process task failed", zap.Error(err))
+			t.SetState(getStateFromError(err), err.Error())
 			return
 		}
 	}
-	t.SetState(commonpb.IndexState_Finished, "")
+	t.SetState(indexpb.JobState_JobStateFinished, "")
 	if indexBuildTask, ok := t.(*indexBuildTask); ok {
 		metrics.IndexNodeBuildIndexLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(indexBuildTask.tr.ElapseSpan().Seconds())
 		metrics.IndexNodeIndexTaskLatencyInQueue.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(float64(indexBuildTask.queueDur.Milliseconds()))
@@ -245,14 +252,14 @@ func (sched *TaskScheduler) indexBuildLoop() {
 		select {
 		case <-sched.ctx.Done():
 			return
-		case <-sched.IndexBuildQueue.utChan():
+		case <-sched.TaskQueue.utChan():
 			tasks := sched.scheduleIndexBuildTask()
 			var wg sync.WaitGroup
 			for _, t := range tasks {
 				wg.Add(1)
 				go func(group *sync.WaitGroup, t task) {
 					defer group.Done()
-					sched.processTask(t, sched.IndexBuildQueue)
+					sched.processTask(t, sched.TaskQueue)
 				}(&wg, t)
 			}
 			wg.Wait()

@@ -13,6 +13,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #pragma once
 
 #include <fcntl.h>
@@ -25,114 +26,170 @@
 #include <vector>
 
 #include "common/FieldMeta.h"
+#include "common/Types.h"
 #include "mmap/Types.h"
 #include "storage/Util.h"
 #include "common/File.h"
 
 namespace milvus {
 
-inline size_t
-GetDataSize(const std::vector<storage::FieldDataPtr>& datas) {
-    size_t total_size{0};
-    for (auto data : datas) {
-        total_size += data->Size();
-    }
+#define THROW_FILE_WRITE_ERROR                                           \
+    PanicInfo(ErrorCode::FileWriteFailed,                                \
+              fmt::format("write data to file {} failed, error code {}", \
+                          file.Path(),                                   \
+                          strerror(errno)));
 
-    return total_size;
+/*
+* If string field's value all empty, need a string padding to avoid
+* mmap failing because size_ is zero which causing invalid argument
+* array has the same problem
+* TODO: remove it when support NULL value
+*/
+constexpr size_t FILE_STRING_PADDING = 1;
+constexpr size_t FILE_ARRAY_PADDING = 1;
+constexpr size_t SPARSE_FLOAT_PADDING = 4;
+
+inline size_t
+PaddingSize(const DataType& type) {
+    switch (type) {
+        case DataType::JSON:
+            // simdjson requires a padding following the json data
+            return simdjson::SIMDJSON_PADDING;
+        case DataType::VARCHAR:
+        case DataType::STRING:
+            return FILE_STRING_PADDING;
+            break;
+        case DataType::ARRAY:
+            return FILE_ARRAY_PADDING;
+        case DataType::VECTOR_SPARSE_FLOAT:
+            return SPARSE_FLOAT_PADDING;
+        default:
+            break;
+    }
+    return 0;
 }
 
-inline void*
-FillField(DataType data_type, const storage::FieldDataPtr data, void* dst) {
-    char* dest = reinterpret_cast<char*>(dst);
-    if (datatype_is_variable(data_type)) {
-        switch (data_type) {
-            case DataType::STRING:
-            case DataType::VARCHAR: {
-                for (ssize_t i = 0; i < data->get_num_rows(); ++i) {
-                    auto str =
-                        static_cast<const std::string*>(data->RawValue(i));
-                    memcpy(dest, str->data(), str->size());
-                    dest += str->size();
-                }
-                break;
-            }
-            case DataType::JSON: {
-                for (ssize_t i = 0; i < data->get_num_rows(); ++i) {
-                    auto padded_string =
-                        static_cast<const Json*>(data->RawValue(i))->data();
-                    memcpy(dest, padded_string.data(), padded_string.size());
-                    dest += padded_string.size();
-                }
-                break;
-            }
-            default:
-                PanicInfo(DataTypeInvalid,
-                          fmt::format("not supported data type {}", data_type));
+inline void
+WriteFieldPadding(File& file, DataType data_type, uint64_t& total_written) {
+    // write padding 0 in file content directly
+    // see also https://github.com/milvus-io/milvus/issues/34442
+    auto padding_size = PaddingSize(data_type);
+    if (padding_size > 0) {
+        std::vector<char> padding(padding_size, 0);
+        ssize_t written = file.Write(padding.data(), padding_size);
+        if (written < padding_size) {
+            THROW_FILE_WRITE_ERROR
         }
-    } else {
-        memcpy(dst, data->Data(), data->Size());
-        dest += data->Size();
+        total_written += written;
     }
-
-    return dest;
 }
 
-inline size_t
+inline void
 WriteFieldData(File& file,
                DataType data_type,
-               const storage::FieldDataPtr& data,
-               std::vector<std::vector<uint64_t>>& element_indices) {
-    size_t total_written{0};
-    if (datatype_is_variable(data_type)) {
+               const FieldDataPtr& data,
+               uint64_t& total_written,
+               std::vector<uint64_t>& indices,
+               std::vector<std::vector<uint64_t>>& element_indices,
+               FixedVector<bool>& valid_data) {
+    if (IsVariableDataType(data_type)) {
         switch (data_type) {
             case DataType::VARCHAR:
             case DataType::STRING: {
+                // write as: |size|data|size|data......
                 for (auto i = 0; i < data->get_num_rows(); ++i) {
+                    indices.push_back(total_written);
                     auto str =
                         static_cast<const std::string*>(data->RawValue(i));
-                    ssize_t written = file.Write(str->data(), str->size());
-                    if (written < str->size()) {
-                        break;
+                    ssize_t written_data_size =
+                        file.WriteInt<uint32_t>(uint32_t(str->size()));
+                    if (written_data_size != sizeof(uint32_t)) {
+                        THROW_FILE_WRITE_ERROR
                     }
-                    total_written += written;
+                    total_written += written_data_size;
+                    auto written_data = file.Write(str->data(), str->size());
+                    if (written_data < str->size()) {
+                        THROW_FILE_WRITE_ERROR
+                    }
+                    total_written += written_data;
                 }
                 break;
             }
             case DataType::JSON: {
+                // write as: |size|data|size|data......
                 for (ssize_t i = 0; i < data->get_num_rows(); ++i) {
+                    indices.push_back(total_written);
                     auto padded_string =
                         static_cast<const Json*>(data->RawValue(i))->data();
-                    ssize_t written =
-                        file.Write(padded_string.data(), padded_string.size());
-                    if (written < padded_string.size()) {
-                        break;
+                    ssize_t written_data_size =
+                        file.WriteInt<uint32_t>(uint32_t(padded_string.size()));
+                    if (written_data_size != sizeof(uint32_t)) {
+                        THROW_FILE_WRITE_ERROR
                     }
-                    total_written += written;
+                    total_written += written_data_size;
+                    ssize_t written_data =
+                        file.Write(padded_string.data(), padded_string.size());
+                    if (written_data < padded_string.size()) {
+                        THROW_FILE_WRITE_ERROR
+                    }
+                    total_written += written_data;
                 }
                 break;
             }
             case DataType::ARRAY: {
+                // write as: |data|data|data|data|data......
                 for (size_t i = 0; i < data->get_num_rows(); ++i) {
+                    indices.push_back(total_written);
                     auto array = static_cast<const Array*>(data->RawValue(i));
                     ssize_t written =
                         file.Write(array->data(), array->byte_size());
                     if (written < array->byte_size()) {
-                        break;
+                        THROW_FILE_WRITE_ERROR
                     }
                     element_indices.emplace_back(array->get_offsets());
                     total_written += written;
                 }
                 break;
             }
+            case DataType::VECTOR_SPARSE_FLOAT: {
+                for (size_t i = 0; i < data->get_num_rows(); ++i) {
+                    indices.push_back(total_written);
+                    auto vec =
+                        static_cast<const knowhere::sparse::SparseRow<float>*>(
+                            data->RawValue(i));
+                    ssize_t written =
+                        file.Write(vec->data(), vec->data_byte_size());
+                    if (written < vec->data_byte_size()) {
+                        break;
+                    }
+                    total_written += written;
+                }
+                break;
+            }
             default:
                 PanicInfo(DataTypeInvalid,
-                          fmt::format("not supported data type {}",
-                                      datatype_name(data_type)));
+                          "not supported data type {}",
+                          GetDataTypeName(data_type));
         }
     } else {
-        total_written += file.Write(data->Data(), data->Size());
+        // write as: data|data|data|data|data|data......
+        size_t written = file.Write(data->Data(), data->DataSize());
+        if (written < data->DataSize()) {
+            THROW_FILE_WRITE_ERROR
+        }
+        for (auto i = 0; i < data->get_num_rows(); i++) {
+            indices.emplace_back(total_written);
+            total_written += data->DataSize(i);
+        }
     }
-
-    return total_written;
+    if (data->IsNullable()) {
+        size_t required_rows = valid_data.size() + data->get_num_rows();
+        if (required_rows > valid_data.size()) {
+            valid_data.reserve(required_rows * 2);
+        }
+        for (size_t i = 0; i < data->get_num_rows(); i++) {
+            valid_data.push_back(data->is_valid(i));
+        }
+    }
 }
 }  // namespace milvus

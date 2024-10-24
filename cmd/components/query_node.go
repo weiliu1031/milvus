@@ -18,6 +18,7 @@ package components
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -26,6 +27,7 @@ import (
 	grpcquerynode "github.com/milvus-io/milvus/internal/distributed/querynode"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -48,6 +50,10 @@ func NewQueryNode(ctx context.Context, factory dependency.Factory) (*QueryNode, 
 	}, nil
 }
 
+func (q *QueryNode) Prepare() error {
+	return q.svr.Prepare()
+}
+
 // Run starts service
 func (q *QueryNode) Run() error {
 	if err := q.svr.Run(); err != nil {
@@ -60,10 +66,8 @@ func (q *QueryNode) Run() error {
 
 // Stop terminates service
 func (q *QueryNode) Stop() error {
-	if err := q.svr.Stop(); err != nil {
-		return err
-	}
-	return nil
+	timeout := paramtable.Get().QueryNodeCfg.GracefulStopTimeout.GetAsDuration(time.Second)
+	return exitWhenStopTimeout(q.svr.Stop, timeout)
 }
 
 // GetComponentStates returns QueryNode's states

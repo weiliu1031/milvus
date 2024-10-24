@@ -20,14 +20,14 @@
 #include <utility>
 #include <vector>
 
+#include "common/FieldData.h"
 #include "common/QueryResult.h"
 // #include "common/Schema.h"
 #include "common/Types.h"
+#include "index/Index.h"
+#include "log/Log.h"
 #include "segcore/DeletedRecord.h"
 #include "segcore/InsertRecord.h"
-#include "index/Index.h"
-#include "storage/FieldData.h"
-#include "storage/space.h"
 
 namespace milvus::segcore {
 
@@ -37,7 +37,7 @@ ParsePksFromFieldData(std::vector<PkType>& pks, const DataArray& data);
 void
 ParsePksFromFieldData(DataType data_type,
                       std::vector<PkType>& pks,
-                      const std::vector<storage::FieldDataPtr>& datas);
+                      const std::vector<FieldDataPtr>& datas);
 
 void
 ParsePksFromIDs(std::vector<PkType>& pks,
@@ -62,6 +62,7 @@ CreateVectorDataArray(int64_t count, const FieldMeta& field_meta);
 
 std::unique_ptr<DataArray>
 CreateScalarDataArrayFrom(const void* data_raw,
+                          const void* valid_data,
                           int64_t count,
                           const FieldMeta& field_meta);
 
@@ -72,14 +73,40 @@ CreateVectorDataArrayFrom(const void* data_raw,
 
 std::unique_ptr<DataArray>
 CreateDataArrayFrom(const void* data_raw,
+                    const void* valid_data,
                     int64_t count,
                     const FieldMeta& field_meta);
 
 // TODO remove merge dataArray, instead fill target entity when get data slice
+struct MergeBase {
+ private:
+    std::map<FieldId, std::unique_ptr<milvus::DataArray>>* output_fields_data_;
+    size_t offset_;
+
+ public:
+    MergeBase() {
+    }
+
+    MergeBase(std::map<FieldId, std::unique_ptr<milvus::DataArray>>*
+                  output_fields_data,
+              size_t offset)
+        : output_fields_data_(output_fields_data), offset_(offset) {
+    }
+
+    size_t
+    getOffset() const {
+        return offset_;
+    }
+
+    milvus::DataArray*
+    get_field_data(FieldId fieldId) const {
+        return (*output_fields_data_)[fieldId].get();
+    }
+};
+
 std::unique_ptr<DataArray>
-MergeDataArray(
-    std::vector<std::pair<milvus::SearchResult*, int64_t>>& result_offsets,
-    const FieldMeta& field_meta);
+MergeDataArray(std::vector<MergeBase>& merge_bases,
+               const FieldMeta& field_meta);
 
 template <bool is_sealed>
 std::shared_ptr<DeletedRecord::TmpBitmap>
@@ -158,13 +185,12 @@ ReverseDataFromIndex(const index::IndexBase* index,
                      const FieldMeta& field_meta);
 
 void
-LoadFieldDatasFromRemote(std::vector<std::string>& remote_files,
-                         storage::FieldDataChannelPtr channel);
+LoadArrowReaderFromRemote(const std::vector<std::string>& remote_files,
+                          std::shared_ptr<ArrowReaderChannel> channel);
 
 void
-LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,
-                          SchemaPtr schema,
-                          FieldDataInfo& field_data_info);
+LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
+                         FieldDataChannelPtr channel);
 /**
  * Returns an index pointing to the first element in the range [first, last) such that `value < element` is true
  * (i.e. that is strictly greater than value), or last if no such element is found.

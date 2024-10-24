@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/atomic"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -34,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -81,7 +81,7 @@ func (suite *CheckerControllerSuite) SetupTest() {
 
 	suite.balancer = balance.NewMockBalancer(suite.T())
 	suite.scheduler = task.NewMockScheduler(suite.T())
-	suite.controller = NewCheckerController(suite.meta, suite.dist, suite.targetManager, suite.balancer, suite.nodeMgr, suite.scheduler, suite.broker)
+	suite.controller = NewCheckerController(suite.meta, suite.dist, suite.targetManager, suite.nodeMgr, suite.scheduler, suite.broker, func() balance.Balance { return suite.balancer })
 }
 
 func (suite *CheckerControllerSuite) TestBasic() {
@@ -89,10 +89,18 @@ func (suite *CheckerControllerSuite) TestBasic() {
 	suite.meta.CollectionManager.PutCollection(utils.CreateTestCollection(1, 1))
 	suite.meta.CollectionManager.PutPartition(utils.CreateTestPartition(1, 1))
 	suite.meta.ReplicaManager.Put(utils.CreateTestReplica(1, 1, []int64{1, 2}))
-	suite.nodeMgr.Add(session.NewNodeInfo(1, "localhost"))
-	suite.nodeMgr.Add(session.NewNodeInfo(2, "localhost"))
-	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 1)
-	suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, 2)
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   1,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   2,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	suite.meta.ResourceManager.HandleNodeUp(1)
+	suite.meta.ResourceManager.HandleNodeUp(2)
 
 	// set target
 	channels := []*datapb.VchannelInfo{
@@ -124,15 +132,34 @@ func (suite *CheckerControllerSuite) TestBasic() {
 	suite.scheduler.EXPECT().GetSegmentTaskNum().Return(0).Maybe()
 	suite.scheduler.EXPECT().GetChannelTaskNum().Return(0).Maybe()
 
-	suite.balancer.EXPECT().AssignSegment(mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	suite.balancer.EXPECT().AssignChannel(mock.Anything, mock.Anything).Return(nil)
+	assignSegCounter := atomic.NewInt32(0)
+	assingChanCounter := atomic.NewInt32(0)
+	suite.balancer.EXPECT().AssignSegment(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(i1 int64, s []*meta.Segment, i2 []int64, i4 bool) []balance.SegmentAssignPlan {
+		assignSegCounter.Inc()
+		return nil
+	})
+	suite.balancer.EXPECT().AssignChannel(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(dc []*meta.DmChannel, i []int64, _ bool) []balance.ChannelAssignPlan {
+		assingChanCounter.Inc()
+		return nil
+	})
 	suite.controller.Start()
 	defer suite.controller.Stop()
 
+	// expect assign channel first
 	suite.Eventually(func() bool {
 		suite.controller.Check()
-		return counter.Load() > 0
-	}, 5*time.Second, 1*time.Second)
+		return counter.Load() > 0 && assingChanCounter.Load() > 0
+	}, 3*time.Second, 1*time.Millisecond)
+
+	// until new channel has been subscribed
+	suite.dist.ChannelDistManager.Update(1, utils.CreateTestChannel(1, 1, 1, "test-insert-channel2"))
+	suite.dist.LeaderViewManager.Update(1, utils.CreateTestLeaderView(1, 1, "test-insert-channel2", map[int64]int64{}, map[int64]*meta.Segment{}))
+
+	// expect assign segment after channel has been subscribed
+	suite.Eventually(func() bool {
+		suite.controller.Check()
+		return counter.Load() > 0 && assignSegCounter.Load() > 0
+	}, 3*time.Second, 1*time.Millisecond)
 }
 
 func TestCheckControllerSuite(t *testing.T) {

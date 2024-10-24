@@ -33,6 +33,10 @@ if ( USE_DYNAMIC_SIMD )
     add_definitions(-DUSE_DYNAMIC_SIMD)
 endif()
 
+if (USE_OPENDAL) 
+    add_definitions(-DUSE_OPENDAL)
+endif()
+
 project(core)
 include(CheckCXXCompilerFlag)
 if ( APPLE )
@@ -123,7 +127,13 @@ if (LINUX OR MSYS)
                   "-DELPP_THREAD_SAFE"
                   "-fopenmp"
                   "-Wno-error"
+                  "-Wno-all"
                   )
+    if (USE_ASAN STREQUAL "ON") 
+        message( STATUS "Building Milvus Core Using AddressSanitizer")
+        add_compile_options(-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -fsanitize=address)
+        add_link_options(-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -fsanitize=address)
+    endif()
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         append_flags( CMAKE_CXX_FLAGS
                 "-O3"
@@ -137,17 +147,9 @@ if ( APPLE )
             "-fPIC"
             "-DELPP_THREAD_SAFE"
             "-fopenmp"
-            "-Wno-error"
-            "-Wsign-compare"
-            "-Wall"
             "-pedantic"
-            "-Wno-unused-command-line-argument"
-            "-Wextra"
-            "-Wno-unused-parameter"
-            "-Wno-deprecated"
+            "-Wno-all"
             "-DBOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED=1"
-            #"-fvisibility=hidden"
-            #"-fvisibility-inlines-hidden"
             )
 endif ()
 
@@ -296,13 +298,29 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/indexbuilder/
         FILES_MATCHING PATTERN "*_c.h"
 )
 
+# Install clustering
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/clustering/
+        DESTINATION include/clustering
+        FILES_MATCHING PATTERN "*_c.h"
+)
+
 # Install common
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/common/
         DESTINATION include/common
         FILES_MATCHING PATTERN "*_c.h"
 )
 
+# Install monitor
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/
+        DESTINATION include/monitor
+        FILES_MATCHING PATTERN "*_c.h"
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/futures/
+        DESTINATION include/futures
+        FILES_MATCHING PATTERN "*.h"
+)
+
 install(DIRECTORY ${CMAKE_BINARY_DIR}/lib/
         DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}
 )
-

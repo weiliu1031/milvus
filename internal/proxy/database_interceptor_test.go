@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/pkg/util"
@@ -68,17 +69,21 @@ func TestDatabaseInterceptor(t *testing.T) {
 			&milvuspb.CreateIndexRequest{},
 			&milvuspb.DescribeIndexRequest{},
 			&milvuspb.DropIndexRequest{},
+			&milvuspb.AlterIndexRequest{},
 			&milvuspb.GetIndexBuildProgressRequest{},
 			&milvuspb.GetIndexStateRequest{},
 			&milvuspb.InsertRequest{},
 			&milvuspb.DeleteRequest{},
 			&milvuspb.SearchRequest{},
+			&milvuspb.HybridSearchRequest{},
 			&milvuspb.FlushRequest{},
 			&milvuspb.GetFlushStateRequest{},
 			&milvuspb.QueryRequest{},
 			&milvuspb.CreateAliasRequest{},
 			&milvuspb.DropAliasRequest{},
 			&milvuspb.AlterAliasRequest{},
+			&milvuspb.ListAliasesRequest{},
+			&milvuspb.DescribeAliasRequest{},
 			&milvuspb.GetPersistentSegmentInfoRequest{},
 			&milvuspb.GetQuerySegmentInfoRequest{},
 			&milvuspb.LoadBalanceRequest{},
@@ -129,7 +134,7 @@ func TestDatabaseInterceptor(t *testing.T) {
 			assert.NoError(t, err)
 
 			if len(after) != len(before) {
-				t.Errorf("req has been modified:%s", req.String())
+				t.Errorf("req has been modified:%s", prototext.Format(req))
 			}
 		}
 	})

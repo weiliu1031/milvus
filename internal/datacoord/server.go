@@ -26,40 +26,42 @@ import (
 	"syscall"
 	"time"
 
-	semver "github.com/blang/semver/v4"
+	"github.com/blang/semver/v4"
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	globalIDAllocator "github.com/milvus-io/milvus/internal/allocator"
+	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/broker"
+	"github.com/milvus-io/milvus/internal/datacoord/session"
 	datanodeclient "github.com/milvus-io/milvus/internal/distributed/datanode/client"
 	indexnodeclient "github.com/milvus-io/milvus/internal/distributed/indexnode/client"
 	rootcoordclient "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/kv/tikv"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	streamingcoord "github.com/milvus-io/milvus/internal/streamingcoord/server"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/streamingutil"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/expr"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
-	"github.com/milvus-io/milvus/pkg/util/timerecord"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -84,16 +86,12 @@ type (
 	Timestamp = typeutil.Timestamp
 )
 
-type dataNodeCreatorFunc func(ctx context.Context, addr string, nodeID int64) (types.DataNodeClient, error)
-
-type indexNodeCreatorFunc func(ctx context.Context, addr string, nodeID int64) (types.IndexNodeClient, error)
-
 type rootCoordCreatorFunc func(ctx context.Context) (types.RootCoordClient, error)
 
 // makes sure Server implements `DataCoord`
 var _ types.DataCoord = (*Server)(nil)
 
-var Params *paramtable.ComponentParam = paramtable.Get()
+var Params = paramtable.Get()
 
 // Server implements `types.DataCoord`
 // handles Data Coordinator related jobs
@@ -104,32 +102,36 @@ type Server struct {
 	serverLoopWg     sync.WaitGroup
 	quitCh           chan struct{}
 	stateCode        atomic.Value
-	helper           ServerHelper
 
-	etcdCli          *clientv3.Client
-	tikvCli          *txnkv.Client
-	address          string
-	watchClient      kv.WatchKV
-	kv               kv.MetaKv
-	meta             *meta
-	segmentManager   Manager
-	allocator        allocator
-	cluster          *Cluster
-	sessionManager   *SessionManager
-	channelManager   *ChannelManager
+	etcdCli        *clientv3.Client
+	tikvCli        *txnkv.Client
+	address        string
+	watchClient    kv.WatchKV
+	kv             kv.MetaKv
+	meta           *meta
+	segmentManager Manager
+	allocator      allocator.Allocator
+	// self host id allocator, to avoid get unique id from rootcoord
+	idAllocator      *globalIDAllocator.GlobalIDAllocator
+	cluster          Cluster
+	sessionManager   session.DataNodeManager
+	channelManager   ChannelManager
 	rootCoordClient  types.RootCoordClient
 	garbageCollector *garbageCollector
 	gcOpt            GcOption
 	handler          Handler
+	importMeta       ImportMeta
+	importScheduler  ImportScheduler
+	importChecker    ImportChecker
 
-	compactionTrigger     trigger
-	compactionHandler     compactionPlanContext
-	compactionViewManager *CompactionViewManager
+	compactionTrigger        trigger
+	compactionHandler        compactionPlanContext
+	compactionTriggerManager TriggerManager
 
-	metricsCacheManager *metricsinfo.MetricsCacheManager
+	syncSegmentsScheduler *SyncSegmentsScheduler
+	metricsCacheManager   *metricsinfo.MetricsCacheManager
 
 	flushCh         chan UniqueID
-	buildIndexCh    chan UniqueID
 	notifyIndexChan chan UniqueID
 	factory         dependency.Factory
 
@@ -143,29 +145,28 @@ type Server struct {
 	enableActiveStandBy bool
 	activateFunc        func() error
 
-	dataNodeCreator        dataNodeCreatorFunc
-	indexNodeCreator       indexNodeCreatorFunc
+	dataNodeCreator        session.DataNodeCreatorFunc
+	indexNodeCreator       session.IndexNodeCreatorFunc
 	rootCoordClientCreator rootCoordCreatorFunc
 	// indexCoord             types.IndexCoord
 
 	// segReferManager  *SegmentReferenceManager
-	indexBuilder              *indexBuilder
-	indexNodeManager          *IndexNodeManager
+	indexNodeManager          *session.IndexNodeManager
 	indexEngineVersionManager IndexEngineVersionManager
+
+	taskScheduler *taskScheduler
+	jobManager    StatsJobManager
 
 	// manage ways that data coord access other coord
 	broker broker.Broker
+
+	// streamingcoord server is embedding in datacoord now.
+	streamingCoord *streamingcoord.Server
 }
 
-// ServerHelper datacoord server injection helper
-type ServerHelper struct {
-	eventAfterHandleDataNodeTt func()
-}
-
-func defaultServerHelper() ServerHelper {
-	return ServerHelper{
-		eventAfterHandleDataNodeTt: func() {},
-	}
+type CollectionNameInfo struct {
+	CollectionName string
+	DBName         string
 }
 
 // Option utility function signature to set DataCoord server attributes
@@ -178,22 +179,15 @@ func WithRootCoordCreator(creator rootCoordCreatorFunc) Option {
 	}
 }
 
-// WithServerHelper returns an `Option` setting ServerHelp with provided parameter
-func WithServerHelper(helper ServerHelper) Option {
-	return func(svr *Server) {
-		svr.helper = helper
-	}
-}
-
 // WithCluster returns an `Option` setting Cluster with provided parameter
-func WithCluster(cluster *Cluster) Option {
+func WithCluster(cluster Cluster) Option {
 	return func(svr *Server) {
 		svr.cluster = cluster
 	}
 }
 
 // WithDataNodeCreator returns an `Option` setting DataNode create function
-func WithDataNodeCreator(creator dataNodeCreatorFunc) Option {
+func WithDataNodeCreator(creator session.DataNodeCreatorFunc) Option {
 	return func(svr *Server) {
 		svr.dataNodeCreator = creator
 	}
@@ -214,12 +208,10 @@ func CreateServer(ctx context.Context, factory dependency.Factory, opts ...Optio
 		quitCh:                 make(chan struct{}),
 		factory:                factory,
 		flushCh:                make(chan UniqueID, 1024),
-		buildIndexCh:           make(chan UniqueID, 1024),
 		notifyIndexChan:        make(chan UniqueID),
 		dataNodeCreator:        defaultDataNodeCreatorFunc,
 		indexNodeCreator:       defaultIndexNodeCreatorFunc,
 		rootCoordClientCreator: defaultRootCoordCreatorFunc,
-		helper:                 defaultServerHelper(),
 		metricsCacheManager:    metricsinfo.NewMetricsCacheManager(),
 		enableActiveStandBy:    Params.DataCoordCfg.EnableActiveStandby.GetAsBool(),
 	}
@@ -227,6 +219,7 @@ func CreateServer(ctx context.Context, factory dependency.Factory, opts ...Optio
 	for _, opt := range opts {
 		opt(s)
 	}
+	expr.Register("datacoord", s)
 	return s
 }
 
@@ -252,34 +245,34 @@ func (s *Server) Register() error {
 	// first register indexCoord
 	s.icSession.Register()
 	s.session.Register()
-	if s.enableActiveStandBy {
-		err := s.session.ProcessActiveStandBy(s.activateFunc)
-		if err != nil {
-			return err
-		}
+	afterRegister := func() {
+		metrics.NumNodes.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), typeutil.DataCoordRole).Inc()
+		log.Info("DataCoord Register Finished")
 
-		err = s.icSession.ForceActiveStandby(nil)
-		if err != nil {
-			return nil
-		}
+		s.session.LivenessCheck(s.ctx, func() {
+			logutil.Logger(s.ctx).Error("disconnected from etcd and exited", zap.Int64("serverID", s.session.GetServerID()))
+			os.Exit(1)
+		})
+	}
+	if s.enableActiveStandBy {
+		go func() {
+			err := s.session.ProcessActiveStandBy(s.activateFunc)
+			if err != nil {
+				log.Error("failed to activate standby datacoord server", zap.Error(err))
+				panic(err)
+			}
+
+			err = s.icSession.ForceActiveStandby(nil)
+			if err != nil {
+				log.Error("failed to force activate standby indexcoord server", zap.Error(err))
+				panic(err)
+			}
+			afterRegister()
+		}()
+	} else {
+		afterRegister()
 	}
 
-	metrics.NumNodes.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), typeutil.DataCoordRole).Inc()
-	log.Info("DataCoord Register Finished")
-
-	s.session.LivenessCheck(s.serverLoopCtx, func() {
-		logutil.Logger(s.ctx).Error("disconnected from etcd and exited", zap.Int64("serverID", s.session.GetServerID()))
-		if err := s.Stop(); err != nil {
-			logutil.Logger(s.ctx).Fatal("failed to stop server", zap.Error(err))
-		}
-		metrics.NumNodes.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), typeutil.DataCoordRole).Dec()
-		// manually send signal to starter goroutine
-		if s.session.IsTriggerKill() {
-			if p, err := os.FindProcess(os.Getpid()); err == nil {
-				p.Signal(syscall.SIGINT)
-			}
-		}
-	})
 	return nil
 }
 
@@ -316,6 +309,11 @@ func (s *Server) Init() error {
 			}
 			s.startDataCoord()
 			log.Info("DataCoord startup success")
+
+			if s.streamingCoord != nil {
+				s.streamingCoord.Start()
+				log.Info("StreamingCoord stratup successfully at standby mode")
+			}
 			return nil
 		}
 		s.stateCode.Store(commonpb.StateCode_StandBy)
@@ -324,6 +322,10 @@ func (s *Server) Init() error {
 	}
 
 	return s.initDataCoord()
+}
+
+func (s *Server) RegisterStreamingCoordGRPCService(server *grpc.Server) {
+	s.streamingCoord.RegisterGRPCService(server)
 }
 
 func (s *Server) initDataCoord() error {
@@ -335,6 +337,7 @@ func (s *Server) initDataCoord() error {
 	log.Info("init rootcoord client done")
 
 	s.broker = broker.NewCoordinatorBroker(s.rootCoordClient)
+	s.allocator = allocator.NewRootCoordAllocator(s.rootCoordClient)
 
 	storageCli, err := s.newChunkManagerFactory()
 	if err != nil {
@@ -346,14 +349,35 @@ func (s *Server) initDataCoord() error {
 		return err
 	}
 
+	// init id allocator after init meta
+	s.idAllocator = globalIDAllocator.NewGlobalIDAllocator("idTimestamp", s.kv)
+	err = s.idAllocator.Initialize()
+	if err != nil {
+		log.Error("data coordinator id allocator initialize failed", zap.Error(err))
+		return err
+	}
+
+	// Initialize streaming coordinator.
+	if streamingutil.IsStreamingServiceEnabled() {
+		s.streamingCoord = streamingcoord.NewServerBuilder().
+			WithETCD(s.etcdCli).
+			WithMetaKV(s.kv).
+			WithSession(s.session).Build()
+		if err = s.streamingCoord.Init(context.TODO()); err != nil {
+			return err
+		}
+		log.Info("init streaming coordinator done")
+	}
+
 	s.handler = newServerHandler(s)
+
+	// check whether old node exist, if yes suspend auto balance until all old nodes down
+	s.updateBalanceConfigLoop(s.ctx)
 
 	if err = s.initCluster(); err != nil {
 		return err
 	}
 	log.Info("init datanode cluster done")
-
-	s.allocator = newRootCoordAllocator(s.rootCoordClient)
 
 	s.initIndexNodeManager()
 
@@ -362,11 +386,14 @@ func (s *Server) initDataCoord() error {
 	}
 	log.Info("init service discovery done")
 
-	if Params.DataCoordCfg.EnableCompaction.GetAsBool() {
-		s.createCompactionHandler()
-		s.createCompactionTrigger()
-		log.Info("init compaction scheduler done")
-	}
+	s.initTaskScheduler(storageCli)
+	log.Info("init task scheduler done")
+
+	s.initJobManager()
+	log.Info("init statsJobManager done")
+
+	s.initCompaction()
+	log.Info("init compaction done")
 
 	if err = s.initSegmentManager(); err != nil {
 		return err
@@ -374,7 +401,15 @@ func (s *Server) initDataCoord() error {
 	log.Info("init segment manager done")
 
 	s.initGarbageCollection(storageCli)
-	s.initIndexBuilder(storageCli)
+
+	s.importMeta, err = NewImportMeta(s.meta.catalog)
+	if err != nil {
+		return err
+	}
+	s.importScheduler = NewImportScheduler(s.meta, s.cluster, s.allocator, s.importMeta)
+	s.importChecker = NewImportChecker(s.meta, s.broker, s.cluster, s.allocator, s.importMeta, s.jobManager)
+
+	s.syncSegmentsScheduler = newSyncSegmentsScheduler(s.meta, s.channelManager, s.sessionManager)
 
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(s.ctx)
 
@@ -393,40 +428,83 @@ func (s *Server) Start() error {
 	if !s.enableActiveStandBy {
 		s.startDataCoord()
 		log.Info("DataCoord startup successfully")
+		if s.streamingCoord != nil {
+			s.streamingCoord.Start()
+			log.Info("StreamingCoord stratup successfully")
+		}
 	}
 
 	return nil
 }
 
 func (s *Server) startDataCoord() {
-	if Params.DataCoordCfg.EnableCompaction.GetAsBool() {
-		s.compactionHandler.start()
-		s.compactionTrigger.start()
-		s.compactionViewManager.Start()
-	}
+	s.startTaskScheduler()
 	s.startServerLoop()
+
+	// http.Register(&http.Handler{
+	// 	Path: "/datacoord/garbage_collection/pause",
+	// 	HandlerFunc: func(w http.ResponseWriter, req *http.Request) {
+	// 		pauseSeconds := req.URL.Query().Get("pause_seconds")
+	// 		seconds, err := strconv.ParseInt(pauseSeconds, 10, 64)
+	// 		if err != nil {
+	// 			w.WriteHeader(400)
+	// 			w.Write([]byte(fmt.Sprintf(`{"msg": "invalid pause seconds(%v)"}`, pauseSeconds)))
+	// 			return
+	// 		}
+
+	// 		err = s.garbageCollector.Pause(req.Context(), time.Duration(seconds)*time.Second)
+	// 		if err != nil {
+	// 			w.WriteHeader(500)
+	// 			w.Write([]byte(fmt.Sprintf(`{"msg": "failed to pause garbage collection, %s"}`, err.Error())))
+	// 			return
+	// 		}
+	// 		w.WriteHeader(200)
+	// 		w.Write([]byte(`{"msg": "OK"}`))
+	// 		return
+	// 	},
+	// })
+	// http.Register(&http.Handler{
+	// 	Path: "/datacoord/garbage_collection/resume",
+	// 	HandlerFunc: func(w http.ResponseWriter, req *http.Request) {
+	// 		err := s.garbageCollector.Resume(req.Context())
+	// 		if err != nil {
+	// 			w.WriteHeader(500)
+	// 			w.Write([]byte(fmt.Sprintf(`{"msg": "failed to pause garbage collection, %s"}`, err.Error())))
+	// 			return
+	// 		}
+	// 		w.WriteHeader(200)
+	// 		w.Write([]byte(`{"msg": "OK"}`))
+	// 		return
+	// 	},
+	// })
+
 	s.afterStart()
 	s.stateCode.Store(commonpb.StateCode_Healthy)
 	sessionutil.SaveServerInfo(typeutil.DataCoordRole, s.session.GetServerID())
 }
 
-func (s *Server) afterStart() {
-	s.updateBalanceConfigLoop(s.ctx)
+func (s *Server) GetServerID() int64 {
+	if s.session != nil {
+		return s.session.GetServerID()
+	}
+	return paramtable.GetNodeID()
 }
+
+func (s *Server) afterStart() {}
 
 func (s *Server) initCluster() error {
 	if s.cluster != nil {
 		return nil
 	}
 
+	s.sessionManager = session.NewDataNodeManagerImpl(session.WithDataNodeCreator(s.dataNodeCreator))
+
 	var err error
-	s.channelManager, err = NewChannelManager(s.watchClient, s.handler, withMsgstreamFactory(s.factory),
-		withStateChecker(), withBgChecker())
+	s.channelManager, err = NewChannelManager(s.watchClient, s.handler, s.sessionManager, s.idAllocator, withCheckerV2())
 	if err != nil {
 		return err
 	}
-	s.sessionManager = NewSessionManager(withSessionCreator(s.dataNodeCreator))
-	s.cluster = NewCluster(s.sessionManager, s.channelManager)
+	s.cluster = NewClusterImpl(s.sessionManager, s.channelManager)
 	return nil
 }
 
@@ -455,25 +533,6 @@ func (s *Server) SetIndexNodeCreator(f func(context.Context, string, int64) (typ
 	s.indexNodeCreator = f
 }
 
-func (s *Server) createCompactionHandler() {
-	s.compactionHandler = newCompactionPlanHandler(s.sessionManager, s.channelManager, s.meta, s.allocator)
-	triggerv2 := NewCompactionTriggerManager(s.meta, s.allocator, s.compactionHandler)
-	s.compactionViewManager = NewCompactionViewManager(s.meta, triggerv2, s.allocator)
-}
-
-func (s *Server) stopCompactionHandler() {
-	s.compactionHandler.stop()
-	s.compactionViewManager.Close()
-}
-
-func (s *Server) createCompactionTrigger() {
-	s.compactionTrigger = newCompactionTrigger(s.meta, s.compactionHandler, s.allocator, s.handler, s.indexEngineVersionManager)
-}
-
-func (s *Server) stopCompactionTrigger() {
-	s.compactionTrigger.stop()
-}
-
 func (s *Server) newChunkManagerFactory() (storage.ChunkManager, error) {
 	chunkManagerFactory := storage.NewChunkManagerFactoryWithParam(Params)
 	cli, err := chunkManagerFactory.NewPersistentStorageChunkManager(s.ctx)
@@ -487,8 +546,10 @@ func (s *Server) newChunkManagerFactory() (storage.ChunkManager, error) {
 func (s *Server) initGarbageCollection(cli storage.ChunkManager) {
 	s.garbageCollector = newGarbageCollector(s.meta, s.handler, GcOption{
 		cli:              cli,
+		broker:           s.broker,
 		enabled:          Params.DataCoordCfg.EnableGarbageCollection.GetAsBool(),
 		checkInterval:    Params.DataCoordCfg.GCInterval.GetAsDuration(time.Second),
+		scanInterval:     Params.DataCoordCfg.GCScanIntervalInHour.GetAsDuration(time.Hour),
 		missingTolerance: Params.DataCoordCfg.GCMissingTolerance.GetAsDuration(time.Second),
 		dropTolerance:    Params.DataCoordCfg.GCDropTolerance.GetAsDuration(time.Second),
 	})
@@ -503,16 +564,31 @@ func (s *Server) initServiceDiscovery() error {
 	}
 	log.Info("DataCoord success to get DataNode sessions", zap.Any("sessions", sessions))
 
-	datanodes := make([]*NodeInfo, 0, len(sessions))
-	for _, session := range sessions {
-		info := &NodeInfo{
-			NodeID:  session.ServerID,
-			Address: session.Address,
+	datanodes := make([]*session.NodeInfo, 0, len(sessions))
+	legacyVersion, err := semver.Parse(paramtable.Get().DataCoordCfg.LegacyVersionWithoutRPCWatch.GetValue())
+	if err != nil {
+		log.Warn("DataCoord failed to init service discovery", zap.Error(err))
+	}
+
+	for _, s := range sessions {
+		info := &session.NodeInfo{
+			NodeID:  s.ServerID,
+			Address: s.Address,
 		}
+
+		if s.Version.LTE(legacyVersion) {
+			info.IsLegacy = true
+		}
+
 		datanodes = append(datanodes, info)
 	}
 
-	s.cluster.Startup(s.ctx, datanodes)
+	log.Info("DataCoord Cluster Manager start up")
+	if err := s.cluster.Startup(s.ctx, datanodes); err != nil {
+		log.Warn("DataCoord Cluster Manager failed to start up", zap.Error(err))
+		return err
+	}
+	log.Info("DataCoord Cluster Manager start up successfully")
 
 	// TODO implement rewatch logic
 	s.dnEventCh = s.session.WatchServicesWithVersionRange(typeutil.DataNodeRole, r, rev+1, nil)
@@ -591,163 +667,92 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		if err != nil {
 			return err
 		}
+
+		// Load collection information asynchronously
+		// HINT: please make sure this is the last step in the `reloadEtcdFn` function !!!
+		go func() {
+			_ = retry.Do(s.ctx, func() error {
+				return s.meta.reloadCollectionsFromRootcoord(s.ctx, s.broker)
+			}, retry.Sleep(time.Second), retry.Attempts(connMetaMaxRetryTime))
+		}()
 		return nil
 	}
 	return retry.Do(s.ctx, reloadEtcdFn, retry.Attempts(connMetaMaxRetryTime))
 }
 
-func (s *Server) initIndexBuilder(manager storage.ChunkManager) {
-	if s.indexBuilder == nil {
-		s.indexBuilder = newIndexBuilder(s.ctx, s.meta, s.indexNodeManager, manager, s.indexEngineVersionManager)
+func (s *Server) initTaskScheduler(manager storage.ChunkManager) {
+	if s.taskScheduler == nil {
+		s.taskScheduler = newTaskScheduler(s.ctx, s.meta, s.indexNodeManager, manager, s.indexEngineVersionManager, s.handler, s.allocator)
+	}
+}
+
+func (s *Server) initJobManager() {
+	if s.jobManager == nil {
+		s.jobManager = newJobManager(s.ctx, s.meta, s.taskScheduler, s.allocator)
 	}
 }
 
 func (s *Server) initIndexNodeManager() {
 	if s.indexNodeManager == nil {
-		s.indexNodeManager = NewNodeManager(s.ctx, s.indexNodeCreator)
+		s.indexNodeManager = session.NewNodeManager(s.ctx, s.indexNodeCreator)
+	}
+}
+
+func (s *Server) initCompaction() {
+	s.compactionHandler = newCompactionPlanHandler(s.cluster, s.sessionManager, s.channelManager, s.meta, s.allocator, s.taskScheduler, s.handler)
+	s.compactionTriggerManager = NewCompactionTriggerManager(s.allocator, s.handler, s.compactionHandler, s.meta)
+	s.compactionTrigger = newCompactionTrigger(s.meta, s.compactionHandler, s.allocator, s.handler, s.indexEngineVersionManager)
+}
+
+func (s *Server) stopCompaction() {
+	if s.compactionTrigger != nil {
+		s.compactionTrigger.stop()
+	}
+	if s.compactionTriggerManager != nil {
+		s.compactionTriggerManager.Stop()
+	}
+
+	if s.compactionHandler != nil {
+		s.compactionHandler.stop()
+	}
+}
+
+func (s *Server) startCompaction() {
+	if s.compactionHandler != nil {
+		s.compactionHandler.start()
+	}
+
+	if s.compactionTrigger != nil {
+		s.compactionTrigger.start()
+	}
+
+	if s.compactionTriggerManager != nil {
+		s.compactionTriggerManager.Start()
 	}
 }
 
 func (s *Server) startServerLoop() {
-	s.serverLoopWg.Add(2)
-	if !Params.DataNodeCfg.DataNodeTimeTickByRPC.GetAsBool() {
-		s.serverLoopWg.Add(1)
-		s.startDataNodeTtLoop(s.serverLoopCtx)
+	if Params.DataCoordCfg.EnableCompaction.GetAsBool() {
+		s.startCompaction()
 	}
+
+	s.serverLoopWg.Add(2)
 	s.startWatchService(s.serverLoopCtx)
 	s.startFlushLoop(s.serverLoopCtx)
-	s.startIndexService(s.serverLoopCtx)
+	go s.importScheduler.Start()
+	go s.importChecker.Start()
 	s.garbageCollector.start()
-}
 
-// startDataNodeTtLoop start a goroutine to recv data node tt msg from msgstream
-// tt msg stands for the currently consumed timestamp for each channel
-func (s *Server) startDataNodeTtLoop(ctx context.Context) {
-	ttMsgStream, err := s.factory.NewMsgStream(ctx)
-	if err != nil {
-		log.Error("DataCoord failed to create timetick channel", zap.Error(err))
-		panic(err)
-	}
-
-	timeTickChannel := Params.CommonCfg.DataCoordTimeTick.GetValue()
-	if Params.CommonCfg.PreCreatedTopicEnabled.GetAsBool() {
-		timeTickChannel = Params.CommonCfg.TimeTicker.GetValue()
-	}
-	subName := fmt.Sprintf("%s-%d-datanodeTl", Params.CommonCfg.DataCoordSubName.GetValue(), paramtable.GetNodeID())
-
-	ttMsgStream.AsConsumer(context.TODO(), []string{timeTickChannel}, subName, mqwrapper.SubscriptionPositionLatest)
-	log.Info("DataCoord creates the timetick channel consumer",
-		zap.String("timeTickChannel", timeTickChannel),
-		zap.String("subscription", subName))
-
-	go s.handleDataNodeTimetickMsgstream(ctx, ttMsgStream)
-}
-
-func (s *Server) handleDataNodeTimetickMsgstream(ctx context.Context, ttMsgStream msgstream.MsgStream) {
-	var checker *timerecord.LongTermChecker
-	if enableTtChecker {
-		checker = timerecord.NewLongTermChecker(ctx, ttCheckerName, ttMaxInterval, ttCheckerWarnMsg)
-		checker.Start()
-		defer checker.Stop()
-	}
-
-	defer logutil.LogPanic()
-	defer s.serverLoopWg.Done()
-	defer func() {
-		// https://github.com/milvus-io/milvus/issues/15659
-		// msgstream service closed before datacoord quits
-		defer func() {
-			if x := recover(); x != nil {
-				log.Error("Failed to close ttMessage", zap.Any("recovered", x))
-			}
-		}()
-		ttMsgStream.Close()
-	}()
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info("DataNode timetick loop shutdown")
-			return
-		case msgPack, ok := <-ttMsgStream.Chan():
-			if !ok || msgPack == nil || len(msgPack.Msgs) == 0 {
-				log.Info("receive nil timetick msg and shutdown timetick channel")
-				return
-			}
-
-			for _, msg := range msgPack.Msgs {
-				ttMsg, ok := msg.(*msgstream.DataNodeTtMsg)
-				if !ok {
-					log.Warn("receive unexpected msg type from tt channel")
-					continue
-				}
-				if enableTtChecker {
-					checker.Check()
-				}
-
-				if err := s.handleTimetickMessage(ctx, ttMsg); err != nil {
-					log.Warn("failed to handle timetick message", zap.Error(err))
-					continue
-				}
-			}
-			s.helper.eventAfterHandleDataNodeTt()
-		}
+	if !(streamingutil.IsStreamingServiceEnabled() || paramtable.Get().DataNodeCfg.SkipBFStatsLoad.GetAsBool()) {
+		s.syncSegmentsScheduler.Start()
 	}
 }
 
-func (s *Server) handleTimetickMessage(ctx context.Context, ttMsg *msgstream.DataNodeTtMsg) error {
-	log := log.Ctx(ctx).WithRateGroup("dc.handleTimetick", 1, 60)
-	ch := ttMsg.GetChannelName()
-	ts := ttMsg.GetTimestamp()
-	physical, _ := tsoutil.ParseTS(ts)
-	if time.Since(physical).Minutes() > 1 {
-		// if lag behind, log every 1 mins about
-		log.RatedWarn(60.0, "time tick lag behind for more than 1 minutes", zap.String("channel", ch), zap.Time("timetick", physical))
-	}
-	// ignore report from a different node
-	if !s.cluster.channelManager.Match(ttMsg.GetBase().GetSourceID(), ch) {
-		log.Warn("node is not matched with channel", zap.String("channel", ch), zap.Int64("nodeID", ttMsg.GetBase().GetSourceID()))
-		return nil
-	}
+func (s *Server) startTaskScheduler() {
+	s.taskScheduler.Start()
+	s.jobManager.Start()
 
-	sub := tsoutil.SubByNow(ts)
-	pChannelName := funcutil.ToPhysicalChannel(ch)
-	metrics.DataCoordConsumeDataNodeTimeTickLag.
-		WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), pChannelName).
-		Set(float64(sub))
-
-	s.updateSegmentStatistics(ttMsg.GetSegmentsStats())
-
-	if err := s.segmentManager.ExpireAllocations(ch, ts); err != nil {
-		return fmt.Errorf("expire allocations: %w", err)
-	}
-
-	flushableIDs, err := s.segmentManager.GetFlushableSegments(ctx, ch, ts)
-	if err != nil {
-		return fmt.Errorf("get flushable segments: %w", err)
-	}
-	flushableSegments := s.getFlushableSegmentsInfo(flushableIDs)
-
-	if len(flushableSegments) == 0 {
-		return nil
-	}
-
-	log.Info("start flushing segments",
-		zap.Int64s("segment IDs", flushableIDs))
-	// update segment last update triggered time
-	// it's ok to fail flushing, since next timetick after duration will re-trigger
-	s.setLastFlushTime(flushableSegments)
-
-	finfo := make([]*datapb.SegmentInfo, 0, len(flushableSegments))
-	for _, info := range flushableSegments {
-		finfo = append(finfo, info.SegmentInfo)
-	}
-	err = s.cluster.Flush(s.ctx, ttMsg.GetBase().GetSourceID(), ch, finfo)
-	if err != nil {
-		log.Warn("failed to handle flush", zap.Any("source", ttMsg.GetBase().GetSourceID()), zap.Error(err))
-		return err
-	}
-
-	return nil
+	s.startIndexService(s.serverLoopCtx)
 }
 
 func (s *Server) updateSegmentStatistics(stats []*commonpb.SegmentStats) {
@@ -871,6 +876,7 @@ func (s *Server) handleSessionEvent(ctx context.Context, role string, event *ses
 	if event == nil {
 		return nil
 	}
+	log := log.Ctx(ctx)
 	switch role {
 	case typeutil.DataNodeRole:
 		info := &datapb.DataNodeInfo{
@@ -878,7 +884,7 @@ func (s *Server) handleSessionEvent(ctx context.Context, role string, event *ses
 			Version:  event.Session.ServerID,
 			Channels: []*datapb.ChannelStatus{},
 		}
-		node := &NodeInfo{
+		node := &session.NodeInfo{
 			NodeID:  event.Session.ServerID,
 			Address: event.Session.Address,
 		}
@@ -906,6 +912,13 @@ func (s *Server) handleSessionEvent(ctx context.Context, role string, event *ses
 				zap.Any("type", event.EventType))
 		}
 	case typeutil.IndexNodeRole:
+		if Params.DataCoordCfg.BindIndexNodeMode.GetAsBool() {
+			log.Info("receive indexnode session event, but adding indexnode by bind mode, skip it",
+				zap.String("address", event.Session.Address),
+				zap.Int64("serverID", event.Session.ServerID),
+				zap.String("event type", event.EventType.String()))
+			return nil
+		}
 		switch event.EventType {
 		case sessionutil.SessionAddEvent:
 			log.Info("received indexnode register",
@@ -970,7 +983,7 @@ func (s *Server) startFlushLoop(ctx context.Context) {
 				log.Info("flush successfully", zap.Any("segmentID", segmentID))
 				err := s.postFlush(ctx, segmentID)
 				if err != nil {
-					log.Warn("failed to do post flush", zap.Any("segmentID", segmentID), zap.Error(err))
+					log.Warn("failed to do post flush", zap.Int64("segmentID", segmentID), zap.Error(err))
 				}
 			}
 		}
@@ -982,6 +995,7 @@ func (s *Server) startFlushLoop(ctx context.Context) {
 // 2. notify RootCoord segment is flushed
 // 3. change segment state to `Flushed` in meta
 func (s *Server) postFlush(ctx context.Context, segmentID UniqueID) error {
+	log := log.Ctx(ctx)
 	segment := s.meta.GetHealthySegment(segmentID)
 	if segment == nil {
 		return merr.WrapErrSegmentNotFound(segmentID, "segment not found, might be a faked segment, ignore post flush")
@@ -991,7 +1005,10 @@ func (s *Server) postFlush(ctx context.Context, segmentID UniqueID) error {
 		log.Error("flush segment complete failed", zap.Error(err))
 		return err
 	}
-	s.buildIndexCh <- segmentID
+	select {
+	case getStatsTaskChSingleton() <- segmentID:
+	default:
+	}
 
 	insertFileNum := 0
 	for _, fieldBinlog := range segment.GetBinlogs() {
@@ -1046,16 +1063,33 @@ func (s *Server) Stop() error {
 	if !s.stateCode.CompareAndSwap(commonpb.StateCode_Healthy, commonpb.StateCode_Abnormal) {
 		return nil
 	}
-	logutil.Logger(s.ctx).Info("server shutdown")
-	s.cluster.Close()
+	logutil.Logger(s.ctx).Info("datacoord server shutdown")
 	s.garbageCollector.close()
+	logutil.Logger(s.ctx).Info("datacoord garbage collector stopped")
+
+	if s.streamingCoord != nil {
+		log.Info("StreamingCoord stoping...")
+		s.streamingCoord.Stop()
+		log.Info("StreamingCoord stopped")
+	}
+
 	s.stopServerLoop()
 
-	if Params.DataCoordCfg.EnableCompaction.GetAsBool() {
-		s.stopCompactionTrigger()
-		s.stopCompactionHandler()
-	}
-	s.indexBuilder.Stop()
+	s.importScheduler.Close()
+	s.importChecker.Close()
+	s.syncSegmentsScheduler.Stop()
+
+	s.stopCompaction()
+	logutil.Logger(s.ctx).Info("datacoord compaction stopped")
+
+	s.jobManager.Stop()
+	logutil.Logger(s.ctx).Info("datacoord statsJobManager stopped")
+
+	s.taskScheduler.Stop()
+	logutil.Logger(s.ctx).Info("datacoord index builder stopped")
+
+	s.cluster.Close()
+	logutil.Logger(s.ctx).Info("datacoord cluster stopped")
 
 	if s.session != nil {
 		s.session.Stop()
@@ -1065,6 +1099,9 @@ func (s *Server) Stop() error {
 		s.icSession.Stop()
 	}
 
+	s.stopServerLoop()
+	logutil.Logger(s.ctx).Info("datacoord serverloop stopped")
+	logutil.Logger(s.ctx).Warn("datacoord stop successful")
 	return nil
 }
 
@@ -1106,6 +1143,14 @@ func (s *Server) stopServerLoop() {
 // loadCollectionFromRootCoord communicates with RootCoord and asks for collection information.
 // collection information will be added to server meta info.
 func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID int64) error {
+	has, err := s.broker.HasCollection(ctx, collectionID)
+	if err != nil {
+		return err
+	}
+	if !has {
+		return merr.WrapErrCollectionNotFound(collectionID)
+	}
+
 	resp, err := s.broker.DescribeCollectionInternal(ctx, collectionID)
 	if err != nil {
 		return err
@@ -1127,6 +1172,9 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 		StartPositions: resp.GetStartPositions(),
 		Properties:     properties,
 		CreatedAt:      resp.GetCreatedTimestamp(),
+		DatabaseName:   resp.GetDbName(),
+		DatabaseID:     resp.GetDbId(),
+		VChannelNames:  resp.GetVirtualChannelNames(),
 	}
 	s.meta.AddCollection(collInfo)
 	return nil
@@ -1169,11 +1217,12 @@ func (s *Server) updateBalanceConfig() bool {
 
 	if len(sessions) == 0 {
 		// only balance channel when all data node's version > 2.3.0
-		Params.Save(Params.DataCoordCfg.AutoBalance.Key, "true")
+		Params.Reset(Params.DataCoordCfg.AutoBalance.Key)
 		log.Info("all old data node down, enable auto balance!")
 		return true
 	}
 
+	Params.Save(Params.DataCoordCfg.AutoBalance.Key, "false")
 	log.RatedDebug(10, "old data node exist", zap.Strings("sessions", lo.Keys(sessions)))
 	return false
 }

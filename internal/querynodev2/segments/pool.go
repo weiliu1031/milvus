@@ -17,12 +17,16 @@
 package segments
 
 import (
+	"context"
 	"math"
 	"runtime"
 	"sync"
 
 	"go.uber.org/atomic"
+	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/pkg/config"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/conc"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -33,26 +37,35 @@ var (
 	// and other operations (insert/delete/statistics/etc.)
 	// since in concurrent situation, there operation may block each other in high payload
 
-	sqp      atomic.Pointer[conc.Pool[any]]
-	sqOnce   sync.Once
-	dp       atomic.Pointer[conc.Pool[any]]
-	dynOnce  sync.Once
-	loadPool atomic.Pointer[conc.Pool[any]]
-	loadOnce sync.Once
+	sqp        atomic.Pointer[conc.Pool[any]]
+	sqOnce     sync.Once
+	dp         atomic.Pointer[conc.Pool[any]]
+	dynOnce    sync.Once
+	loadPool   atomic.Pointer[conc.Pool[any]]
+	loadOnce   sync.Once
+	warmupPool atomic.Pointer[conc.Pool[any]]
+	warmupOnce sync.Once
+
+	bfPool      atomic.Pointer[conc.Pool[any]]
+	bfApplyOnce sync.Once
 )
 
 // initSQPool initialize
 func initSQPool() {
 	sqOnce.Do(func() {
 		pt := paramtable.Get()
+		initPoolSize := int(math.Ceil(pt.QueryNodeCfg.MaxReadConcurrency.GetAsFloat() * pt.QueryNodeCfg.CGOPoolSizeRatio.GetAsFloat()))
 		pool := conc.NewPool[any](
-			int(math.Ceil(pt.QueryNodeCfg.MaxReadConcurrency.GetAsFloat()*pt.QueryNodeCfg.CGOPoolSizeRatio.GetAsFloat())),
-			conc.WithPreAlloc(true),
+			initPoolSize,
+			conc.WithPreAlloc(false), // pre alloc must be false to resize pool dynamically, use warmup to alloc worker here
 			conc.WithDisablePurge(true),
 		)
 		conc.WarmupPool(pool, runtime.LockOSThread)
-
 		sqp.Store(pool)
+
+		pt.Watch(pt.QueryNodeCfg.MaxReadConcurrency.Key, config.NewHandler("qn.sqpool.maxconc", ResizeSQPool))
+		pt.Watch(pt.QueryNodeCfg.CGOPoolSizeRatio.Key, config.NewHandler("qn.sqpool.cgopoolratio", ResizeSQPool))
+		log.Info("init SQPool done", zap.Int("size", initPoolSize))
 	})
 }
 
@@ -66,19 +79,55 @@ func initDynamicPool() {
 		)
 
 		dp.Store(pool)
+		log.Info("init dynamicPool done", zap.Int("size", hardware.GetCPUNum()))
 	})
 }
 
 func initLoadPool() {
 	loadOnce.Do(func() {
+		pt := paramtable.Get()
+		poolSize := hardware.GetCPUNum() * pt.CommonCfg.MiddlePriorityThreadCoreCoefficient.GetAsInt()
 		pool := conc.NewPool[any](
-			hardware.GetCPUNum()*paramtable.Get().CommonCfg.MiddlePriorityThreadCoreCoefficient.GetAsInt(),
+			poolSize,
 			conc.WithPreAlloc(false),
 			conc.WithDisablePurge(false),
 			conc.WithPreHandler(runtime.LockOSThread), // lock os thread for cgo thread disposal
 		)
 
 		loadPool.Store(pool)
+
+		pt.Watch(pt.CommonCfg.MiddlePriorityThreadCoreCoefficient.Key, config.NewHandler("qn.loadpool.middlepriority", ResizeLoadPool))
+		log.Info("init loadPool done", zap.Int("size", poolSize))
+	})
+}
+
+func initWarmupPool() {
+	warmupOnce.Do(func() {
+		pt := paramtable.Get()
+		poolSize := hardware.GetCPUNum() * pt.CommonCfg.LowPriorityThreadCoreCoefficient.GetAsInt()
+		pool := conc.NewPool[any](
+			poolSize,
+			conc.WithPreAlloc(false),
+			conc.WithDisablePurge(false),
+			conc.WithPreHandler(runtime.LockOSThread), // lock os thread for cgo thread disposal
+			conc.WithNonBlocking(true),                // make warming up non blocking
+		)
+
+		warmupPool.Store(pool)
+		pt.Watch(pt.CommonCfg.LowPriorityThreadCoreCoefficient.Key, config.NewHandler("qn.warmpool.lowpriority", ResizeWarmupPool))
+	})
+}
+
+func initBFApplyPool() {
+	bfApplyOnce.Do(func() {
+		pt := paramtable.Get()
+		poolSize := hardware.GetCPUNum() * pt.QueryNodeCfg.BloomFilterApplyParallelFactor.GetAsInt()
+		pool := conc.NewPool[any](
+			poolSize,
+		)
+
+		bfPool.Store(pool)
+		pt.Watch(pt.QueryNodeCfg.BloomFilterApplyParallelFactor.Key, config.NewHandler("qn.bfapply.parallel", ResizeBFApplyPool))
 	})
 }
 
@@ -97,4 +146,68 @@ func GetDynamicPool() *conc.Pool[any] {
 func GetLoadPool() *conc.Pool[any] {
 	initLoadPool()
 	return loadPool.Load()
+}
+
+func GetWarmupPool() *conc.Pool[any] {
+	initWarmupPool()
+	return warmupPool.Load()
+}
+
+func GetBFApplyPool() *conc.Pool[any] {
+	initBFApplyPool()
+	return bfPool.Load()
+}
+
+func ResizeSQPool(evt *config.Event) {
+	if evt.HasUpdated {
+		pt := paramtable.Get()
+		newSize := int(math.Ceil(pt.QueryNodeCfg.MaxReadConcurrency.GetAsFloat() * pt.QueryNodeCfg.CGOPoolSizeRatio.GetAsFloat()))
+		pool := GetSQPool()
+		resizePool(pool, newSize, "SQPool")
+		conc.WarmupPool(pool, runtime.LockOSThread)
+	}
+}
+
+func ResizeLoadPool(evt *config.Event) {
+	if evt.HasUpdated {
+		pt := paramtable.Get()
+		newSize := hardware.GetCPUNum() * pt.CommonCfg.MiddlePriorityThreadCoreCoefficient.GetAsInt()
+		resizePool(GetLoadPool(), newSize, "LoadPool")
+	}
+}
+
+func ResizeWarmupPool(evt *config.Event) {
+	if evt.HasUpdated {
+		pt := paramtable.Get()
+		newSize := hardware.GetCPUNum() * pt.CommonCfg.LowPriorityThreadCoreCoefficient.GetAsInt()
+		resizePool(GetWarmupPool(), newSize, "WarmupPool")
+	}
+}
+
+func ResizeBFApplyPool(evt *config.Event) {
+	if evt.HasUpdated {
+		pt := paramtable.Get()
+		newSize := hardware.GetCPUNum() * pt.QueryNodeCfg.BloomFilterApplyParallelFactor.GetAsInt()
+		resizePool(GetBFApplyPool(), newSize, "BFApplyPool")
+	}
+}
+
+func resizePool(pool *conc.Pool[any], newSize int, tag string) {
+	log := log.Ctx(context.Background()).
+		With(
+			zap.String("poolTag", tag),
+			zap.Int("newSize", newSize),
+		)
+
+	if newSize <= 0 {
+		log.Warn("cannot set pool size to non-positive value")
+		return
+	}
+
+	err := pool.Resize(newSize)
+	if err != nil {
+		log.Warn("failed to resize pool", zap.Error(err))
+		return
+	}
+	log.Info("pool resize successfully")
 }

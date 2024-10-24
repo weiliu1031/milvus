@@ -18,19 +18,27 @@ package datacoord
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/indexpb"
+	"github.com/milvus-io/milvus/internal/util/vecindexmgr"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 // Response response interface for verification
@@ -64,22 +72,23 @@ func VerifyResponse(response interface{}, err error) error {
 	}
 }
 
-func FilterInIndexedSegments(handler Handler, mt *meta, segments ...*SegmentInfo) []*SegmentInfo {
+func FilterInIndexedSegments(handler Handler, mt *meta, skipNoIndexCollection bool, segments ...*SegmentInfo) []*SegmentInfo {
 	if len(segments) == 0 {
 		return nil
 	}
 
-	segmentMap := make(map[int64]*SegmentInfo)
-	collectionSegments := make(map[int64][]int64)
-	// TODO(yah01): This can't handle the case of multiple vector fields exist,
-	// modify it if we support multiple vector fields.
-	vecFieldID := make(map[int64]int64)
-	for _, segment := range segments {
-		collectionID := segment.GetCollectionID()
-		segmentMap[segment.GetID()] = segment
-		collectionSegments[collectionID] = append(collectionSegments[collectionID], segment.GetID())
-	}
-	for collection := range collectionSegments {
+	collectionSegments := lo.GroupBy(segments, func(segment *SegmentInfo) int64 {
+		return segment.GetCollectionID()
+	})
+
+	ret := make([]*SegmentInfo, 0)
+	for collection, segmentList := range collectionSegments {
+		// No segments will be filtered if there are no indices in the collection.
+		if skipNoIndexCollection && !mt.indexMeta.HasIndex(collection) {
+			ret = append(ret, segmentList...)
+			continue
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 		coll, err := handler.GetCollection(ctx, collection)
 		cancel()
@@ -87,28 +96,35 @@ func FilterInIndexedSegments(handler Handler, mt *meta, segments ...*SegmentInfo
 			log.Warn("failed to get collection schema", zap.Error(err))
 			continue
 		}
+
+		// get vector field id
+		vecFieldIDs := make([]int64, 0)
 		for _, field := range coll.Schema.GetFields() {
-			if field.GetDataType() == schemapb.DataType_BinaryVector ||
-				field.GetDataType() == schemapb.DataType_FloatVector ||
-				field.GetDataType() == schemapb.DataType_Float16Vector {
-				vecFieldID[collection] = field.GetFieldID()
-				break
+			if typeutil.IsVectorType(field.GetDataType()) {
+				vecFieldIDs = append(vecFieldIDs, field.GetFieldID())
+			}
+		}
+		segmentIDs := lo.Map(segmentList, func(seg *SegmentInfo, _ int) UniqueID {
+			return seg.GetID()
+		})
+
+		// get indexed segments which finish build index on all vector field
+		indexed := mt.indexMeta.GetIndexedSegments(collection, segmentIDs, vecFieldIDs)
+		if len(indexed) > 0 {
+			indexedSet := typeutil.NewUniqueSet(indexed...)
+			for _, segment := range segmentList {
+				if !isFlushState(segment.GetState()) && segment.GetState() != commonpb.SegmentState_Dropped {
+					continue
+				}
+
+				if indexedSet.Contain(segment.GetID()) {
+					ret = append(ret, segment)
+				}
 			}
 		}
 	}
 
-	indexedSegments := make([]*SegmentInfo, 0)
-	for _, segment := range segments {
-		if !isFlushState(segment.GetState()) && segment.GetState() != commonpb.SegmentState_Dropped {
-			continue
-		}
-		segmentState := mt.GetSegmentIndexStateOnField(segment.GetCollectionID(), segment.GetID(), vecFieldID[segment.GetCollectionID()])
-		if segmentState.state == commonpb.IndexState_Finished {
-			indexedSegments = append(indexedSegments, segment)
-		}
-	}
-
-	return indexedSegments
+	return ret
 }
 
 func getZeroTime() time.Time {
@@ -131,10 +147,12 @@ func getCollectionTTL(properties map[string]string) (time.Duration, error) {
 }
 
 func UpdateCompactionSegmentSizeMetrics(segments []*datapb.CompactionSegment) {
+	var totalSize int64
 	for _, seg := range segments {
-		size := getCompactedSegmentSize(seg)
-		metrics.DataCoordCompactedSegmentSize.WithLabelValues().Observe(float64(size))
+		totalSize += getCompactedSegmentSize(seg)
 	}
+	// observe size in bytes
+	metrics.DataCoordCompactedSegmentSize.WithLabelValues().Observe(float64(totalSize))
 }
 
 func getCompactedSegmentSize(s *datapb.CompactionSegment) int64 {
@@ -142,19 +160,19 @@ func getCompactedSegmentSize(s *datapb.CompactionSegment) int64 {
 	if s != nil {
 		for _, binlogs := range s.GetInsertLogs() {
 			for _, l := range binlogs.GetBinlogs() {
-				segmentSize += l.GetLogSize()
+				segmentSize += l.GetMemorySize()
 			}
 		}
 
 		for _, deltaLogs := range s.GetDeltalogs() {
 			for _, l := range deltaLogs.GetBinlogs() {
-				segmentSize += l.GetLogSize()
+				segmentSize += l.GetMemorySize()
 			}
 		}
 
-		for _, statsLogs := range s.GetDeltalogs() {
+		for _, statsLogs := range s.GetField2StatslogPaths() {
 			for _, l := range statsLogs.GetBinlogs() {
-				segmentSize += l.GetLogSize()
+				segmentSize += l.GetMemorySize()
 			}
 		}
 	}
@@ -176,7 +194,7 @@ func getCollectionAutoCompactionEnabled(properties map[string]string) (bool, err
 	return Params.DataCoordCfg.EnableAutoCompaction.GetAsBool(), nil
 }
 
-func getIndexType(indexParams []*commonpb.KeyValuePair) string {
+func GetIndexType(indexParams []*commonpb.KeyValuePair) string {
 	for _, param := range indexParams {
 		if param.Key == common.IndexTypeKey {
 			return param.Value
@@ -185,8 +203,16 @@ func getIndexType(indexParams []*commonpb.KeyValuePair) string {
 	return invalidIndex
 }
 
-func isFlatIndex(indexType string) bool {
-	return indexType == flatIndex || indexType == binFlatIndex
+func isNoTrainIndex(indexType string) bool {
+	return vecindexmgr.GetVecIndexMgrInstance().IsNoTrainIndex(indexType)
+}
+
+func isOptionalScalarFieldSupported(indexType string) bool {
+	return vecindexmgr.GetVecIndexMgrInstance().IsMvSupported(indexType)
+}
+
+func isDiskANNIndex(indexType string) bool {
+	return vecindexmgr.GetVecIndexMgrInstance().IsDiskANN(indexType)
 }
 
 func parseBuildIDFromFilePath(key string) (UniqueID, error) {
@@ -222,8 +248,118 @@ func calculateL0SegmentSize(fields []*datapb.FieldBinlog) float64 {
 	size := int64(0)
 	for _, field := range fields {
 		for _, binlog := range field.GetBinlogs() {
-			size += binlog.GetLogSize()
+			size += binlog.GetMemorySize()
 		}
 	}
 	return float64(size)
+}
+
+func getCompactionMergeInfo(task *datapb.CompactionTask) *milvuspb.CompactionMergeInfo {
+	/*
+		segments := task.GetPlan().GetSegmentBinlogs()
+		var sources []int64
+		for _, s := range segments {
+			sources = append(sources, s.GetSegmentID())
+		}
+	*/
+	var target int64 = -1
+	if len(task.GetResultSegments()) > 0 {
+		target = task.GetResultSegments()[0]
+	}
+	return &milvuspb.CompactionMergeInfo{
+		Sources: task.GetInputSegments(),
+		Target:  target,
+	}
+}
+
+func getBinLogIDs(segment *SegmentInfo, fieldID int64) []int64 {
+	binlogIDs := make([]int64, 0)
+	for _, fieldBinLog := range segment.GetBinlogs() {
+		if fieldBinLog.GetFieldID() == fieldID {
+			for _, binLog := range fieldBinLog.GetBinlogs() {
+				binlogIDs = append(binlogIDs, binLog.GetLogID())
+			}
+			break
+		}
+	}
+	return binlogIDs
+}
+
+func CheckCheckPointsHealth(meta *meta) error {
+	for channel, cp := range meta.GetChannelCheckpoints() {
+		collectionID := funcutil.GetCollectionIDFromVChannel(channel)
+		if collectionID == -1 {
+			log.RatedWarn(60, "can't parse collection id from vchannel, skip check cp lag", zap.String("vchannel", channel))
+			continue
+		}
+		if meta.GetCollection(collectionID) == nil {
+			log.RatedWarn(60, "corresponding the collection doesn't exists, skip check cp lag", zap.String("vchannel", channel))
+			continue
+		}
+		ts, _ := tsoutil.ParseTS(cp.Timestamp)
+		lag := time.Since(ts)
+		if lag > paramtable.Get().DataCoordCfg.ChannelCheckpointMaxLag.GetAsDuration(time.Second) {
+			return merr.WrapErrChannelCPExceededMaxLag(channel, fmt.Sprintf("checkpoint lag: %f(min)", lag.Minutes()))
+		}
+	}
+	return nil
+}
+
+func CheckAllChannelsWatched(meta *meta, channelManager ChannelManager) error {
+	collIDs := meta.ListCollections()
+	for _, collID := range collIDs {
+		collInfo := meta.GetCollection(collID)
+		if collInfo == nil {
+			log.Warn("collection info is nil, skip it", zap.Int64("collectionID", collID))
+			continue
+		}
+
+		for _, channelName := range collInfo.VChannelNames {
+			_, err := channelManager.FindWatcher(channelName)
+			if err != nil {
+				log.Warn("find watcher for channel failed", zap.Int64("collectionID", collID),
+					zap.String("channelName", channelName), zap.Error(err))
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func createStorageConfig() *indexpb.StorageConfig {
+	var storageConfig *indexpb.StorageConfig
+
+	if Params.CommonCfg.StorageType.GetValue() == "local" {
+		storageConfig = &indexpb.StorageConfig{
+			RootPath:    Params.LocalStorageCfg.Path.GetValue(),
+			StorageType: Params.CommonCfg.StorageType.GetValue(),
+		}
+	} else {
+		storageConfig = &indexpb.StorageConfig{
+			Address:           Params.MinioCfg.Address.GetValue(),
+			AccessKeyID:       Params.MinioCfg.AccessKeyID.GetValue(),
+			SecretAccessKey:   Params.MinioCfg.SecretAccessKey.GetValue(),
+			UseSSL:            Params.MinioCfg.UseSSL.GetAsBool(),
+			SslCACert:         Params.MinioCfg.SslCACert.GetValue(),
+			BucketName:        Params.MinioCfg.BucketName.GetValue(),
+			RootPath:          Params.MinioCfg.RootPath.GetValue(),
+			UseIAM:            Params.MinioCfg.UseIAM.GetAsBool(),
+			IAMEndpoint:       Params.MinioCfg.IAMEndpoint.GetValue(),
+			StorageType:       Params.CommonCfg.StorageType.GetValue(),
+			Region:            Params.MinioCfg.Region.GetValue(),
+			UseVirtualHost:    Params.MinioCfg.UseVirtualHost.GetAsBool(),
+			CloudProvider:     Params.MinioCfg.CloudProvider.GetValue(),
+			RequestTimeoutMs:  Params.MinioCfg.RequestTimeoutMs.GetAsInt64(),
+			GcpCredentialJSON: Params.MinioCfg.GcpCredentialJSON.GetValue(),
+		}
+	}
+
+	return storageConfig
+}
+
+func getSortStatus(sorted bool) string {
+	if sorted {
+		return "sorted"
+	}
+	return "unsorted"
 }

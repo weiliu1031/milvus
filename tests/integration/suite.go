@@ -18,17 +18,29 @@ package integration
 
 import (
 	"context"
-	"math/rand"
+	"flag"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stretchr/testify/suite"
 	"go.etcd.io/etcd/server/v3/embed"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/internal/util/hookutil"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
+
+var caseTimeout time.Duration
+
+func init() {
+	flag.DurationVar(&caseTimeout, "caseTimeout", 10*time.Minute, "timeout duration for single case")
+}
 
 // EmbedEtcdSuite contains embed setup & teardown related logic
 type EmbedEtcdSuite struct {
@@ -42,18 +54,32 @@ func (s *EmbedEtcdSuite) SetupEmbedEtcd() error {
 		return err
 	}
 
-	s.EtcdServer = server
-	s.EtcdDir = folder
-
+	log.Info("wait for etcd server ready...")
+	select {
+	case <-server.Server.ReadyNotify():
+		s.EtcdServer = server
+		s.EtcdDir = folder
+		log.Info("etcd server ready")
+		return nil
+	case <-time.After(30 * time.Second):
+		server.Server.Stop() // trigger a shutdown
+		log.Fatal("Etcd server took too long to start!")
+	}
 	return nil
 }
 
 func (s *EmbedEtcdSuite) TearDownEmbedEtcd() {
+	defer os.RemoveAll(s.EtcdDir)
 	if s.EtcdServer != nil {
-		s.EtcdServer.Server.Stop()
-	}
-	if s.EtcdDir != "" {
-		os.RemoveAll(s.EtcdDir)
+		log.Info("start to stop etcd server")
+		s.EtcdServer.Close()
+		select {
+		case <-s.EtcdServer.Server.StopNotify():
+			log.Info("etcd server stopped")
+			return
+		case err := <-s.EtcdServer.Err():
+			log.Warn("etcd server has crashed", zap.Error(err))
+		}
 	}
 }
 
@@ -66,7 +92,6 @@ type MiniClusterSuite struct {
 }
 
 func (s *MiniClusterSuite) SetupSuite() {
-	rand.Seed(time.Now().UnixNano())
 	s.Require().NoError(s.SetupEmbedEtcd())
 }
 
@@ -75,6 +100,7 @@ func (s *MiniClusterSuite) TearDownSuite() {
 }
 
 func (s *MiniClusterSuite) SetupTest() {
+	log.SetLevel(zapcore.InfoLevel)
 	s.T().Log("Setup test...")
 	// setup mini cluster to use embed etcd
 	endpoints := etcd.GetEmbedEtcdEndpoints(s.EtcdServer)
@@ -84,7 +110,8 @@ func (s *MiniClusterSuite) SetupTest() {
 
 	params = paramtable.Get()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*180)
+	s.T().Log("Setup case timeout", caseTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), caseTimeout)
 	s.cancelFunc = cancel
 	c, err := StartMiniClusterV2(ctx, func(c *MiniClusterV2) {
 		// change config etcd endpoints
@@ -93,11 +120,45 @@ func (s *MiniClusterSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.Cluster = c
 
+	checkWg := sync.WaitGroup{}
+	checkWg.Add(1)
 	// start mini cluster
+	nodeIDCheckReport := func() {
+		defer checkWg.Done()
+		timeoutCtx, cancelFunc := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelFunc()
+
+		for {
+			select {
+			case <-timeoutCtx.Done():
+				s.Fail("node id check timeout")
+			case report := <-c.Extension.GetReportChan():
+				reportInfo := report.(map[string]any)
+				s.T().Log("node id report info: ", reportInfo)
+				s.Equal(hookutil.OpTypeNodeID, reportInfo[hookutil.OpTypeKey])
+				s.NotEqualValues(0, reportInfo[hookutil.NodeIDKey])
+				return
+			}
+		}
+	}
+	go nodeIDCheckReport()
 	s.Require().NoError(s.Cluster.Start())
+	checkWg.Wait()
 }
 
 func (s *MiniClusterSuite) TearDownTest() {
+	resp, err := s.Cluster.Proxy.ShowCollections(context.Background(), &milvuspb.ShowCollectionsRequest{
+		Type: milvuspb.ShowType_InMemory,
+	})
+	if err == nil {
+		for idx, collectionName := range resp.GetCollectionNames() {
+			if resp.GetInMemoryPercentages()[idx] == 100 || resp.GetQueryServiceAvailable()[idx] {
+				s.Cluster.Proxy.ReleaseCollection(context.Background(), &milvuspb.ReleaseCollectionRequest{
+					CollectionName: collectionName,
+				})
+			}
+		}
+	}
 	s.T().Log("Tear Down test...")
 	defer s.cancelFunc()
 	if s.Cluster != nil {

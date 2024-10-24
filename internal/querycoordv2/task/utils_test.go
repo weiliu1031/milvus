@@ -26,64 +26,12 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/common"
 )
 
 type UtilsSuite struct {
 	suite.Suite
-}
-
-func (s *UtilsSuite) TestGetMetricType() {
-	collection := int64(1)
-	schema := &schemapb.CollectionSchema{
-		Name: "TestGetMetricType",
-		Fields: []*schemapb.FieldSchema{
-			{FieldID: 100, Name: "vec", DataType: schemapb.DataType_FloatVector},
-		},
-	}
-	indexInfo := &indexpb.IndexInfo{
-		CollectionID: collection,
-		FieldID:      100,
-		IndexParams: []*commonpb.KeyValuePair{
-			{
-				Key:   common.MetricTypeKey,
-				Value: "L2",
-			},
-		},
-	}
-
-	indexInfo2 := &indexpb.IndexInfo{
-		CollectionID: collection,
-		FieldID:      100,
-	}
-
-	s.Run("test normal", func() {
-		metricType, err := getMetricType([]*indexpb.IndexInfo{indexInfo}, schema)
-		s.NoError(err)
-		s.Equal("L2", metricType)
-	})
-
-	s.Run("test get vec field failed", func() {
-		_, err := getMetricType([]*indexpb.IndexInfo{indexInfo}, &schemapb.CollectionSchema{
-			Name: "TestGetMetricType",
-		})
-		s.Error(err)
-	})
-	s.Run("test field id mismatch", func() {
-		_, err := getMetricType([]*indexpb.IndexInfo{indexInfo}, &schemapb.CollectionSchema{
-			Name: "TestGetMetricType",
-			Fields: []*schemapb.FieldSchema{
-				{FieldID: -1, Name: "vec", DataType: schemapb.DataType_FloatVector},
-			},
-		})
-		s.Error(err)
-	})
-	s.Run("test no metric type", func() {
-		_, err := getMetricType([]*indexpb.IndexInfo{indexInfo2}, schema)
-		s.Error(err)
-	})
 }
 
 func (s *UtilsSuite) TestPackLoadSegmentRequest() {
@@ -95,7 +43,7 @@ func (s *UtilsSuite) TestPackLoadSegmentRequest() {
 		time.Second,
 		nil,
 		1,
-		10,
+		newReplicaDefaultRG(10),
 		action,
 	)
 	s.NoError(err)
@@ -135,7 +83,9 @@ func (s *UtilsSuite) TestPackLoadSegmentRequest() {
 	s.Equal(task.ReplicaID(), req.ReplicaID)
 	s.Equal(action.Node(), req.GetDstNodeID())
 	for _, field := range req.GetSchema().GetFields() {
-		s.False(common.IsMmapEnabled(field.GetTypeParams()...))
+		mmapEnable, ok := common.IsMmapDataEnabled(field.GetTypeParams()...)
+		s.False(mmapEnable)
+		s.True(ok)
 	}
 }
 
@@ -148,7 +98,7 @@ func (s *UtilsSuite) TestPackLoadSegmentRequestMmap() {
 		time.Second,
 		nil,
 		1,
-		10,
+		newReplicaDefaultRG(10),
 		action,
 	)
 	s.NoError(err)
@@ -188,7 +138,9 @@ func (s *UtilsSuite) TestPackLoadSegmentRequestMmap() {
 	s.Equal(task.ReplicaID(), req.ReplicaID)
 	s.Equal(action.Node(), req.GetDstNodeID())
 	for _, field := range req.GetSchema().GetFields() {
-		s.True(common.IsMmapEnabled(field.GetTypeParams()...))
+		mmapEnable, ok := common.IsMmapDataEnabled(field.GetTypeParams()...)
+		s.True(mmapEnable)
+		s.True(ok)
 	}
 }
 

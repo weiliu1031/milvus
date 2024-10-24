@@ -27,6 +27,8 @@ enum class IndexConfigLevel {
     SYSTEM_ASSIGN = 3
 };
 
+// this is the config used for generating growing index or the temp sealed index
+// when the segment is sealed before the index is built.
 class VecIndexConfig {
     inline static const std::map<SegmentType, std::string> support_index_types =
         {{SegmentType::Growing, knowhere::IndexEnum::INDEX_FAISS_IVFFLAT_CC},
@@ -36,13 +38,14 @@ class VecIndexConfig {
         {knowhere::IndexEnum::INDEX_FAISS_IVFFLAT_CC, 0.1}};
 
     inline static const std::unordered_set<std::string> maintain_params = {
-        "radius", "range_filter"};
+        "radius", "range_filter", "drop_ratio_search"};
 
  public:
     VecIndexConfig(const int64_t max_index_row_count,
                    const FieldIndexMeta& index_meta_,
                    const SegcoreConfig& config,
-                   const SegmentType& segment_type);
+                   const SegmentType& segment_type,
+                   const bool is_sparse);
 
     int64_t
     GetBuildThreshold() const noexcept;
@@ -69,6 +72,8 @@ class VecIndexConfig {
     knowhere::IndexType index_type_;
 
     knowhere::MetricType metric_type_;
+
+    bool is_sparse_;
 
     knowhere::Json build_params_;
 

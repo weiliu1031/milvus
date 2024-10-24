@@ -17,6 +17,7 @@
 package observers
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -25,7 +26,6 @@ import (
 	"github.com/stretchr/testify/suite"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
@@ -35,6 +35,8 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/internal/util/proxyutil"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -54,19 +56,19 @@ type CollectionObserverSuite struct {
 	nodes         []int64
 
 	// Mocks
-	idAllocator func() (int64, error)
-	etcd        *clientv3.Client
-	kv          kv.MetaKv
-	store       metastore.QueryCoordCatalog
-	broker      *meta.MockBroker
-	cluster     *session.MockCluster
+	idAllocator  func() (int64, error)
+	etcd         *clientv3.Client
+	kv           kv.MetaKv
+	store        metastore.QueryCoordCatalog
+	broker       *meta.MockBroker
+	cluster      *session.MockCluster
+	proxyManager *proxyutil.MockProxyClientManager
 
 	// Dependencies
 	dist              *meta.DistributionManager
 	meta              *meta.Meta
 	targetMgr         *meta.TargetManager
 	targetObserver    *TargetObserver
-	leaderObserver    *LeaderObserver
 	checkerController *checkers.CheckerController
 
 	// Test object
@@ -162,6 +164,9 @@ func (suite *CollectionObserverSuite) SetupSuite() {
 		103: 2,
 	}
 	suite.nodes = []int64{1, 2, 3}
+
+	suite.proxyManager = proxyutil.NewMockProxyClientManager(suite.T())
+	suite.proxyManager.EXPECT().InvalidateCollectionMetaCache(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 }
 
 func (suite *CollectionObserverSuite) SetupTest() {
@@ -200,7 +205,6 @@ func (suite *CollectionObserverSuite) SetupTest() {
 	suite.checkerController = &checkers.CheckerController{}
 
 	mockCluster := session.NewMockCluster(suite.T())
-	suite.leaderObserver = NewLeaderObserver(suite.dist, suite.meta, suite.targetMgr, suite.broker, mockCluster, nodeMgr)
 	mockCluster.EXPECT().SyncDistribution(mock.Anything, mock.Anything, mock.Anything).Return(merr.Success(), nil).Maybe()
 
 	// Test object
@@ -209,22 +213,21 @@ func (suite *CollectionObserverSuite) SetupTest() {
 		suite.meta,
 		suite.targetMgr,
 		suite.targetObserver,
-		suite.leaderObserver,
 		suite.checkerController,
+		suite.proxyManager,
 	)
 
 	for _, collection := range suite.collections {
 		suite.broker.EXPECT().GetPartitions(mock.Anything, collection).Return(suite.partitions[collection], nil).Maybe()
 	}
 	suite.targetObserver.Start()
-	suite.leaderObserver.Start()
 	suite.ob.Start()
 	suite.loadAll()
 }
 
 func (suite *CollectionObserverSuite) TearDownTest() {
-	suite.targetObserver.Stop()
 	suite.ob.Stop()
+	suite.targetObserver.Stop()
 	suite.kv.Close()
 }
 
@@ -394,10 +397,10 @@ func (suite *CollectionObserverSuite) loadAll() {
 
 func (suite *CollectionObserverSuite) load(collection int64) {
 	// Mock meta data
-	replicas, err := suite.meta.ReplicaManager.Spawn(collection, suite.replicaNumber[collection], meta.DefaultResourceGroupName)
+	replicas, err := suite.meta.ReplicaManager.Spawn(collection, map[string]int{meta.DefaultResourceGroupName: int(suite.replicaNumber[collection])}, nil)
 	suite.NoError(err)
 	for _, replica := range replicas {
-		replica.AddNode(suite.nodes...)
+		replica.AddRWNode(suite.nodes...)
 	}
 	err = suite.meta.ReplicaManager.Put(replicas...)
 	suite.NoError(err)
@@ -445,6 +448,8 @@ func (suite *CollectionObserverSuite) load(collection int64) {
 
 	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collection).Return(dmChannels, allSegments, nil)
 	suite.targetMgr.UpdateCollectionNextTarget(collection)
+
+	suite.ob.LoadCollection(context.Background(), collection)
 }
 
 func TestCollectionObserver(t *testing.T) {

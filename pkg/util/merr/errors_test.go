@@ -85,6 +85,9 @@ func (s *ErrSuite) TestWrap() {
 	s.ErrorIs(WrapErrCollectionNotFound("test_collection", "failed to get collection"), ErrCollectionNotFound)
 	s.ErrorIs(WrapErrCollectionNotLoaded("test_collection", "failed to query"), ErrCollectionNotLoaded)
 	s.ErrorIs(WrapErrCollectionNotFullyLoaded("test_collection", "failed to query"), ErrCollectionNotFullyLoaded)
+	s.ErrorIs(WrapErrCollectionNotLoaded("test_collection", "failed to alter index %s", "hnsw"), ErrCollectionNotLoaded)
+	s.ErrorIs(WrapErrCollectionOnRecovering("test_collection", "channel lost %s", "dev"), ErrCollectionOnRecovering)
+	s.ErrorIs(WrapErrCollectionVectorClusteringKeyNotAllowed("test_collection", "field"), ErrCollectionVectorClusteringKeyNotAllowed)
 
 	// Partition related
 	s.ErrorIs(WrapErrPartitionNotFound("test_partition", "failed to get partition"), ErrPartitionNotFound)
@@ -93,6 +96,11 @@ func (s *ErrSuite) TestWrap() {
 
 	// ResourceGroup related
 	s.ErrorIs(WrapErrResourceGroupNotFound("test_ResourceGroup", "failed to get ResourceGroup"), ErrResourceGroupNotFound)
+	s.ErrorIs(WrapErrResourceGroupAlreadyExist("test_ResourceGroup", "failed to get ResourceGroup"), ErrResourceGroupAlreadyExist)
+	s.ErrorIs(WrapErrResourceGroupReachLimit("test_ResourceGroup", 1, "failed to get ResourceGroup"), ErrResourceGroupReachLimit)
+	s.ErrorIs(WrapErrResourceGroupIllegalConfig("test_ResourceGroup", nil, "failed to get ResourceGroup"), ErrResourceGroupIllegalConfig)
+	s.ErrorIs(WrapErrResourceGroupNodeNotEnough("test_ResourceGroup", 1, 2, "failed to get ResourceGroup"), ErrResourceGroupNodeNotEnough)
+	s.ErrorIs(WrapErrResourceGroupServiceAvailable("test_ResourceGroup", "failed to get ResourceGroup"), ErrResourceGroupServiceAvailable)
 
 	// Replica related
 	s.ErrorIs(WrapErrReplicaNotFound(1, "failed to get replica"), ErrReplicaNotFound)
@@ -119,14 +127,18 @@ func (s *ErrSuite) TestWrap() {
 	s.ErrorIs(WrapErrNodeNotFound(1, "failed to get node"), ErrNodeNotFound)
 	s.ErrorIs(WrapErrNodeOffline(1, "failed to access node"), ErrNodeOffline)
 	s.ErrorIs(WrapErrNodeLack(3, 1, "need more nodes"), ErrNodeLack)
+	s.ErrorIs(WrapErrNodeStateUnexpected(1, "Stopping", "failed to suspend node"), ErrNodeStateUnexpected)
 
 	// IO related
 	s.ErrorIs(WrapErrIoKeyNotFound("test_key", "failed to read"), ErrIoKeyNotFound)
 	s.ErrorIs(WrapErrIoFailed("test_key", os.ErrClosed), ErrIoFailed)
+	s.ErrorIs(WrapErrIoUnexpectEOF("test_key", os.ErrClosed), ErrIoUnexpectEOF)
 
 	// Parameter related
 	s.ErrorIs(WrapErrParameterInvalid(8, 1, "failed to create"), ErrParameterInvalid)
 	s.ErrorIs(WrapErrParameterInvalidRange(1, 1<<16, 0, "topk should be in range"), ErrParameterInvalid)
+	s.ErrorIs(WrapErrParameterMissing("alias_name", "no alias parameter"), ErrParameterMissing)
+	s.ErrorIs(WrapErrParameterTooLarge("unit test"), ErrParameterTooLarge)
 
 	// Metrics related
 	s.ErrorIs(WrapErrMetricNotFound("unknown", "failed to get metric"), ErrMetricNotFound)
@@ -138,6 +150,13 @@ func (s *ErrSuite) TestWrap() {
 
 	// field related
 	s.ErrorIs(WrapErrFieldNotFound("meta", "failed to get field"), ErrFieldNotFound)
+
+	// alias related
+	s.ErrorIs(WrapErrAliasNotFound("alias", "failed to get collection id"), ErrAliasNotFound)
+	s.ErrorIs(WrapErrCollectionIDOfAliasNotFound(1000, "failed to get collection id"), ErrCollectionIDOfAliasNotFound)
+
+	// Search/Query related
+	s.ErrorIs(WrapErrInconsistentRequery("unknown"), ErrInconsistentRequery)
 }
 
 func (s *ErrSuite) TestOldCode() {
@@ -149,7 +168,7 @@ func (s *ErrSuite) TestOldCode() {
 	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_MemoryQuotaExhausted), ErrServiceMemoryLimitExceeded)
 	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_DiskQuotaExhausted), ErrServiceDiskLimitExceeded)
 	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_RateLimit), ErrServiceRateLimit)
-	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_ForceDeny), ErrServiceForceDeny)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_ForceDeny), ErrServiceQuotaExceeded)
 	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_UnexpectedError), errUnexpected)
 }
 

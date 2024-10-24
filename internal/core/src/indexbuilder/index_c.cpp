@@ -15,7 +15,6 @@
 #include "fmt/core.h"
 #include "indexbuilder/type_c.h"
 #include "log/Log.h"
-#include "storage/options.h"
 
 #ifdef __linux__
 #include <malloc.h>
@@ -24,6 +23,9 @@
 #include "common/EasyAssert.h"
 #include "indexbuilder/VecIndexCreator.h"
 #include "indexbuilder/index_c.h"
+
+#include "index/TextMatchIndex.h"
+
 #include "indexbuilder/IndexFactory.h"
 #include "common/type_c.h"
 #include "storage/Types.h"
@@ -31,7 +33,6 @@
 #include "index/Utils.h"
 #include "pb/index_cgo_msg.pb.h"
 #include "storage/Util.h"
-#include "storage/space.h"
 #include "index/Meta.h"
 
 using namespace milvus;
@@ -72,6 +73,11 @@ CreateIndexV0(enum CDataType dtype,
         *res_index = index.release();
         status.error_code = Success;
         status.error_msg = "";
+    } catch (SegcoreError& e) {
+        auto status = CStatus();
+        status.error_code = e.get_error_code();
+        status.error_msg = strdup(e.what());
+        return status;
     } catch (std::exception& e) {
         status.error_code = UnexpectedError;
         status.error_msg = strdup(e.what());
@@ -79,32 +85,106 @@ CreateIndexV0(enum CDataType dtype,
     return status;
 }
 
+milvus::storage::StorageConfig
+get_storage_config(const milvus::proto::indexcgo::StorageConfig& config) {
+    auto storage_config = milvus::storage::StorageConfig();
+    storage_config.address = std::string(config.address());
+    storage_config.bucket_name = std::string(config.bucket_name());
+    storage_config.access_key_id = std::string(config.access_keyid());
+    storage_config.access_key_value = std::string(config.secret_access_key());
+    storage_config.root_path = std::string(config.root_path());
+    storage_config.storage_type = std::string(config.storage_type());
+    storage_config.cloud_provider = std::string(config.cloud_provider());
+    storage_config.iam_endpoint = std::string(config.iamendpoint());
+    storage_config.cloud_provider = std::string(config.cloud_provider());
+    storage_config.useSSL = config.usessl();
+    storage_config.sslCACert = config.sslcacert();
+    storage_config.useIAM = config.useiam();
+    storage_config.region = config.region();
+    storage_config.useVirtualHost = config.use_virtual_host();
+    storage_config.requestTimeoutMs = config.request_timeout_ms();
+    storage_config.gcp_credential_json =
+        std::string(config.gcpcredentialjson());
+    return storage_config;
+}
+
+milvus::OptFieldT
+get_opt_field(const ::google::protobuf::RepeatedPtrField<
+              milvus::proto::indexcgo::OptionalFieldInfo>& field_infos) {
+    milvus::OptFieldT opt_fields_map;
+    for (const auto& field_info : field_infos) {
+        auto field_id = field_info.fieldid();
+        if (opt_fields_map.find(field_id) == opt_fields_map.end()) {
+            opt_fields_map[field_id] = {
+                field_info.field_name(),
+                static_cast<milvus::DataType>(field_info.field_type()),
+                {}};
+        }
+        for (const auto& str : field_info.data_paths()) {
+            std::get<2>(opt_fields_map[field_id]).emplace_back(str);
+        }
+    }
+
+    return opt_fields_map;
+}
+
+milvus::Config
+get_config(std::unique_ptr<milvus::proto::indexcgo::BuildIndexInfo>& info) {
+    milvus::Config config;
+    for (auto i = 0; i < info->index_params().size(); ++i) {
+        const auto& param = info->index_params(i);
+        config[param.key()] = param.value();
+    }
+
+    for (auto i = 0; i < info->type_params().size(); ++i) {
+        const auto& param = info->type_params(i);
+        config[param.key()] = param.value();
+    }
+
+    config["insert_files"] = info->insert_files();
+    if (info->opt_fields().size()) {
+        config["opt_fields"] = get_opt_field(info->opt_fields());
+    }
+    if (info->partition_key_isolation()) {
+        config["partition_key_isolation"] = info->partition_key_isolation();
+    }
+
+    return config;
+}
+
 CStatus
-CreateIndex(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
+CreateIndex(CIndex* res_index,
+            const uint8_t* serialized_build_index_info,
+            const uint64_t len) {
     try {
-        auto build_index_info = (BuildIndexInfo*)c_build_index_info;
-        auto field_type = build_index_info->field_type;
+        auto build_index_info =
+            std::make_unique<milvus::proto::indexcgo::BuildIndexInfo>();
+        auto res =
+            build_index_info->ParseFromArray(serialized_build_index_info, len);
+        AssertInfo(res, "Unmarshall build index info failed");
+
+        auto field_type =
+            static_cast<DataType>(build_index_info->field_schema().data_type());
 
         milvus::index::CreateIndexInfo index_info;
-        index_info.field_type = build_index_info->field_type;
+        index_info.field_type = field_type;
 
-        auto& config = build_index_info->config;
-        config["insert_files"] = build_index_info->insert_files;
-
+        auto storage_config =
+            get_storage_config(build_index_info->storage_config());
+        auto config = get_config(build_index_info);
         // get index type
         auto index_type = milvus::index::GetValueFromConfig<std::string>(
             config, "index_type");
         AssertInfo(index_type.has_value(), "index type is empty");
         index_info.index_type = index_type.value();
 
-        auto engine_version = build_index_info->index_engine_version;
-
+        auto engine_version = build_index_info->current_index_version();
         index_info.index_engine_version = engine_version;
         config[milvus::index::INDEX_ENGINE_VERSION] =
             std::to_string(engine_version);
 
         // get metric type
-        if (milvus::datatype_is_vector(field_type)) {
+        if (milvus::IsVectorDataType(field_type)) {
             auto metric_type = milvus::index::GetValueFromConfig<std::string>(
                 config, "metric_type");
             AssertInfo(metric_type.has_value(), "metric type is empty");
@@ -113,29 +193,41 @@ CreateIndex(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
 
         // init file manager
         milvus::storage::FieldDataMeta field_meta{
-            build_index_info->collection_id,
-            build_index_info->partition_id,
-            build_index_info->segment_id,
-            build_index_info->field_id};
+            build_index_info->collectionid(),
+            build_index_info->partitionid(),
+            build_index_info->segmentid(),
+            build_index_info->field_schema().fieldid(),
+            build_index_info->field_schema()};
 
-        milvus::storage::IndexMeta index_meta{build_index_info->segment_id,
-                                              build_index_info->field_id,
-                                              build_index_info->index_build_id,
-                                              build_index_info->index_version};
-        auto chunk_manager = milvus::storage::CreateChunkManager(
-            build_index_info->storage_config);
+        milvus::storage::IndexMeta index_meta{
+            build_index_info->segmentid(),
+            build_index_info->field_schema().fieldid(),
+            build_index_info->buildid(),
+            build_index_info->index_version(),
+            "",
+            build_index_info->field_schema().name(),
+            field_type,
+            build_index_info->dim(),
+        };
+        auto chunk_manager =
+            milvus::storage::CreateChunkManager(storage_config);
 
         milvus::storage::FileManagerContext fileManagerContext(
             field_meta, index_meta, chunk_manager);
 
         auto index =
             milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
-                build_index_info->field_type, config, fileManagerContext);
+                field_type, config, fileManagerContext);
         index->Build();
         *res_index = index.release();
         auto status = CStatus();
         status.error_code = Success;
         status.error_msg = "";
+        return status;
+    } catch (SegcoreError& e) {
+        auto status = CStatus();
+        status.error_code = e.get_error_code();
+        status.error_msg = strdup(e.what());
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
@@ -146,85 +238,71 @@ CreateIndex(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
 }
 
 CStatus
-CreateIndexV2(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
+BuildTextIndex(CBinarySet* c_binary_set,
+               const uint8_t* serialized_build_index_info,
+               const uint64_t len) {
     try {
-        auto build_index_info = (BuildIndexInfo*)c_build_index_info;
-        auto field_type = build_index_info->field_type;
-        milvus::index::CreateIndexInfo index_info;
-        index_info.field_type = build_index_info->field_type;
+        auto build_index_info =
+            std::make_unique<milvus::proto::indexcgo::BuildIndexInfo>();
+        auto res =
+            build_index_info->ParseFromArray(serialized_build_index_info, len);
+        AssertInfo(res, "Unmarshall build index info failed");
 
-        auto& config = build_index_info->config;
-        // get index type
-        auto index_type = milvus::index::GetValueFromConfig<std::string>(
-            config, "index_type");
-        AssertInfo(index_type.has_value(), "index type is empty");
-        index_info.index_type = index_type.value();
+        auto field_type =
+            static_cast<DataType>(build_index_info->field_schema().data_type());
 
-        auto engine_version = build_index_info->index_engine_version;
-        index_info.index_engine_version = engine_version;
-        config[milvus::index::INDEX_ENGINE_VERSION] =
-            std::to_string(engine_version);
+        auto storage_config =
+            get_storage_config(build_index_info->storage_config());
+        auto config = get_config(build_index_info);
 
-        // get metric type
-        if (milvus::datatype_is_vector(field_type)) {
-            auto metric_type = milvus::index::GetValueFromConfig<std::string>(
-                config, "metric_type");
-            AssertInfo(metric_type.has_value(), "metric type is empty");
-            index_info.metric_type = metric_type.value();
-        }
-
+        // init file manager
         milvus::storage::FieldDataMeta field_meta{
-            build_index_info->collection_id,
-            build_index_info->partition_id,
-            build_index_info->segment_id,
-            build_index_info->field_id};
+            build_index_info->collectionid(),
+            build_index_info->partitionid(),
+            build_index_info->segmentid(),
+            build_index_info->field_schema().fieldid(),
+            build_index_info->field_schema()};
+
         milvus::storage::IndexMeta index_meta{
-            build_index_info->segment_id,
-            build_index_info->field_id,
-            build_index_info->index_build_id,
-            build_index_info->index_version,
-            build_index_info->field_name,
+            build_index_info->segmentid(),
+            build_index_info->field_schema().fieldid(),
+            build_index_info->buildid(),
+            build_index_info->index_version(),
             "",
-            build_index_info->field_type,
-            build_index_info->dim,
+            build_index_info->field_schema().name(),
+            field_type,
+            build_index_info->dim(),
         };
+        auto chunk_manager =
+            milvus::storage::CreateChunkManager(storage_config);
 
-        auto store_space = milvus_storage::Space::Open(
-            build_index_info->data_store_path,
-            milvus_storage::Options{nullptr,
-                                    build_index_info->data_store_version});
-        AssertInfo(store_space.ok() && store_space.has_value(),
-                   fmt::format("create space failed: {}",
-                               store_space.status().ToString()));
-
-        auto index_space = milvus_storage::Space::Open(
-            build_index_info->index_store_path,
-            milvus_storage::Options{.schema = store_space.value()->schema()});
-        AssertInfo(index_space.ok() && index_space.has_value(),
-                   fmt::format("create space failed: {}",
-                               index_space.status().ToString()));
-
-        LOG_SEGCORE_INFO_ << "init space success";
-        auto chunk_manager = milvus::storage::CreateChunkManager(
-            build_index_info->storage_config);
         milvus::storage::FileManagerContext fileManagerContext(
-            field_meta,
-            index_meta,
-            chunk_manager,
-            std::move(index_space.value()));
+            field_meta, index_meta, chunk_manager);
 
-        auto index =
-            milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
-                build_index_info->field_type,
-                build_index_info->field_name,
-                config,
-                fileManagerContext,
-                std::move(store_space.value()));
-        index->BuildV2();
-        *res_index = index.release();
-        return milvus::SuccessCStatus();
+        auto field_schema =
+            FieldMeta::ParseFrom(build_index_info->field_schema());
+        auto index = std::make_unique<index::TextMatchIndex>(
+            fileManagerContext,
+            "milvus_tokenizer",
+            field_schema.get_tokenizer_params());
+        index->Build(config);
+        auto binary =
+            std::make_unique<knowhere::BinarySet>(index->Upload(config));
+        *c_binary_set = binary.release();
+        auto status = CStatus();
+        status.error_code = Success;
+        status.error_msg = "";
+        return status;
+    } catch (SegcoreError& e) {
+        auto status = CStatus();
+        status.error_code = e.get_error_code();
+        status.error_msg = strdup(e.what());
+        return status;
     } catch (std::exception& e) {
-        return milvus::FailureCStatus(&e);
+        auto status = CStatus();
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+        return status;
     }
 }
 
@@ -271,6 +349,58 @@ BuildFloatVecIndex(CIndex index,
 }
 
 CStatus
+BuildFloat16VecIndex(CIndex index,
+                     int64_t float16_value_num,
+                     const uint8_t* vectors) {
+    auto status = CStatus();
+    try {
+        AssertInfo(
+            index,
+            "failed to build float16 vector index, passed index was null");
+        auto real_index =
+            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
+        auto cIndex =
+            dynamic_cast<milvus::indexbuilder::VecIndexCreator*>(real_index);
+        auto dim = cIndex->dim();
+        auto row_nums = float16_value_num / dim / 2;
+        auto ds = knowhere::GenDataSet(row_nums, dim, vectors);
+        cIndex->Build(ds);
+        status.error_code = Success;
+        status.error_msg = "";
+    } catch (std::exception& e) {
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+    }
+    return status;
+}
+
+CStatus
+BuildBFloat16VecIndex(CIndex index,
+                      int64_t bfloat16_value_num,
+                      const uint8_t* vectors) {
+    auto status = CStatus();
+    try {
+        AssertInfo(
+            index,
+            "failed to build bfloat16 vector index, passed index was null");
+        auto real_index =
+            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
+        auto cIndex =
+            dynamic_cast<milvus::indexbuilder::VecIndexCreator*>(real_index);
+        auto dim = cIndex->dim();
+        auto row_nums = bfloat16_value_num / dim / 2;
+        auto ds = knowhere::GenDataSet(row_nums, dim, vectors);
+        cIndex->Build(ds);
+        status.error_code = Success;
+        status.error_msg = "";
+    } catch (std::exception& e) {
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+    }
+    return status;
+}
+
+CStatus
 BuildBinaryVecIndex(CIndex index, int64_t data_size, const uint8_t* vectors) {
     auto status = CStatus();
     try {
@@ -284,6 +414,32 @@ BuildBinaryVecIndex(CIndex index, int64_t data_size, const uint8_t* vectors) {
         auto dim = cIndex->dim();
         auto row_nums = (data_size * 8) / dim;
         auto ds = knowhere::GenDataSet(row_nums, dim, vectors);
+        cIndex->Build(ds);
+        status.error_code = Success;
+        status.error_msg = "";
+    } catch (std::exception& e) {
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+    }
+    return status;
+}
+
+CStatus
+BuildSparseFloatVecIndex(CIndex index,
+                         int64_t row_num,
+                         int64_t dim,
+                         const uint8_t* vectors) {
+    auto status = CStatus();
+    try {
+        AssertInfo(
+            index,
+            "failed to build sparse float vector index, passed index was null");
+        auto real_index =
+            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
+        auto cIndex =
+            dynamic_cast<milvus::indexbuilder::VecIndexCreator*>(real_index);
+        auto ds = knowhere::GenDataSet(row_num, dim, vectors);
+        ds->SetIsSparse(true);
         cIndex->Build(ds);
         status.error_code = Success;
         status.error_msg = "";
@@ -404,10 +560,13 @@ NewBuildIndexInfo(CBuildIndexInfo* c_build_index_info,
         storage_config.cloud_provider =
             std::string(c_storage_config.cloud_provider);
         storage_config.useSSL = c_storage_config.useSSL;
+        storage_config.sslCACert = c_storage_config.sslCACert;
         storage_config.useIAM = c_storage_config.useIAM;
         storage_config.region = c_storage_config.region;
         storage_config.useVirtualHost = c_storage_config.useVirtualHost;
         storage_config.requestTimeoutMs = c_storage_config.requestTimeoutMs;
+        storage_config.gcp_credential_json =
+            std::string(c_storage_config.gcp_credential_json);
 
         *c_build_index_info = build_index_info.release();
         auto status = CStatus();
@@ -638,24 +797,22 @@ SerializeIndexAndUpLoad(CIndex index, CBinarySet* c_binary_set) {
 }
 
 CStatus
-SerializeIndexAndUpLoadV2(CIndex index, CBinarySet* c_binary_set) {
-    auto status = CStatus();
+AppendOptionalFieldDataPath(CBuildIndexInfo c_build_index_info,
+                            const int64_t field_id,
+                            const char* field_name,
+                            const int32_t field_type,
+                            const char* c_file_path) {
     try {
-        AssertInfo(
-            index,
-            "failed to serialize index to binary set, passed index was null");
-
-        auto real_index =
-            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
-
-        auto binary =
-            std::make_unique<knowhere::BinarySet>(real_index->UploadV2());
-        *c_binary_set = binary.release();
-        status.error_code = Success;
-        status.error_msg = "";
+        auto build_index_info = (BuildIndexInfo*)c_build_index_info;
+        std::string field_name_str(field_name);
+        auto& opt_fields_map = build_index_info->opt_fields;
+        if (opt_fields_map.find(field_id) == opt_fields_map.end()) {
+            opt_fields_map[field_id] = {
+                field_name, static_cast<milvus::DataType>(field_type), {}};
+        }
+        std::get<2>(opt_fields_map[field_id]).emplace_back(c_file_path);
+        return CStatus{Success, ""};
     } catch (std::exception& e) {
-        status.error_code = UnexpectedError;
-        status.error_msg = strdup(e.what());
+        return milvus::FailureCStatus(&e);
     }
-    return status;
 }

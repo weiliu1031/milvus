@@ -31,7 +31,7 @@ const auto schema = []() {
     return schema;
 }();
 
-const auto plan = [] {
+const auto search_plan = [] {
     const char* raw_plan = R"(vector_anns: <
                                 field_id: 100
                                 query_info: <
@@ -50,8 +50,8 @@ const auto plan = [] {
 auto ph_group = [] {
     auto num_queries = 10;
     auto ph_group_raw = CreatePlaceholderGroup(num_queries, dim, 1024);
-    auto ph_group =
-        ParsePlaceholderGroup(plan.get(), ph_group_raw.SerializeAsString());
+    auto ph_group = ParsePlaceholderGroup(search_plan.get(),
+                                          ph_group_raw.SerializeAsString());
     return ph_group;
 }();
 
@@ -90,8 +90,10 @@ Search_GrowingIndex(benchmark::State& state) {
                     dataset_.timestamps_.data(),
                     dataset_.raw_);
 
+    Timestamp ts = 10000000;
+
     for (auto _ : state) {
-        auto qr = segment->Search(plan.get(), ph_group.get());
+        auto qr = segment->Search(search_plan.get(), ph_group.get(), ts);
     }
 }
 
@@ -112,19 +114,23 @@ Search_Sealed(benchmark::State& state) {
     if (choice == 0) {
         // Brute Force
     } else if (choice == 1) {
-        // ivf
+        // hnsw
         auto vec = dataset_.get_col<float>(milvus::FieldId(100));
-        auto indexing = GenVecIndexing(N, dim, vec.data());
+        auto indexing =
+            GenVecIndexing(N, dim, vec.data(), knowhere::IndexEnum::INDEX_HNSW);
         segcore::LoadIndexInfo info;
         info.index = std::move(indexing);
         info.field_id = (*schema)[FieldName("fakevec")].get_id().get();
-        info.index_params["index_type"] = "IVF";
+        info.index_params["index_type"] = "HNSW";
         info.index_params["metric_type"] = knowhere::metric::L2;
         segment->DropFieldData(milvus::FieldId(100));
         segment->LoadIndex(info);
     }
+
+    Timestamp ts = 10000000;
+
     for (auto _ : state) {
-        auto qr = segment->Search(plan.get(), ph_group.get());
+        auto qr = segment->Search(search_plan.get(), ph_group.get(), ts);
     }
 }
 

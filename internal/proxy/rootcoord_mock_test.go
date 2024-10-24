@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -51,6 +51,7 @@ type collectionMeta struct {
 	physicalChannelNames []string
 	createdTimestamp     uint64
 	createdUtcTimestamp  uint64
+	properties           []*commonpb.KeyValuePair
 }
 
 type partitionMeta struct {
@@ -190,6 +191,75 @@ func (coord *RootCoordMock) AlterAlias(ctx context.Context, req *milvuspb.AlterA
 	return merr.Success(), nil
 }
 
+func (coord *RootCoordMock) DescribeAlias(ctx context.Context, req *milvuspb.DescribeAliasRequest, opts ...grpc.CallOption) (*milvuspb.DescribeAliasResponse, error) {
+	code := coord.state.Load().(commonpb.StateCode)
+	if code != commonpb.StateCode_Healthy {
+		return &milvuspb.DescribeAliasResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    fmt.Sprintf("state code = %s", commonpb.StateCode_name[int32(code)]),
+			},
+		}, nil
+	}
+	coord.collMtx.Lock()
+	defer coord.collMtx.Unlock()
+
+	collID, exist := coord.collAlias2ID[req.Alias]
+	if !exist {
+		return &milvuspb.DescribeAliasResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_CollectionNotExists,
+				Reason:    fmt.Sprintf("alias does not exist, alias = %s", req.Alias),
+			},
+		}, nil
+	}
+	collMeta, exist := coord.collID2Meta[collID]
+	if !exist {
+		return &milvuspb.DescribeAliasResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_CollectionNotExists,
+				Reason:    fmt.Sprintf("alias exist but not find related collection, alias = %s collID = %d", req.Alias, collID),
+			},
+		}, nil
+	}
+	return &milvuspb.DescribeAliasResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		DbName:     req.GetDbName(),
+		Alias:      req.GetAlias(),
+		Collection: collMeta.name,
+	}, nil
+}
+
+func (coord *RootCoordMock) ListAliases(ctx context.Context, req *milvuspb.ListAliasesRequest, opts ...grpc.CallOption) (*milvuspb.ListAliasesResponse, error) {
+	code := coord.state.Load().(commonpb.StateCode)
+	if code != commonpb.StateCode_Healthy {
+		return &milvuspb.ListAliasesResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    fmt.Sprintf("state code = %s", commonpb.StateCode_name[int32(code)]),
+			},
+		}, nil
+	}
+	coord.collMtx.Lock()
+	defer coord.collMtx.Unlock()
+
+	var aliases []string
+	for alias := range coord.collAlias2ID {
+		aliases = append(aliases, alias)
+	}
+	return &milvuspb.ListAliasesResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		DbName:  req.GetDbName(),
+		Aliases: aliases,
+	}, nil
+}
+
 func (coord *RootCoordMock) updateState(state commonpb.StateCode) {
 	coord.state.Store(state)
 }
@@ -316,6 +386,7 @@ func (coord *RootCoordMock) CreateCollection(ctx context.Context, req *milvuspb.
 		physicalChannelNames: physicalChannelNames,
 		createdTimestamp:     ts,
 		createdUtcTimestamp:  ts,
+		properties:           req.GetProperties(),
 	}
 
 	coord.partitionMtx.Lock()
@@ -459,6 +530,7 @@ func (coord *RootCoordMock) DescribeCollection(ctx context.Context, req *milvusp
 		PhysicalChannelNames: meta.physicalChannelNames,
 		CreatedTimestamp:     meta.createdUtcTimestamp,
 		CreatedUtcTimestamp:  meta.createdUtcTimestamp,
+		Properties:           meta.properties,
 	}, nil
 }
 
@@ -818,6 +890,10 @@ func (coord *RootCoordMock) ShowSegments(ctx context.Context, req *milvuspb.Show
 	}, nil
 }
 
+func (coord *RootCoordMock) GetPChannelInfo(ctx context.Context, in *rootcoordpb.GetPChannelInfoRequest, opts ...grpc.CallOption) (*rootcoordpb.GetPChannelInfoResponse, error) {
+	panic("implement me")
+}
+
 func (coord *RootCoordMock) DescribeSegments(ctx context.Context, req *rootcoordpb.DescribeSegmentsRequest, opts ...grpc.CallOption) (*rootcoordpb.DescribeSegmentsResponse, error) {
 	panic("implement me")
 }
@@ -943,17 +1019,6 @@ func (coord *RootCoordMock) ListImportTasks(ctx context.Context, in *milvuspb.Li
 	}, nil
 }
 
-func (coord *RootCoordMock) ReportImport(ctx context.Context, req *rootcoordpb.ImportResult, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	code := coord.state.Load().(commonpb.StateCode)
-	if code != commonpb.StateCode_Healthy {
-		return &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    fmt.Sprintf("state code = %s", commonpb.StateCode_name[int32(code)]),
-		}, nil
-	}
-	return merr.Success(), nil
-}
-
 func NewRootCoordMock(opts ...RootCoordMockOption) *RootCoordMock {
 	rc := &RootCoordMock{
 		nodeID:            typeutil.UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt()),
@@ -1050,6 +1115,22 @@ func (coord *RootCoordMock) CheckHealth(ctx context.Context, req *milvuspb.Check
 }
 
 func (coord *RootCoordMock) RenameCollection(ctx context.Context, req *milvuspb.RenameCollectionRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
+func (coord *RootCoordMock) DescribeDatabase(ctx context.Context, in *rootcoordpb.DescribeDatabaseRequest, opts ...grpc.CallOption) (*rootcoordpb.DescribeDatabaseResponse, error) {
+	return &rootcoordpb.DescribeDatabaseResponse{}, nil
+}
+
+func (coord *RootCoordMock) AlterDatabase(ctx context.Context, in *rootcoordpb.AlterDatabaseRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
+func (coord *RootCoordMock) BackupRBAC(ctx context.Context, in *milvuspb.BackupRBACMetaRequest, opts ...grpc.CallOption) (*milvuspb.BackupRBACMetaResponse, error) {
+	return &milvuspb.BackupRBACMetaResponse{}, nil
+}
+
+func (coord *RootCoordMock) RestoreRBAC(ctx context.Context, in *milvuspb.RestoreRBACMetaRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return &commonpb.Status{}, nil
 }
 

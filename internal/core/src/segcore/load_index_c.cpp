@@ -13,6 +13,8 @@
 
 #include "common/FieldMeta.h"
 #include "common/EasyAssert.h"
+#include "common/Types.h"
+#include "common/type_c.h"
 #include "index/Index.h"
 #include "index/IndexFactory.h"
 #include "index/Meta.h"
@@ -23,6 +25,15 @@
 #include "storage/Util.h"
 #include "storage/RemoteChunkManagerSingleton.h"
 #include "storage/LocalChunkManagerSingleton.h"
+#include "pb/cgo_msg.pb.h"
+#include "knowhere/index/index_static.h"
+#include "knowhere/comp/knowhere_check.h"
+
+bool
+IsLoadWithDisk(const char* index_type, int index_engine_version) {
+    return knowhere::UseDiskLoad(index_type, index_engine_version) ||
+           strcmp(index_type, milvus::index::INVERTED_INDEX_TYPE) == 0;
+}
 
 CStatus
 NewLoadIndexInfo(CLoadIndexInfo* c_load_index_info) {
@@ -195,29 +206,71 @@ appendScalarIndex(CLoadIndexInfo c_load_index_info, CBinarySet c_binary_set) {
     }
 }
 
+LoadResourceRequest
+EstimateLoadIndexResource(CLoadIndexInfo c_load_index_info) {
+    try {
+        auto load_index_info =
+            (milvus::segcore::LoadIndexInfo*)c_load_index_info;
+        auto field_type = load_index_info->field_type;
+        auto& index_params = load_index_info->index_params;
+        bool find_index_type =
+            index_params.count("index_type") > 0 ? true : false;
+        AssertInfo(find_index_type == true,
+                   "Can't find index type in index_params");
+
+        LoadResourceRequest request =
+            milvus::index::IndexFactory::GetInstance().IndexLoadResource(
+                field_type,
+                load_index_info->index_engine_version,
+                load_index_info->index_size,
+                index_params,
+                load_index_info->enable_mmap);
+        return request;
+    } catch (std::exception& e) {
+        PanicInfo(milvus::UnexpectedError,
+                  fmt::format("failed to estimate index load resource, "
+                              "encounter exception : {}",
+                              e.what()));
+        return LoadResourceRequest{0, 0, 0, 0, false};
+    }
+}
+
 CStatus
 AppendIndex(CLoadIndexInfo c_load_index_info, CBinarySet c_binary_set) {
     auto load_index_info = (milvus::segcore::LoadIndexInfo*)c_load_index_info;
     auto field_type = load_index_info->field_type;
-    if (milvus::datatype_is_vector(field_type)) {
+    if (milvus::IsVectorDataType(field_type)) {
         return appendVecIndex(c_load_index_info, c_binary_set);
     }
     return appendScalarIndex(c_load_index_info, c_binary_set);
 }
 
 CStatus
-AppendIndexV2(CLoadIndexInfo c_load_index_info) {
+AppendIndexV2(CTraceContext c_trace, CLoadIndexInfo c_load_index_info) {
     try {
         auto load_index_info =
-            (milvus::segcore::LoadIndexInfo*)c_load_index_info;
+            static_cast<milvus::segcore::LoadIndexInfo*>(c_load_index_info);
         auto& index_params = load_index_info->index_params;
         auto field_type = load_index_info->field_type;
-
         auto engine_version = load_index_info->index_engine_version;
 
         milvus::index::CreateIndexInfo index_info;
         index_info.field_type = load_index_info->field_type;
         index_info.index_engine_version = engine_version;
+
+        auto ctx = milvus::tracer::TraceContext{
+            c_trace.traceID, c_trace.spanID, c_trace.traceFlags};
+        auto span = milvus::tracer::StartSpan("SegCoreLoadIndex", &ctx);
+        milvus::tracer::SetRootSpan(span);
+
+        LOG_INFO(
+            "[collection={}][segment={}][field={}][enable_mmap={}] load index "
+            "{}",
+            load_index_info->collection_id,
+            load_index_info->segment_id,
+            load_index_info->field_id,
+            load_index_info->enable_mmap,
+            load_index_info->index_id);
 
         // get index type
         AssertInfo(index_params.find("index_type") != index_params.end(),
@@ -225,7 +278,7 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
         index_info.index_type = index_params.at("index_type");
 
         // get metric type
-        if (milvus::datatype_is_vector(field_type)) {
+        if (milvus::IsVectorDataType(field_type)) {
             AssertInfo(index_params.find("metric_type") != index_params.end(),
                        "metric type is empty for vector index");
             index_info.metric_type = index_params.at("metric_type");
@@ -236,7 +289,8 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
             load_index_info->collection_id,
             load_index_info->partition_id,
             load_index_info->segment_id,
-            load_index_info->field_id};
+            load_index_info->field_id,
+            load_index_info->schema};
         milvus::storage::IndexMeta index_meta{load_index_info->segment_id,
                                               load_index_info->field_id,
                                               load_index_info->index_build_id,
@@ -247,7 +301,7 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
 
         auto config = milvus::index::ParseConfigFromIndexParams(
             load_index_info->index_params);
-        config["index_files"] = load_index_info->index_files;
+        config[milvus::index::INDEX_FILES] = load_index_info->index_files;
 
         milvus::storage::FileManagerContext fileManagerContext(
             field_meta, index_meta, remote_chunk_manager);
@@ -261,86 +315,29 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
                        "mmap directory path is empty");
             auto filepath =
                 std::filesystem::path(load_index_info->mmap_dir_path) /
+                "index_files" / std::to_string(load_index_info->index_id) /
                 std::to_string(load_index_info->segment_id) /
-                std::to_string(load_index_info->field_id) /
-                std::to_string(load_index_info->index_id);
+                std::to_string(load_index_info->field_id);
 
-            config[kMmapFilepath] = filepath.string();
+            config[milvus::index::ENABLE_MMAP] = "true";
+            config[milvus::index::MMAP_FILE_PATH] = filepath.string();
         }
 
-        load_index_info->index->Load(config);
-        auto status = CStatus();
-        status.error_code = milvus::Success;
-        status.error_msg = "";
-        return status;
-    } catch (std::exception& e) {
-        auto status = CStatus();
-        status.error_code = milvus::UnexpectedError;
-        status.error_msg = strdup(e.what());
-        return status;
-    }
-}
+        LOG_DEBUG("load index with configs: {}", config.dump());
+        load_index_info->index->Load(ctx, config);
 
-CStatus
-AppendIndexV3(CLoadIndexInfo c_load_index_info) {
-    try {
-        auto load_index_info =
-            (milvus::segcore::LoadIndexInfo*)c_load_index_info;
-        auto& index_params = load_index_info->index_params;
-        auto field_type = load_index_info->field_type;
+        span->End();
+        milvus::tracer::CloseRootSpan();
 
-        milvus::index::CreateIndexInfo index_info;
-        index_info.field_type = load_index_info->field_type;
-
-        // get index type
-        AssertInfo(index_params.find("index_type") != index_params.end(),
-                   "index type is empty");
-        index_info.index_type = index_params.at("index_type");
-
-        // get metric type
-        if (milvus::datatype_is_vector(field_type)) {
-            AssertInfo(index_params.find("metric_type") != index_params.end(),
-                       "metric type is empty for vector index");
-            index_info.metric_type = index_params.at("metric_type");
-        }
-
-        milvus::storage::FieldDataMeta field_meta{
+        LOG_INFO(
+            "[collection={}][segment={}][field={}][enable_mmap={}] load index "
+            "{} done",
             load_index_info->collection_id,
-            load_index_info->partition_id,
             load_index_info->segment_id,
-            load_index_info->field_id};
-        milvus::storage::IndexMeta index_meta{load_index_info->segment_id,
-                                              load_index_info->field_id,
-                                              load_index_info->index_build_id,
-                                              load_index_info->index_version};
-        auto config = milvus::index::ParseConfigFromIndexParams(
-            load_index_info->index_params);
+            load_index_info->field_id,
+            load_index_info->enable_mmap,
+            load_index_info->index_id);
 
-        auto res = milvus_storage::Space::Open(
-            load_index_info->uri,
-            milvus_storage::Options{nullptr,
-                                    load_index_info->index_store_version});
-        AssertInfo(res.ok(), "init space failed");
-        std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
-
-        milvus::storage::FileManagerContext fileManagerContext(
-            field_meta, index_meta, nullptr, space);
-        load_index_info->index =
-            milvus::index::IndexFactory::GetInstance().CreateIndex(
-                index_info, fileManagerContext, space);
-
-        if (!load_index_info->mmap_dir_path.empty() &&
-            load_index_info->index->IsMmapSupported()) {
-            auto filepath =
-                std::filesystem::path(load_index_info->mmap_dir_path) /
-                std::to_string(load_index_info->segment_id) /
-                std::to_string(load_index_info->field_id) /
-                std::to_string(load_index_info->index_id);
-
-            config[kMmapFilepath] = filepath.string();
-        }
-
-        load_index_info->index->LoadV2(config);
         auto status = CStatus();
         status.error_code = milvus::Success;
         status.error_msg = "";
@@ -352,6 +349,7 @@ AppendIndexV3(CLoadIndexInfo c_load_index_info) {
         return status;
     }
 }
+
 CStatus
 AppendIndexFilePath(CLoadIndexInfo c_load_index_info, const char* c_file_path) {
     try {
@@ -448,4 +446,52 @@ AppendStorageInfo(CLoadIndexInfo c_load_index_info,
     auto load_index_info = (milvus::segcore::LoadIndexInfo*)c_load_index_info;
     load_index_info->uri = uri;
     load_index_info->index_store_version = version;
+}
+
+CStatus
+FinishLoadIndexInfo(CLoadIndexInfo c_load_index_info,
+                    const uint8_t* serialized_load_index_info,
+                    const uint64_t len) {
+    try {
+        auto info_proto = std::make_unique<milvus::proto::cgo::LoadIndexInfo>();
+        info_proto->ParseFromArray(serialized_load_index_info, len);
+        auto load_index_info =
+            static_cast<milvus::segcore::LoadIndexInfo*>(c_load_index_info);
+        // TODO: keep this since LoadIndexInfo is used by SegmentSealed.
+        {
+            load_index_info->collection_id = info_proto->collectionid();
+            load_index_info->partition_id = info_proto->partitionid();
+            load_index_info->segment_id = info_proto->segmentid();
+            load_index_info->field_id = info_proto->field().fieldid();
+            load_index_info->field_type =
+                static_cast<milvus::DataType>(info_proto->field().data_type());
+            load_index_info->enable_mmap = info_proto->enable_mmap();
+            load_index_info->mmap_dir_path = info_proto->mmap_dir_path();
+            load_index_info->index_id = info_proto->indexid();
+            load_index_info->index_build_id = info_proto->index_buildid();
+            load_index_info->index_version = info_proto->index_version();
+            for (const auto& [k, v] : info_proto->index_params()) {
+                load_index_info->index_params[k] = v;
+            }
+            load_index_info->index_files.assign(
+                info_proto->index_files().begin(),
+                info_proto->index_files().end());
+            load_index_info->uri = info_proto->uri();
+            load_index_info->index_store_version =
+                info_proto->index_store_version();
+            load_index_info->index_engine_version =
+                info_proto->index_engine_version();
+            load_index_info->schema = info_proto->field();
+            load_index_info->index_size = info_proto->index_file_size();
+        }
+        auto status = CStatus();
+        status.error_code = milvus::Success;
+        status.error_msg = "";
+        return status;
+    } catch (std::exception& e) {
+        auto status = CStatus();
+        status.error_code = milvus::UnexpectedError;
+        status.error_msg = strdup(e.what());
+        return status;
+    }
 }

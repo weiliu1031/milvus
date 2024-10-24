@@ -6,9 +6,10 @@ import (
 	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
 
-	smsgstream "github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -39,7 +40,7 @@ type DefaultFactory struct {
 func NewDefaultFactory(standAlone bool) *DefaultFactory {
 	return &DefaultFactory{
 		standAlone:       standAlone,
-		msgStreamFactory: smsgstream.NewRocksmqFactory("/tmp/milvus/rocksmq/", &paramtable.Get().ServiceParam),
+		msgStreamFactory: msgstream.NewRocksmqFactory("/tmp/milvus/rocksmq/", &paramtable.Get().ServiceParam),
 		chunkManagerFactory: storage.NewChunkManagerFactory("local",
 			storage.RootPath("/tmp/milvus")),
 	}
@@ -49,7 +50,7 @@ func NewDefaultFactory(standAlone bool) *DefaultFactory {
 func MockDefaultFactory(standAlone bool, params *paramtable.ComponentParam) *DefaultFactory {
 	return &DefaultFactory{
 		standAlone:          standAlone,
-		msgStreamFactory:    smsgstream.NewRocksmqFactory("/tmp/milvus/rocksmq/", &paramtable.Get().ServiceParam),
+		msgStreamFactory:    msgstream.NewRocksmqFactory("/tmp/milvus/rocksmq/", &paramtable.Get().ServiceParam),
 		chunkManagerFactory: storage.NewChunkManagerFactoryWithParam(params),
 	}
 }
@@ -81,13 +82,14 @@ func (f *DefaultFactory) Init(params *paramtable.ComponentParam) {
 
 func (f *DefaultFactory) initMQ(standalone bool, params *paramtable.ComponentParam) error {
 	mqType := mustSelectMQType(standalone, params.MQCfg.Type.GetValue(), mqEnable{params.RocksmqEnable(), params.NatsmqEnable(), params.PulsarEnable(), params.KafkaEnable()})
+	metrics.RegisterMQType(mqType)
 	log.Info("try to init mq", zap.Bool("standalone", standalone), zap.String("mqType", mqType))
 
 	switch mqType {
 	case mqTypeNatsmq:
 		f.msgStreamFactory = msgstream.NewNatsmqFactory()
 	case mqTypeRocksmq:
-		f.msgStreamFactory = smsgstream.NewRocksmqFactory(params.RocksmqCfg.Path.GetValue(), &params.ServiceParam)
+		f.msgStreamFactory = msgstream.NewRocksmqFactory(params.RocksmqCfg.Path.GetValue(), &params.ServiceParam)
 	case mqTypePulsar:
 		f.msgStreamFactory = msgstream.NewPmsFactory(&params.ServiceParam)
 	case mqTypeKafka:
@@ -154,4 +156,21 @@ type Factory interface {
 	msgstream.Factory
 	Init(p *paramtable.ComponentParam)
 	NewPersistentStorageChunkManager(ctx context.Context) (storage.ChunkManager, error)
+}
+
+func HealthCheck(mqType string) *common.MQClusterStatus {
+	clusterStatus := &common.MQClusterStatus{MqType: mqType}
+	switch mqType {
+	case mqTypeNatsmq:
+		// TODO: implement health check for nats mq
+		clusterStatus.Health = true
+	case mqTypeRocksmq:
+		// TODO: implement health checker for rocks mq
+		clusterStatus.Health = true
+	case mqTypePulsar:
+		msgstream.PulsarHealthCheck(clusterStatus)
+	case mqTypeKafka:
+		msgstream.KafkaHealthCheck(clusterStatus)
+	}
+	return clusterStatus
 }

@@ -19,18 +19,18 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <future>
 
-#include "storage/FieldData.h"
+#include "common/FieldData.h"
+#include "common/LoadInfo.h"
+#include "knowhere/comp/index_param.h"
+#include "parquet/schema.h"
 #include "storage/PayloadStream.h"
 #include "storage/FileManager.h"
 #include "storage/BinlogReader.h"
 #include "storage/ChunkManager.h"
 #include "storage/DataCodec.h"
-#include "knowhere/comp/index_param.h"
-#include "parquet/schema.h"
-#include "common/LoadInfo.h"
 #include "storage/Types.h"
-#include "storage/space.h"
 
 namespace milvus::storage {
 
@@ -57,10 +57,10 @@ std::shared_ptr<arrow::ArrayBuilder>
 CreateArrowBuilder(DataType data_type, int dim);
 
 std::shared_ptr<arrow::Schema>
-CreateArrowSchema(DataType data_type);
+CreateArrowSchema(DataType data_type, bool nullable);
 
 std::shared_ptr<arrow::Schema>
-CreateArrowSchema(DataType data_type, int dim);
+CreateArrowSchema(DataType data_type, int dim, bool nullable);
 
 int
 GetDimensionFromFileMetaData(const parquet::ColumnDescriptor* schema,
@@ -74,7 +74,23 @@ std::string
 GetIndexPathPrefixWithBuildID(ChunkManagerPtr cm, int64_t build_id);
 
 std::string
+GenIndexPathIdentifier(int64_t build_id, int64_t index_version);
+
+std::string
+GenTextIndexPathIdentifier(int64_t build_id,
+                           int64_t index_version,
+                           int64_t segment_id,
+                           int64_t field_id);
+
+std::string
 GenIndexPathPrefix(ChunkManagerPtr cm, int64_t build_id, int64_t index_version);
+
+std::string
+GenTextIndexPathPrefix(ChunkManagerPtr cm,
+                       int64_t build_id,
+                       int64_t index_version,
+                       int64_t segment_id,
+                       int64_t field_id);
 
 std::string
 GenFieldRawDataPathPrefix(ChunkManagerPtr cm,
@@ -86,11 +102,8 @@ GetSegmentRawDataPathPrefix(ChunkManagerPtr cm, int64_t segment_id);
 
 std::unique_ptr<DataCodec>
 DownloadAndDecodeRemoteFile(ChunkManager* chunk_manager,
-                            const std::string& file);
-
-std::unique_ptr<DataCodec>
-DownloadAndDecodeRemoteFileV2(std::shared_ptr<milvus_storage::Space> space,
-                              const std::string& file);
+                            const std::string& file,
+                            bool is_field_data = true);
 
 std::pair<std::string, size_t>
 EncodeAndUploadIndexSlice(ChunkManager* chunk_manager,
@@ -101,26 +114,15 @@ EncodeAndUploadIndexSlice(ChunkManager* chunk_manager,
                           std::string object_key);
 
 std::pair<std::string, size_t>
-EncodeAndUploadIndexSlice2(std::shared_ptr<milvus_storage::Space> space,
-                           uint8_t* buf,
-                           int64_t batch_size,
-                           IndexMeta index_meta,
-                           FieldDataMeta field_meta,
-                           std::string object_key);
-std::pair<std::string, size_t>
 EncodeAndUploadFieldSlice(ChunkManager* chunk_manager,
-                          uint8_t* buf,
+                          void* buf,
                           int64_t element_count,
                           FieldDataMeta field_data_meta,
                           const FieldMeta& field_meta,
                           std::string object_key);
 
-std::vector<FieldDataPtr>
+std::vector<std::future<std::unique_ptr<DataCodec>>>
 GetObjectData(ChunkManager* remote_chunk_manager,
-              const std::vector<std::string>& remote_files);
-
-std::vector<FieldDataPtr>
-GetObjectData(std::shared_ptr<milvus_storage::Space> space,
               const std::vector<std::string>& remote_files);
 
 std::map<std::string, int64_t>
@@ -131,13 +133,6 @@ PutIndexData(ChunkManager* remote_chunk_manager,
              FieldDataMeta& field_meta,
              IndexMeta& index_meta);
 
-std::map<std::string, int64_t>
-PutIndexData(std::shared_ptr<milvus_storage::Space> space,
-             const std::vector<const uint8_t*>& data_slices,
-             const std::vector<int64_t>& slice_sizes,
-             const std::vector<std::string>& slice_names,
-             FieldDataMeta& field_meta,
-             IndexMeta& index_meta);
 int64_t
 GetTotalNumRowsForFieldDatas(const std::vector<FieldDataPtr>& field_datas);
 
@@ -155,16 +150,17 @@ CreateChunkManager(const StorageConfig& storage_config);
 
 FieldDataPtr
 CreateFieldData(const DataType& type,
+                bool nullable = false,
                 int64_t dim = 1,
                 int64_t total_num_rows = 0);
 
 int64_t
 GetByteSizeOfFieldDatas(const std::vector<FieldDataPtr>& field_datas);
 
-std::vector<storage::FieldDataPtr>
-CollectFieldDataChannel(storage::FieldDataChannelPtr& channel);
+std::vector<FieldDataPtr>
+CollectFieldDataChannel(FieldDataChannelPtr& channel);
 
-storage::FieldDataPtr
-MergeFieldData(std::vector<storage::FieldDataPtr>& data_array);
+FieldDataPtr
+MergeFieldData(std::vector<FieldDataPtr>& data_array);
 
 }  // namespace milvus::storage

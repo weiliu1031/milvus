@@ -17,9 +17,12 @@
 package http
 
 import (
+	"embed"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/http/healthz"
 	"github.com/milvus-io/milvus/pkg/eventlog"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/expr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -39,6 +43,19 @@ const (
 var (
 	metricsServer *http.ServeMux
 	server        *http.Server
+)
+
+// Embedding all static files of webui folder to binary
+//
+//go:embed webui
+var staticFiles embed.FS
+
+// Provide alias for native http package
+// avoiding import alias when using http package
+
+type (
+	ResponseWriter = http.ResponseWriter
+	Request        = http.Request
 )
 
 type Handler struct {
@@ -61,6 +78,72 @@ func registerDefaults() {
 	Register(&Handler{
 		Path:    EventLogRouterPath,
 		Handler: eventlog.Handler(),
+	})
+	Register(&Handler{
+		Path: ExprPath,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			code := req.URL.Query().Get("code")
+			auth := req.URL.Query().Get("auth")
+			output, err := expr.Exec(code, auth)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(fmt.Sprintf(`{"msg": "failed to execute expression, %s"}`, err.Error())))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			resp := make(map[string]string)
+			resp["output"] = output
+			json.NewEncoder(w).Encode(resp)
+		}),
+	})
+	Register(&Handler{
+		Path:    StaticPath,
+		Handler: GetStaticHandler(),
+	})
+}
+
+func RegisterStopComponent(triggerComponentStop func(role string) error) {
+	// register restful api to trigger stop
+	Register(&Handler{
+		Path: RouteTriggerStopPath,
+		HandlerFunc: func(w http.ResponseWriter, req *http.Request) {
+			role := req.URL.Query().Get("role")
+			log.Info("start to trigger component stop", zap.String("role", role))
+			if err := triggerComponentStop(role); err != nil {
+				log.Warn("failed to trigger component stop", zap.Error(err))
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(fmt.Sprintf(`{"msg": "failed to trigger component stop, %s"}`, err.Error())))
+				return
+			}
+			log.Info("finish to trigger component stop", zap.String("role", role))
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"msg": "OK"}`))
+		},
+	})
+}
+
+func RegisterCheckComponentReady(checkActive func(role string) error) {
+	// register restful api to check component ready
+	Register(&Handler{
+		Path: RouteCheckComponentReady,
+		HandlerFunc: func(w http.ResponseWriter, req *http.Request) {
+			role := req.URL.Query().Get("role")
+			log.Info("start to check component ready", zap.String("role", role))
+			if err := checkActive(role); err != nil {
+				log.Warn("failed to check component ready", zap.Error(err))
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(fmt.Sprintf(`{"msg": "failed to to check component ready, %s"}`, err.Error())))
+				return
+			}
+			log.Info("finish to check component ready", zap.String("role", role))
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"msg": "OK"}`))
+		},
+	})
+	Register(&Handler{
+		Path:    RouteWebUI,
+		Handler: http.FileServer(http.FS(staticFiles)),
 	})
 }
 
@@ -87,6 +170,10 @@ func ServeHTTP() {
 		bindAddr := getHTTPAddr()
 		log.Info("management listen", zap.String("addr", bindAddr))
 		server = &http.Server{Handler: metricsServer, Addr: bindAddr, ReadTimeout: 10 * time.Second}
+		// enable mutex && block profile, sampling rate 10%
+		runtime.SetMutexProfileFraction(10)
+		runtime.SetBlockProfileRate(10)
+
 		if err := server.ListenAndServe(); err != nil {
 			log.Error("handle metrics failed", zap.Error(err))
 		}

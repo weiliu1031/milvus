@@ -108,23 +108,26 @@ func Test_NewClient(t *testing.T) {
 		r20, err := client.SearchSegments(ctx, nil)
 		retCheck(retNotNil, r20, err)
 
+		r21, err := client.DeleteBatch(ctx, nil)
+		retCheck(retNotNil, r21, err)
+
 		// stream rpc
 		client, err := client.QueryStream(ctx, nil)
 		retCheck(retNotNil, client, err)
 	}
 
-	client.grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
 		GetGrpcClientErr: errors.New("dummy"),
 	}
 
 	newFunc1 := func(cc *grpc.ClientConn) querypb.QueryNodeClient {
 		return &mock.GrpcQueryNodeClient{Err: nil}
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc1)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc1)
 
 	checkFunc(false)
 
-	client.grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
 		GetGrpcClientErr: nil,
 	}
 
@@ -132,26 +135,26 @@ func Test_NewClient(t *testing.T) {
 		return &mock.GrpcQueryNodeClient{Err: errors.New("dummy")}
 	}
 
-	client.grpcClient.SetNewGrpcClientFunc(newFunc2)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc2)
 
 	checkFunc(false)
 
-	client.grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
 		GetGrpcClientErr: nil,
 	}
 
 	newFunc3 := func(cc *grpc.ClientConn) querypb.QueryNodeClient {
 		return &mock.GrpcQueryNodeClient{Err: nil}
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc3)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc3)
 
 	checkFunc(true)
 
 	// ctx canceled
-	client.grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
 		GetGrpcClientErr: nil,
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc1)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc1)
 	cancel() // make context canceled
 	checkFunc(false)
 

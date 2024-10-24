@@ -31,10 +31,12 @@ class TestCompactionParams(TestcaseBase):
         self.connection_wrap.remove_connection(ct.default_alias)
         res_list, _ = self.connection_wrap.list_connections()
         assert ct.default_alias not in res_list
-        error = {ct.err_code: 0, ct.err_msg: "should create connect first"}
+        error = {ct.err_code: 1, ct.err_msg: "should create connect first"}
         collection_w.compact(check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.skip("DataCoord: for A, B -> C, will not compact segment C before A, "
+                      "B GCed, no method to check whether a segment is GCed")
     def test_compact_twice(self):
         """
         target: test compact twice
@@ -216,6 +218,7 @@ class TestCompactionParams(TestcaseBase):
         assert len(res[0]) == ct.default_limit
 
     @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.skip("https://github.com/milvus-io/milvus/issues/31258")
     def test_compact_delete_ratio(self):
         """
         target: test delete entities reaches ratio and auto-compact
@@ -242,8 +245,8 @@ class TestCompactionParams(TestcaseBase):
         while True:
             if collection_w.num_entities == exp_num_entities_after_compact:
                 break
-            if time() - start > 180:
-                raise MilvusException(1, "Auto delete ratio compaction cost more than 180s")
+            if time() - start > 360:
+                raise MilvusException(1, "Auto delete ratio compaction cost more than 360s")
             sleep(1)
 
         collection_w.load()

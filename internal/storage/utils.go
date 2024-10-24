@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -27,8 +28,9 @@ import (
 	"strconv"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
+	"github.com/samber/lo"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -37,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -161,7 +164,7 @@ func TransferColumnBasedInsertDataToRowBased(data *InsertData) (
 	}
 
 	tss := data.Data[common.TimeStampField].(*Int64FieldData)
-	rowIds := data.Data[common.RowIDField].(*Int64FieldData)
+	rowIDs := data.Data[common.RowIDField].(*Int64FieldData)
 
 	ls := fieldDataList{}
 	for fieldID := range data.Data {
@@ -173,8 +176,8 @@ func TransferColumnBasedInsertDataToRowBased(data *InsertData) (
 		ls.datas = append(ls.datas, data.Data[fieldID])
 	}
 
-	// checkNumRows(tss, rowIds, ls.datas...) // don't work
-	all := []FieldData{tss, rowIds}
+	// checkNumRows(tss, rowIDs, ls.datas...) // don't work
+	all := []FieldData{tss, rowIDs}
 	all = append(all, ls.datas...)
 	if !checkNumRows(all...) {
 		return nil, nil, nil,
@@ -207,7 +210,7 @@ func TransferColumnBasedInsertDataToRowBased(data *InsertData) (
 		utss[i] = uint64(tss.Data[i])
 	}
 
-	return utss, rowIds.Data, rows, nil
+	return utss, rowIDs.Data, rows, nil
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -270,6 +273,16 @@ func readFloat16Vectors(blobReaders []io.Reader, dim int) []byte {
 	for _, r := range blobReaders {
 		v := make([]byte, dim*2)
 		ReadBinary(r, &v, schemapb.DataType_Float16Vector)
+		ret = append(ret, v...)
+	}
+	return ret
+}
+
+func readBFloat16Vectors(blobReaders []io.Reader, dim int) []byte {
+	ret := make([]byte, 0)
+	for _, r := range blobReaders {
+		v := make([]byte, dim*2)
+		ReadBinary(r, &v, schemapb.DataType_BFloat16Vector)
 		ret = append(ret, v...)
 	}
 	return ret
@@ -345,7 +358,7 @@ func readDoubleArray(blobReaders []io.Reader) []float64 {
 	return ret
 }
 
-func RowBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemapb.CollectionSchema) (idata *InsertData, err error) {
+func RowBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemapb.CollectionSchema, skipFunction bool) (idata *InsertData, err error) {
 	blobReaders := make([]io.Reader, 0)
 	for _, blob := range msg.RowData {
 		blobReaders = append(blobReaders, bytes.NewReader(blob.GetValue()))
@@ -358,6 +371,10 @@ func RowBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemap
 	}
 
 	for _, field := range collSchema.Fields {
+		if skipFunction && field.GetIsFunctionOutput() {
+			continue
+		}
+
 		switch field.DataType {
 		case schemapb.DataType_FloatVector:
 			dim, err := GetDimFromParams(field.TypeParams)
@@ -385,6 +402,19 @@ func RowBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemap
 				Dim:  dim,
 			}
 
+		case schemapb.DataType_BFloat16Vector:
+			dim, err := GetDimFromParams(field.TypeParams)
+			if err != nil {
+				log.Error("failed to get dim", zap.Error(err))
+				return nil, err
+			}
+
+			vecs := readBFloat16Vectors(blobReaders, dim)
+			idata.Data[field.FieldID] = &BFloat16VectorFieldData{
+				Data: vecs,
+				Dim:  dim,
+			}
+
 		case schemapb.DataType_BinaryVector:
 			var dim int
 			dim, err := GetDimFromParams(field.TypeParams)
@@ -398,6 +428,8 @@ func RowBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemap
 				Data: vecs,
 				Dim:  dim,
 			}
+		case schemapb.DataType_SparseFloatVector:
+			return nil, fmt.Errorf("Sparse Float Vector is not supported in row based data")
 
 		case schemapb.DataType_Bool:
 			idata.Data[field.FieldID] = &BoolFieldData{
@@ -451,6 +483,15 @@ func RowBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemap
 	return idata, nil
 }
 
+// ColumnBasedInsertMsgToInsertData converts an InsertMsg msg into InsertData based
+// on provided CollectionSchema collSchema.
+//
+// This function checks whether all fields are provided in the collSchema.Fields and not function output.
+// If any field is missing in the msg, an error will be returned.
+//
+// This funcion also checks the length of each column. All columns shall have the same length.
+// Also, the InsertData.Infos shall have BlobInfo with this length returned.
+// When the length is not aligned, an error will be returned.
 func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *schemapb.CollectionSchema) (idata *InsertData, err error) {
 	srcFields := make(map[FieldID]*schemapb.FieldData)
 	for _, field := range msg.FieldsData {
@@ -459,11 +500,18 @@ func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *sche
 
 	idata = &InsertData{
 		Data: make(map[FieldID]FieldData),
-		// TODO: handle Infos.
-		Infos: nil,
 	}
-
+	length := 0
 	for _, field := range collSchema.Fields {
+		if field.GetIsFunctionOutput() {
+			continue
+		}
+
+		srcField, ok := srcFields[field.GetFieldID()]
+		if !ok && field.GetFieldID() >= common.StartOfUserFieldID {
+			return nil, merr.WrapErrFieldNotFound(field.GetFieldID(), fmt.Sprintf("field %s not found when converting insert msg to insert data", field.GetName()))
+		}
+		var fieldData FieldData
 		switch field.DataType {
 		case schemapb.DataType_FloatVector:
 			dim, err := GetDimFromParams(field.TypeParams)
@@ -472,15 +520,11 @@ func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *sche
 				return nil, err
 			}
 
-			srcData := srcFields[field.FieldID].GetVectors().GetFloatVector().GetData()
-
-			fieldData := &FloatVectorFieldData{
-				Data: make([]float32, 0, len(srcData)),
+			srcData := srcField.GetVectors().GetFloatVector().GetData()
+			fieldData = &FloatVectorFieldData{
+				Data: lo.Map(srcData, func(v float32, _ int) float32 { return v }),
 				Dim:  dim,
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_BinaryVector:
 			dim, err := GetDimFromParams(field.TypeParams)
@@ -489,15 +533,12 @@ func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *sche
 				return nil, err
 			}
 
-			srcData := srcFields[field.FieldID].GetVectors().GetBinaryVector()
+			srcData := srcField.GetVectors().GetBinaryVector()
 
-			fieldData := &BinaryVectorFieldData{
-				Data: make([]byte, 0, len(srcData)),
+			fieldData = &BinaryVectorFieldData{
+				Data: lo.Map(srcData, func(v byte, _ int) byte { return v }),
 				Dim:  dim,
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Float16Vector:
 			dim, err := GetDimFromParams(field.TypeParams)
@@ -506,142 +547,156 @@ func ColumnBasedInsertMsgToInsertData(msg *msgstream.InsertMsg, collSchema *sche
 				return nil, err
 			}
 
-			srcData := srcFields[field.FieldID].GetVectors().GetFloat16Vector()
+			srcData := srcField.GetVectors().GetFloat16Vector()
 
-			fieldData := &Float16VectorFieldData{
-				Data: make([]byte, 0, len(srcData)),
+			fieldData = &Float16VectorFieldData{
+				Data: lo.Map(srcData, func(v byte, _ int) byte { return v }),
 				Dim:  dim,
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
 
-			idata.Data[field.FieldID] = fieldData
+		case schemapb.DataType_BFloat16Vector:
+			dim, err := GetDimFromParams(field.TypeParams)
+			if err != nil {
+				log.Error("failed to get dim", zap.Error(err))
+				return nil, err
+			}
+
+			srcData := srcField.GetVectors().GetBfloat16Vector()
+
+			fieldData = &BFloat16VectorFieldData{
+				Data: lo.Map(srcData, func(v byte, _ int) byte { return v }),
+				Dim:  dim,
+			}
+
+		case schemapb.DataType_SparseFloatVector:
+			fieldData = &SparseFloatVectorFieldData{
+				SparseFloatArray: *srcFields[field.FieldID].GetVectors().GetSparseFloatVector(),
+			}
 
 		case schemapb.DataType_Bool:
-			srcData := srcFields[field.FieldID].GetScalars().GetBoolData().GetData()
+			srcData := srcField.GetScalars().GetBoolData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &BoolFieldData{
-				Data: make([]bool, 0, len(srcData)),
+			fieldData = &BoolFieldData{
+				Data:      lo.Map(srcData, func(v bool, _ int) bool { return v }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int8:
-			srcData := srcFields[field.FieldID].GetScalars().GetIntData().GetData()
+			srcData := srcField.GetScalars().GetIntData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &Int8FieldData{
-				Data: make([]int8, 0, len(srcData)),
+			fieldData = &Int8FieldData{
+				Data:      lo.Map(srcData, func(v int32, _ int) int8 { return int8(v) }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
-			int8SrcData := make([]int8, len(srcData))
-			for i := 0; i < len(srcData); i++ {
-				int8SrcData[i] = int8(srcData[i])
-			}
-			fieldData.Data = append(fieldData.Data, int8SrcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int16:
-			srcData := srcFields[field.FieldID].GetScalars().GetIntData().GetData()
+			srcData := srcField.GetScalars().GetIntData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &Int16FieldData{
-				Data: make([]int16, 0, len(srcData)),
+			fieldData = &Int16FieldData{
+				Data:      lo.Map(srcData, func(v int32, _ int) int16 { return int16(v) }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
-			int16SrcData := make([]int16, len(srcData))
-			for i := 0; i < len(srcData); i++ {
-				int16SrcData[i] = int16(srcData[i])
-			}
-			fieldData.Data = append(fieldData.Data, int16SrcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int32:
-			srcData := srcFields[field.FieldID].GetScalars().GetIntData().GetData()
+			srcData := srcField.GetScalars().GetIntData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &Int32FieldData{
-				Data: make([]int32, 0, len(srcData)),
+			fieldData = &Int32FieldData{
+				Data:      lo.Map(srcData, func(v int32, _ int) int32 { return v }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Int64:
-			fieldData := &Int64FieldData{
-				Data: make([]int64, 0),
-			}
-
 			switch field.FieldID {
-			case 0: // rowIDs
-				fieldData.Data = make([]int64, 0, len(msg.RowIDs))
-				fieldData.Data = append(fieldData.Data, msg.RowIDs...)
-			case 1: // Timestamps
-				fieldData.Data = make([]int64, 0, len(msg.Timestamps))
-				for _, ts := range msg.Timestamps {
-					fieldData.Data = append(fieldData.Data, int64(ts))
+			case common.RowIDField: // rowIDs
+				fieldData = &Int64FieldData{
+					Data: lo.Map(msg.GetRowIDs(), func(v int64, _ int) int64 { return v }),
+				}
+			case common.TimeStampField: // Timestamps
+				fieldData = &Int64FieldData{
+					Data: lo.Map(msg.GetTimestamps(), func(v uint64, _ int) int64 { return int64(v) }),
 				}
 			default:
-				srcData := srcFields[field.FieldID].GetScalars().GetLongData().GetData()
-				fieldData.Data = make([]int64, 0, len(srcData))
-				fieldData.Data = append(fieldData.Data, srcData...)
+				srcData := srcField.GetScalars().GetLongData().GetData()
+				validData := srcField.GetValidData()
+				fieldData = &Int64FieldData{
+					Data:      lo.Map(srcData, func(v int64, _ int) int64 { return v }),
+					ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
+				}
 			}
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Float:
-			srcData := srcFields[field.FieldID].GetScalars().GetFloatData().GetData()
+			srcData := srcField.GetScalars().GetFloatData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &FloatFieldData{
-				Data: make([]float32, 0, len(srcData)),
+			fieldData = &FloatFieldData{
+				Data:      lo.Map(srcData, func(v float32, _ int) float32 { return v }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
-
-			idata.Data[field.FieldID] = fieldData
 
 		case schemapb.DataType_Double:
-			srcData := srcFields[field.FieldID].GetScalars().GetDoubleData().GetData()
+			srcData := srcField.GetScalars().GetDoubleData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &DoubleFieldData{
-				Data: make([]float64, 0, len(srcData)),
+			fieldData = &DoubleFieldData{
+				Data:      lo.Map(srcData, func(v float64, _ int) float64 { return v }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
-			fieldData.Data = append(fieldData.Data, srcData...)
 
-			idata.Data[field.FieldID] = fieldData
 		case schemapb.DataType_String, schemapb.DataType_VarChar:
-			srcData := srcFields[field.FieldID].GetScalars().GetStringData().GetData()
+			srcData := srcField.GetScalars().GetStringData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &StringFieldData{
-				Data: make([]string, 0, len(srcData)),
+			fieldData = &StringFieldData{
+				Data:      lo.Map(srcData, func(v string, _ int) string { return v }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
 
-			fieldData.Data = append(fieldData.Data, srcData...)
-			idata.Data[field.FieldID] = fieldData
 		case schemapb.DataType_Array:
-			srcData := srcFields[field.FieldID].GetScalars().GetArrayData().GetData()
+			srcData := srcField.GetScalars().GetArrayData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &ArrayFieldData{
+			fieldData = &ArrayFieldData{
 				ElementType: field.GetElementType(),
-				Data:        make([]*schemapb.ScalarField, 0, len(srcData)),
+				Data:        lo.Map(srcData, func(v *schemapb.ScalarField, _ int) *schemapb.ScalarField { return v }),
+				ValidData:   lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
 
-			fieldData.Data = append(fieldData.Data, srcData...)
-			idata.Data[field.FieldID] = fieldData
 		case schemapb.DataType_JSON:
-			srcData := srcFields[field.FieldID].GetScalars().GetJsonData().GetData()
+			srcData := srcField.GetScalars().GetJsonData().GetData()
+			validData := srcField.GetValidData()
 
-			fieldData := &JSONFieldData{
-				Data: make([][]byte, 0, len(srcData)),
+			fieldData = &JSONFieldData{
+				Data:      lo.Map(srcData, func(v []byte, _ int) []byte { return v }),
+				ValidData: lo.Map(validData, func(v bool, _ int) bool { return v }),
 			}
 
-			fieldData.Data = append(fieldData.Data, srcData...)
-			idata.Data[field.FieldID] = fieldData
+		default:
+			return nil, merr.WrapErrServiceInternal("data type not handled", field.GetDataType().String())
 		}
+
+		if length == 0 {
+			length = fieldData.RowNum()
+		}
+		if fieldData.RowNum() != length {
+			return nil, merr.WrapErrServiceInternal("row num not match", fmt.Sprintf("field %s row num not match %d, other column %d", field.GetName(), fieldData.RowNum(), length))
+		}
+
+		idata.Data[field.FieldID] = fieldData
 	}
 
+	idata.Infos = []BlobInfo{
+		{Length: length},
+	}
 	return idata, nil
 }
 
 func InsertMsgToInsertData(msg *msgstream.InsertMsg, schema *schemapb.CollectionSchema) (idata *InsertData, err error) {
 	if msg.IsRowBased() {
-		return RowBasedInsertMsgToInsertData(msg, schema)
+		return RowBasedInsertMsgToInsertData(msg, schema, true)
 	}
 	return ColumnBasedInsertMsgToInsertData(msg, schema)
 }
@@ -649,89 +704,105 @@ func InsertMsgToInsertData(msg *msgstream.InsertMsg, schema *schemapb.Collection
 func mergeBoolField(data *InsertData, fid FieldID, field *BoolFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &BoolFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*BoolFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt8Field(data *InsertData, fid FieldID, field *Int8FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int8FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int8FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt16Field(data *InsertData, fid FieldID, field *Int16FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int16FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int16FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt32Field(data *InsertData, fid FieldID, field *Int32FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int32FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int32FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeInt64Field(data *InsertData, fid FieldID, field *Int64FieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &Int64FieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*Int64FieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeFloatField(data *InsertData, fid FieldID, field *FloatFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &FloatFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*FloatFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeDoubleField(data *InsertData, fid FieldID, field *DoubleFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &DoubleFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*DoubleFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeStringField(data *InsertData, fid FieldID, field *StringFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &StringFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*StringFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeArrayField(data *InsertData, fid FieldID, field *ArrayFieldData) {
@@ -739,22 +810,26 @@ func mergeArrayField(data *InsertData, fid FieldID, field *ArrayFieldData) {
 		fieldData := &ArrayFieldData{
 			ElementType: field.ElementType,
 			Data:        nil,
+			ValidData:   nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*ArrayFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeJSONField(data *InsertData, fid FieldID, field *JSONFieldData) {
 	if _, ok := data.Data[fid]; !ok {
 		fieldData := &JSONFieldData{
-			Data: nil,
+			Data:      nil,
+			ValidData: nil,
 		}
 		data.Data[fid] = fieldData
 	}
 	fieldData := data.Data[fid].(*JSONFieldData)
 	fieldData.Data = append(fieldData.Data, field.Data...)
+	fieldData.ValidData = append(fieldData.ValidData, field.ValidData...)
 }
 
 func mergeBinaryVectorField(data *InsertData, fid FieldID, field *BinaryVectorFieldData) {
@@ -793,6 +868,26 @@ func mergeFloat16VectorField(data *InsertData, fid FieldID, field *Float16Vector
 	fieldData.Data = append(fieldData.Data, field.Data...)
 }
 
+func mergeBFloat16VectorField(data *InsertData, fid FieldID, field *BFloat16VectorFieldData) {
+	if _, ok := data.Data[fid]; !ok {
+		fieldData := &BFloat16VectorFieldData{
+			Data: nil,
+			Dim:  field.Dim,
+		}
+		data.Data[fid] = fieldData
+	}
+	fieldData := data.Data[fid].(*BFloat16VectorFieldData)
+	fieldData.Data = append(fieldData.Data, field.Data...)
+}
+
+func mergeSparseFloatVectorField(data *InsertData, fid FieldID, field *SparseFloatVectorFieldData) {
+	if _, ok := data.Data[fid]; !ok {
+		data.Data[fid] = &SparseFloatVectorFieldData{}
+	}
+	fieldData := data.Data[fid].(*SparseFloatVectorFieldData)
+	fieldData.AppendAllRows(field)
+}
+
 // MergeFieldData merge field into data.
 func MergeFieldData(data *InsertData, fid FieldID, field FieldData) {
 	if field == nil {
@@ -825,6 +920,10 @@ func MergeFieldData(data *InsertData, fid FieldID, field FieldData) {
 		mergeFloatVectorField(data, fid, field)
 	case *Float16VectorFieldData:
 		mergeFloat16VectorField(data, fid, field)
+	case *BFloat16VectorFieldData:
+		mergeBFloat16VectorField(data, fid, field)
+	case *SparseFloatVectorFieldData:
+		mergeSparseFloatVectorField(data, fid, field)
 	}
 }
 
@@ -931,44 +1030,6 @@ func binaryWrite(endian binary.ByteOrder, data interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// FieldDataToBytes encode field data to byte slice.
-// For some fixed-length data, such as int32, int64, float vector, use binary.Write directly.
-// For binary vector, return it directly.
-// For bool data, first transfer to schemapb.BoolArray and then marshal it. (TODO: handle bool like other scalar data.)
-// For variable-length data, such as string, first transfer to schemapb.StringArray and then marshal it.
-// TODO: find a proper way to store variable-length data. Or we should unify to use protobuf?
-func FieldDataToBytes(endian binary.ByteOrder, fieldData FieldData) ([]byte, error) {
-	switch field := fieldData.(type) {
-	case *BoolFieldData:
-		// return binaryWrite(endian, field.Data)
-		return boolFieldDataToPbBytes(field)
-	case *StringFieldData:
-		return stringFieldDataToPbBytes(field)
-	case *ArrayFieldData:
-		return arrayFieldDataToPbBytes(field)
-	case *JSONFieldData:
-		return jsonFieldDataToPbBytes(field)
-	case *BinaryVectorFieldData:
-		return field.Data, nil
-	case *FloatVectorFieldData:
-		return binaryWrite(endian, field.Data)
-	case *Int8FieldData:
-		return binaryWrite(endian, field.Data)
-	case *Int16FieldData:
-		return binaryWrite(endian, field.Data)
-	case *Int32FieldData:
-		return binaryWrite(endian, field.Data)
-	case *Int64FieldData:
-		return binaryWrite(endian, field.Data)
-	case *FloatFieldData:
-		return binaryWrite(endian, field.Data)
-	case *DoubleFieldData:
-		return binaryWrite(endian, field.Data)
-	default:
-		return nil, fmt.Errorf("unsupported field data: %s", field)
-	}
-}
-
 func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.InsertRecord, error) {
 	insertRecord := &segcorepb.InsertRecord{}
 	for fieldID, rawData := range insertData.Data {
@@ -987,6 +1048,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *Int8FieldData:
 			int32Data := make([]int32, len(rawData.Data))
@@ -1005,6 +1067,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *Int16FieldData:
 			int32Data := make([]int32, len(rawData.Data))
@@ -1023,6 +1086,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *Int32FieldData:
 			fieldData = &schemapb.FieldData{
@@ -1037,6 +1101,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *Int64FieldData:
 			fieldData = &schemapb.FieldData{
@@ -1051,6 +1116,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *FloatFieldData:
 			fieldData = &schemapb.FieldData{
@@ -1065,6 +1131,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *DoubleFieldData:
 			fieldData = &schemapb.FieldData{
@@ -1079,6 +1146,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *StringFieldData:
 			fieldData = &schemapb.FieldData{
@@ -1093,6 +1161,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *ArrayFieldData:
 			fieldData = &schemapb.FieldData{
@@ -1107,6 +1176,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *JSONFieldData:
 			fieldData = &schemapb.FieldData{
@@ -1121,6 +1191,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 						},
 					},
 				},
+				ValidData: rawData.ValidData,
 			}
 		case *FloatVectorFieldData:
 			fieldData = &schemapb.FieldData{
@@ -1150,6 +1221,44 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 					},
 				},
 			}
+		case *Float16VectorFieldData:
+			fieldData = &schemapb.FieldData{
+				Type:    schemapb.DataType_Float16Vector,
+				FieldId: fieldID,
+				Field: &schemapb.FieldData_Vectors{
+					Vectors: &schemapb.VectorField{
+						Data: &schemapb.VectorField_Float16Vector{
+							Float16Vector: rawData.Data,
+						},
+						Dim: int64(rawData.Dim),
+					},
+				},
+			}
+		case *BFloat16VectorFieldData:
+			fieldData = &schemapb.FieldData{
+				Type:    schemapb.DataType_BFloat16Vector,
+				FieldId: fieldID,
+				Field: &schemapb.FieldData_Vectors{
+					Vectors: &schemapb.VectorField{
+						Data: &schemapb.VectorField_Bfloat16Vector{
+							Bfloat16Vector: rawData.Data,
+						},
+						Dim: int64(rawData.Dim),
+					},
+				},
+			}
+		case *SparseFloatVectorFieldData:
+			fieldData = &schemapb.FieldData{
+				Type:    schemapb.DataType_SparseFloatVector,
+				FieldId: fieldID,
+				Field: &schemapb.FieldData_Vectors{
+					Vectors: &schemapb.VectorField{
+						Data: &schemapb.VectorField_SparseFloatVector{
+							SparseFloatVector: &rawData.SparseFloatArray,
+						},
+					},
+				},
+			}
 		default:
 			return insertRecord, fmt.Errorf("unsupported data type when transter storage.InsertData to internalpb.InsertRecord")
 		}
@@ -1163,7 +1272,7 @@ func TransferInsertDataToInsertRecord(insertData *InsertData) (*segcorepb.Insert
 
 func TransferInsertMsgToInsertRecord(schema *schemapb.CollectionSchema, msg *msgstream.InsertMsg) (*segcorepb.InsertRecord, error) {
 	if msg.IsRowBased() {
-		insertData, err := RowBasedInsertMsgToInsertData(msg, schema)
+		insertData, err := RowBasedInsertMsgToInsertData(msg, schema, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1172,10 +1281,62 @@ func TransferInsertMsgToInsertRecord(schema *schemapb.CollectionSchema, msg *msg
 
 	// column base insert msg
 	insertRecord := &segcorepb.InsertRecord{
-		NumRows: int64(msg.NumRows),
+		NumRows:    int64(msg.NumRows),
+		FieldsData: make([]*schemapb.FieldData, 0),
 	}
 
 	insertRecord.FieldsData = append(insertRecord.FieldsData, msg.FieldsData...)
 
 	return insertRecord, nil
+}
+
+func Min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func NewTestChunkManagerFactory(params *paramtable.ComponentParam, rootPath string) *ChunkManagerFactory {
+	return NewChunkManagerFactory("minio",
+		RootPath(rootPath),
+		Address(params.MinioCfg.Address.GetValue()),
+		AccessKeyID(params.MinioCfg.AccessKeyID.GetValue()),
+		SecretAccessKeyID(params.MinioCfg.SecretAccessKey.GetValue()),
+		UseSSL(params.MinioCfg.UseSSL.GetAsBool()),
+		BucketName(params.MinioCfg.BucketName.GetValue()),
+		UseIAM(params.MinioCfg.UseIAM.GetAsBool()),
+		CloudProvider(params.MinioCfg.CloudProvider.GetValue()),
+		IAMEndpoint(params.MinioCfg.IAMEndpoint.GetValue()),
+		CreateBucket(true))
+}
+
+func GetFilesSize(ctx context.Context, paths []string, cm ChunkManager) (int64, error) {
+	totalSize := int64(0)
+	for _, filePath := range paths {
+		size, err := cm.Size(ctx, filePath)
+		if err != nil {
+			return 0, err
+		}
+		totalSize += size
+	}
+	return totalSize, nil
+}
+
+type NullableInt struct {
+	Value *int
+}
+
+// NewNullableInt creates a new NullableInt instance
+func NewNullableInt(value int) *NullableInt {
+	return &NullableInt{Value: &value}
+}
+
+func (ni NullableInt) GetValue() int {
+	return *ni.Value
+}
+
+// IsNull checks if the NullableInt is null
+func (ni NullableInt) IsNull() bool {
+	return ni.Value == nil
 }

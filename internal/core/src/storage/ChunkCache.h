@@ -15,9 +15,11 @@
 // limitations under the License.
 
 #pragma once
-
-#include <oneapi/tbb/concurrent_hash_map.h>
-#include "mmap/Column.h"
+#include <future>
+#include <unordered_map>
+#include "common/FieldMeta.h"
+#include "storage/MmapChunkManager.h"
+#include "mmap/ChunkedColumn.h"
 
 namespace milvus::storage {
 
@@ -25,26 +27,35 @@ extern std::map<std::string, int> ReadAheadPolicy_Map;
 
 class ChunkCache {
  public:
-    explicit ChunkCache(std::string path,
-                        const std::string& read_ahead_policy,
-                        ChunkManagerPtr cm)
-        : path_prefix_(std::move(path)), cm_(cm) {
+    explicit ChunkCache(const std::string& read_ahead_policy,
+                        ChunkManagerPtr cm,
+                        MmapChunkManagerPtr mcm)
+        : cm_(cm), mcm_(mcm) {
         auto iter = ReadAheadPolicy_Map.find(read_ahead_policy);
         AssertInfo(iter != ReadAheadPolicy_Map.end(),
-                   fmt::format("unrecognized read ahead policy: {}, "
-                               "should be one of `normal, random, sequential, "
-                               "willneed, dontneed`",
-                               read_ahead_policy));
+                   "unrecognized read ahead policy: {}, "
+                   "should be one of `normal, random, sequential, "
+                   "willneed, dontneed`",
+                   read_ahead_policy);
         read_ahead_policy_ = iter->second;
-        LOG_SEGCORE_INFO_ << "Init ChunkCache with prefix: " << path_prefix_
-                          << ", read_ahead_policy: " << read_ahead_policy;
+        LOG_INFO("Init ChunkCache with read_ahead_policy: {}",
+                 read_ahead_policy);
     }
 
     ~ChunkCache() = default;
 
  public:
     std::shared_ptr<ColumnBase>
-    Read(const std::string& filepath);
+    Read(const std::string& filepath,
+         const MmapChunkDescriptorPtr& descriptor,
+         const FieldMeta& field_meta);
+
+    std::shared_ptr<ColumnBase>
+    Read(const std::string& filepath,
+         const MmapChunkDescriptorPtr& descriptor,
+         const FieldMeta& field_meta,
+         bool mmap_enabled,
+         bool mmap_rss_not_need = false);
 
     void
     Remove(const std::string& filepath);
@@ -53,19 +64,26 @@ class ChunkCache {
     Prefetch(const std::string& filepath);
 
  private:
+    std::string
+    CachePath(const std::string& filepath);
+
     std::shared_ptr<ColumnBase>
-    Mmap(const std::filesystem::path& path, const FieldDataPtr& field_data);
+    ConvertToColumn(const FieldDataPtr& field_data,
+                    const MmapChunkDescriptorPtr& descriptor,
+                    const FieldMeta& field_meta,
+                    bool mmap_enabled);
 
  private:
-    using ColumnTable =
-        oneapi::tbb::concurrent_hash_map<std::string,
-                                         std::shared_ptr<ColumnBase>>;
+    using ColumnTable = std::unordered_map<
+        std::string,
+        std::pair<std::promise<std::shared_ptr<ColumnBase>>,
+                  std::shared_future<std::shared_ptr<ColumnBase>>>>;
 
  private:
-    mutable std::mutex mutex_;
+    mutable std::shared_mutex mutex_;
     int read_ahead_policy_;
-    std::string path_prefix_;
     ChunkManagerPtr cm_;
+    MmapChunkManagerPtr mcm_;
     ColumnTable columns_;
 };
 

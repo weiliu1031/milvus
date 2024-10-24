@@ -27,6 +27,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 
@@ -89,19 +90,91 @@ func newAzureObjectStorageWithConfig(ctx context.Context, c *config) (*AzureObje
 	return &AzureObjectStorage{Client: client}, nil
 }
 
-func (AzureObjectStorage *AzureObjectStorage) GetObject(ctx context.Context, bucketName, objectName string, offset int64, size int64) (FileReader, error) {
-	opts := azblob.DownloadStreamOptions{}
-	if offset > 0 {
-		opts.Range = azblob.HTTPRange{
-			Offset: offset,
-			Count:  size,
+// BlobReader is implemented because Azure's stream body does not have ReadAt and Seek interfaces.
+// BlobReader is not concurrency safe.
+type BlobReader struct {
+	client          *blockblob.Client
+	position        int64
+	body            io.ReadCloser
+	needResetStream bool
+}
+
+func NewBlobReader(client *blockblob.Client, offset int64) (*BlobReader, error) {
+	return &BlobReader{client: client, position: offset, needResetStream: true}, nil
+}
+
+func (b *BlobReader) Read(p []byte) (n int, err error) {
+	ctx := context.TODO()
+
+	if b.needResetStream {
+		opts := &azblob.DownloadStreamOptions{
+			Range: blob.HTTPRange{
+				Offset: b.position,
+			},
 		}
+		object, err := b.client.DownloadStream(ctx, opts)
+		if err != nil {
+			return 0, err
+		}
+		b.body = object.Body
 	}
-	object, err := AzureObjectStorage.Client.NewContainerClient(bucketName).NewBlockBlobClient(objectName).DownloadStream(ctx, &opts)
+
+	n, err = b.body.Read(p)
 	if err != nil {
-		return nil, checkObjectStorageError(objectName, err)
+		return n, err
 	}
-	return NewAzureFile(object.Body), nil
+	b.position += int64(n)
+	b.needResetStream = false
+	return n, nil
+}
+
+func (b *BlobReader) Close() error {
+	if b.body != nil {
+		return b.body.Close()
+	}
+	return nil
+}
+
+func (b *BlobReader) ReadAt(p []byte, off int64) (n int, err error) {
+	httpRange := blob.HTTPRange{
+		Offset: off,
+		Count:  int64(len(p)),
+	}
+	object, err := b.client.DownloadStream(context.Background(), &blob.DownloadStreamOptions{
+		Range: httpRange,
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer object.Body.Close()
+	return io.ReadFull(object.Body, p)
+}
+
+func (b *BlobReader) Seek(offset int64, whence int) (int64, error) {
+	props, err := b.client.GetProperties(context.Background(), &blob.GetPropertiesOptions{})
+	if err != nil {
+		return 0, err
+	}
+	size := *props.ContentLength
+	var newOffset int64
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = b.position + offset
+	case io.SeekEnd:
+		newOffset = size + offset
+	default:
+		return 0, merr.WrapErrIoFailedReason("invalid whence")
+	}
+
+	b.position = newOffset
+	b.needResetStream = true
+	return newOffset, nil
+}
+
+func (AzureObjectStorage *AzureObjectStorage) GetObject(ctx context.Context, bucketName, objectName string, offset int64, size int64) (FileReader, error) {
+	return NewBlobReader(AzureObjectStorage.Client.NewContainerClient(bucketName).NewBlockBlobClient(objectName), offset)
 }
 
 func (AzureObjectStorage *AzureObjectStorage) PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64) error {
@@ -117,21 +190,20 @@ func (AzureObjectStorage *AzureObjectStorage) StatObject(ctx context.Context, bu
 	return *info.ContentLength, nil
 }
 
-func (AzureObjectStorage *AzureObjectStorage) ListObjects(ctx context.Context, bucketName string, prefix string, recursive bool) ([]string, []time.Time, error) {
-	var objectsKeys []string
-	var modTimes []time.Time
+func (AzureObjectStorage *AzureObjectStorage) WalkWithObjects(ctx context.Context, bucketName string, prefix string, recursive bool, walkFunc ChunkObjectWalkFunc) error {
 	if recursive {
 		pager := AzureObjectStorage.Client.NewContainerClient(bucketName).NewListBlobsFlatPager(&azblob.ListBlobsFlatOptions{
 			Prefix: &prefix,
 		})
 		if pager.More() {
-			pageResp, err := pager.NextPage(context.Background())
+			pageResp, err := pager.NextPage(ctx)
 			if err != nil {
-				return []string{}, []time.Time{}, checkObjectStorageError(prefix, err)
+				return err
 			}
 			for _, blob := range pageResp.Segment.BlobItems {
-				objectsKeys = append(objectsKeys, *blob.Name)
-				modTimes = append(modTimes, *blob.Properties.LastModified)
+				if !walkFunc(&ChunkObjectInfo{FilePath: *blob.Name, ModifyTime: *blob.Properties.LastModified}) {
+					return nil
+				}
 			}
 		}
 	} else {
@@ -139,21 +211,24 @@ func (AzureObjectStorage *AzureObjectStorage) ListObjects(ctx context.Context, b
 			Prefix: &prefix,
 		})
 		if pager.More() {
-			pageResp, err := pager.NextPage(context.Background())
+			pageResp, err := pager.NextPage(ctx)
 			if err != nil {
-				return []string{}, []time.Time{}, checkObjectStorageError(prefix, err)
+				return err
 			}
+
 			for _, blob := range pageResp.Segment.BlobItems {
-				objectsKeys = append(objectsKeys, *blob.Name)
-				modTimes = append(modTimes, *blob.Properties.LastModified)
+				if !walkFunc(&ChunkObjectInfo{FilePath: *blob.Name, ModifyTime: *blob.Properties.LastModified}) {
+					return nil
+				}
 			}
 			for _, blob := range pageResp.Segment.BlobPrefixes {
-				objectsKeys = append(objectsKeys, *blob.Name)
-				modTimes = append(modTimes, time.Now())
+				if !walkFunc(&ChunkObjectInfo{FilePath: *blob.Name, ModifyTime: time.Now()}) {
+					return nil
+				}
 			}
 		}
 	}
-	return objectsKeys, modTimes, nil
+	return nil
 }
 
 func (AzureObjectStorage *AzureObjectStorage) RemoveObject(ctx context.Context, bucketName, objectName string) error {

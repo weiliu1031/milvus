@@ -30,7 +30,9 @@
 
 #include "storage/MinioChunkManager.h"
 #include "storage/AliyunSTSClient.h"
+#include "storage/TencentCloudSTSClient.h"
 #include "storage/AliyunCredentialsProvider.h"
+#include "storage/TencentCloudCredentialsProvider.h"
 #include "common/Consts.h"
 #include "common/EasyAssert.h"
 #include "log/Log.h"
@@ -51,9 +53,17 @@ generateConfig(const StorageConfig& storage_config) {
     Aws::Client::ClientConfiguration config = g_config;
     config.endpointOverride = ConvertToAwsString(storage_config.address);
 
+    // Three cases:
+    // 1. no ssl, verifySSL=false
+    // 2. self-signed certificate, verifySSL=false
+    // 3. CA-signed certificate, verifySSL=true
     if (storage_config.useSSL) {
         config.scheme = Aws::Http::Scheme::HTTPS;
         config.verifySSL = true;
+        if (!storage_config.sslCACert.empty()) {
+            config.caPath = ConvertToAwsString(storage_config.sslCACert);
+            config.verifySSL = false;
+        }
     } else {
         config.scheme = Aws::Http::Scheme::HTTP;
         config.verifySSL = false;
@@ -99,11 +109,13 @@ AwsChunkManager::AwsChunkManager(const StorageConfig& storage_config) {
 
     PreCheck(storage_config);
 
-    LOG_SEGCORE_INFO_ << "init AwsChunkManager with parameter[endpoint: '"
-                      << storage_config.address << "', default_bucket_name:'"
-                      << storage_config.bucket_name << "', root_path:'"
-                      << storage_config.root_path << "', use_secure:'"
-                      << std::boolalpha << storage_config.useSSL << "']";
+    LOG_INFO(
+        "init AwsChunkManager with "
+        "parameter[endpoint={}][bucket_name={}][root_path={}][use_secure={}]",
+        storage_config.address,
+        storage_config.bucket_name,
+        storage_config.root_path,
+        storage_config.useSSL);
 }
 
 GcpChunkManager::GcpChunkManager(const StorageConfig& storage_config) {
@@ -135,11 +147,13 @@ GcpChunkManager::GcpChunkManager(const StorageConfig& storage_config) {
 
     PreCheck(storage_config);
 
-    LOG_SEGCORE_INFO_ << "init GcpChunkManager with parameter[endpoint: '"
-                      << storage_config.address << "', default_bucket_name:'"
-                      << storage_config.bucket_name << "', root_path:'"
-                      << storage_config.root_path << "', use_secure:'"
-                      << std::boolalpha << storage_config.useSSL << "']";
+    LOG_INFO(
+        "init GcpChunkManager with "
+        "parameter[endpoint={}][bucket_name={}][root_path={}][use_secure={}]",
+        storage_config.address,
+        storage_config.bucket_name,
+        storage_config.root_path,
+        storage_config.useSSL);
 }
 
 AliyunChunkManager::AliyunChunkManager(const StorageConfig& storage_config) {
@@ -175,11 +189,56 @@ AliyunChunkManager::AliyunChunkManager(const StorageConfig& storage_config) {
 
     PreCheck(storage_config);
 
-    LOG_SEGCORE_INFO_ << "init AliyunChunkManager with parameter[endpoint: '"
-                      << storage_config.address << "', default_bucket_name:'"
-                      << storage_config.bucket_name << "', root_path:'"
-                      << storage_config.root_path << "', use_secure:'"
-                      << std::boolalpha << storage_config.useSSL << "']";
+    LOG_INFO(
+        "init AliyunChunkManager with "
+        "parameter[endpoint={}][bucket_name={}][root_path={}][use_secure={}]",
+        storage_config.address,
+        storage_config.bucket_name,
+        storage_config.root_path,
+        storage_config.useSSL);
+}
+
+TencentCloudChunkManager::TencentCloudChunkManager(
+    const StorageConfig& storage_config) {
+    default_bucket_name_ = storage_config.bucket_name;
+    remote_root_path_ = storage_config.root_path;
+
+    InitSDKAPIDefault(storage_config.log_level);
+
+    Aws::Client::ClientConfiguration config = generateConfig(storage_config);
+
+    StorageConfig mutable_config = storage_config;
+    mutable_config.useVirtualHost = true;
+    if (storage_config.useIAM) {
+        auto tencent_cloud_provider = Aws::MakeShared<
+            Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
+            "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
+        auto tencent_cloud_credentials =
+            tencent_cloud_provider->GetAWSCredentials();
+        AssertInfo(!tencent_cloud_credentials.GetAWSAccessKeyId().empty(),
+                   "if use iam, access key id should not be empty");
+        AssertInfo(!tencent_cloud_credentials.GetAWSSecretKey().empty(),
+                   "if use iam, secret key should not be empty");
+        AssertInfo(!tencent_cloud_credentials.GetSessionToken().empty(),
+                   "if use iam, token should not be empty");
+        client_ = std::make_shared<Aws::S3::S3Client>(
+            tencent_cloud_provider,
+            config,
+            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+            mutable_config.useVirtualHost);
+    } else {
+        BuildAccessKeyClient(mutable_config, config);
+    }
+
+    PreCheck(storage_config);
+
+    LOG_INFO(
+        "init TencentCloudChunkManager with "
+        "parameter[endpoint={}][bucket_name={}][root_path={}][use_secure={}]",
+        storage_config.address,
+        storage_config.bucket_name,
+        storage_config.root_path,
+        storage_config.useSSL);
 }
 
 }  // namespace milvus::storage

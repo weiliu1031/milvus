@@ -20,17 +20,19 @@
 #include <optional>
 #include <memory>
 
-#include "knowhere/file_manager.h"
 #include "common/Consts.h"
+#include "knowhere/file_manager.h"
+#include "log/Log.h"
 #include "storage/ChunkManager.h"
 #include "storage/Types.h"
-#include "log/Log.h"
-#include "storage/space.h"
 
 namespace milvus::storage {
 
 struct FileManagerContext {
     FileManagerContext() : chunkManagerPtr(nullptr) {
+    }
+    FileManagerContext(const ChunkManagerPtr& chunkManagerPtr)
+        : chunkManagerPtr(chunkManagerPtr) {
     }
     FileManagerContext(const FieldDataMeta& fieldDataMeta,
                        const IndexMeta& indexMeta,
@@ -40,15 +42,6 @@ struct FileManagerContext {
           chunkManagerPtr(chunkManagerPtr) {
     }
 
-    FileManagerContext(const FieldDataMeta& fieldDataMeta,
-                       const IndexMeta& indexMeta,
-                       const ChunkManagerPtr& chunkManagerPtr,
-                       std::shared_ptr<milvus_storage::Space> space)
-        : fieldDataMeta(fieldDataMeta),
-          indexMeta(indexMeta),
-          chunkManagerPtr(chunkManagerPtr),
-          space_(space) {
-    }
     bool
     Valid() const {
         return chunkManagerPtr != nullptr;
@@ -57,19 +50,17 @@ struct FileManagerContext {
     FieldDataMeta fieldDataMeta;
     IndexMeta indexMeta;
     ChunkManagerPtr chunkManagerPtr;
-    std::shared_ptr<milvus_storage::Space> space_;
 };
 
 #define FILEMANAGER_TRY try {
-#define FILEMANAGER_CATCH                                                 \
-    }                                                                     \
-    catch (SegcoreError & e) {                                            \
-        LOG_SEGCORE_ERROR_ << "SegcoreError: code " << e.get_error_code() \
-                           << ", " << e.what();                           \
-        return false;                                                     \
-    }                                                                     \
-    catch (std::exception & e) {                                          \
-        LOG_SEGCORE_ERROR_ << "Exception:" << e.what();                   \
+#define FILEMANAGER_CATCH                                                   \
+    }                                                                       \
+    catch (SegcoreError & e) {                                              \
+        LOG_ERROR("SegcoreError:{} code {}", e.what(), e.get_error_code()); \
+        return false;                                                       \
+    }                                                                       \
+    catch (std::exception & e) {                                            \
+        LOG_ERROR("Exception:{}", e.what());                                \
         return false;
 #define FILEMANAGER_END }
 
@@ -131,6 +122,11 @@ class FileManagerImpl : public knowhere::FileManager {
         return index_meta_;
     }
 
+    virtual ChunkManagerPtr
+    GetChunkManager() const {
+        return rcm_;
+    }
+
     virtual std::string
     GetRemoteIndexObjectPrefix() const {
         return rcm_->GetRootPath() + "/" + std::string(INDEX_ROOT_PATH) + "/" +
@@ -147,6 +143,17 @@ class FileManagerImpl : public knowhere::FileManager {
                std::to_string(index_meta_.index_version) + "/" +
                std::to_string(field_meta_.partition_id) + "/" +
                std::to_string(field_meta_.segment_id);
+    }
+
+    virtual std::string
+    GetRemoteTextLogPrefix() const {
+        return rcm_->GetRootPath() + "/" + std::string(TEXT_LOG_ROOT_PATH) +
+               "/" + std::to_string(index_meta_.build_id) + "/" +
+               std::to_string(index_meta_.index_version) + "/" +
+               std::to_string(field_meta_.collection_id) + "/" +
+               std::to_string(field_meta_.partition_id) + "/" +
+               std::to_string(field_meta_.segment_id) + "/" +
+               std::to_string(field_meta_.field_id);
     }
 
  protected:

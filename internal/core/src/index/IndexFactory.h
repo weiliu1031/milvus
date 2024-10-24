@@ -32,7 +32,7 @@
 #include "index/ScalarIndexSort.h"
 #include "index/StringIndexMarisa.h"
 #include "index/BoolIndex.h"
-#include "storage/space.h"
+#include "segcore/load_index_c.h"
 
 namespace milvus::index {
 
@@ -52,52 +52,72 @@ class IndexFactory {
         return instance;
     }
 
+    LoadResourceRequest
+    IndexLoadResource(DataType field_type,
+                      IndexVersion index_version,
+                      float index_size,
+                      std::map<std::string, std::string>& index_params,
+                      bool mmap_enable);
+
+    LoadResourceRequest
+    VecIndexLoadResource(DataType field_type,
+                         IndexVersion index_version,
+                         float index_size,
+                         std::map<std::string, std::string>& index_params,
+                         bool mmap_enable);
+
+    LoadResourceRequest
+    ScalarIndexLoadResource(DataType field_type,
+                            IndexVersion index_version,
+                            float index_size,
+                            std::map<std::string, std::string>& index_params,
+                            bool mmap_enable);
+
     IndexBasePtr
     CreateIndex(const CreateIndexInfo& create_index_info,
                 const storage::FileManagerContext& file_manager_context);
 
     IndexBasePtr
-    CreateIndex(const CreateIndexInfo& create_index_info,
-                const storage::FileManagerContext& file_manager_context,
-                std::shared_ptr<milvus_storage::Space> space);
-    IndexBasePtr
     CreateVectorIndex(const CreateIndexInfo& create_index_info,
                       const storage::FileManagerContext& file_manager_context);
+
+    // For base types like int, float, double, string, etc
+    IndexBasePtr
+    CreatePrimitiveScalarIndex(
+        DataType data_type,
+        IndexType index_type,
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
+
+    // For types like array, struct, union, etc
+    IndexBasePtr
+    CreateCompositeScalarIndex(
+        IndexType index_type,
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
+
+    // For types like Json, XML, etc
+    IndexBasePtr
+    CreateComplexScalarIndex(
+        IndexType index_type,
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
 
     IndexBasePtr
     CreateScalarIndex(const CreateIndexInfo& create_index_info,
                       const storage::FileManagerContext& file_manager_context =
                           storage::FileManagerContext());
 
-    IndexBasePtr
-    CreateVectorIndex(const CreateIndexInfo& create_index_info,
-                      const storage::FileManagerContext& file_manager_context,
-                      std::shared_ptr<milvus_storage::Space> space);
-
-    IndexBasePtr
-    CreateScalarIndex(const CreateIndexInfo& create_index_info,
-                      const storage::FileManagerContext& file_manager_context,
-                      std::shared_ptr<milvus_storage::Space> space);
-
     // IndexBasePtr
     // CreateIndex(DataType dtype, const IndexType& index_type);
  private:
-    template <typename T>
-    ScalarIndexPtr<T>
-    CreateScalarIndex(const IndexType& index_type,
-                      const storage::FileManagerContext& file_manager =
-                          storage::FileManagerContext());
+    FRIEND_TEST(StringIndexMarisaTest, Reverse);
 
     template <typename T>
     ScalarIndexPtr<T>
-    CreateScalarIndex(const IndexType& index_type,
-                      const storage::FileManagerContext& file_manager,
-                      std::shared_ptr<milvus_storage::Space> space);
+    CreatePrimitiveScalarIndex(const IndexType& index_type,
+                               const storage::FileManagerContext& file_manager =
+                                   storage::FileManagerContext());
 };
 
-template <>
-ScalarIndexPtr<std::string>
-IndexFactory::CreateScalarIndex<std::string>(
-    const IndexType& index_type,
-    const storage::FileManagerContext& file_manager_context);
 }  // namespace milvus::index

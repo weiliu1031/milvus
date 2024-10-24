@@ -137,6 +137,10 @@ func Test_NewClient(t *testing.T) {
 			retCheck(retNotNil, r, err)
 		}
 		{
+			r, err := client.GetPChannelInfo(ctx, nil)
+			retCheck(retNotNil, r, err)
+		}
+		{
 			r, err := client.GetMetrics(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
@@ -153,15 +157,11 @@ func Test_NewClient(t *testing.T) {
 			retCheck(retNotNil, r, err)
 		}
 		{
-			r, err := client.Import(ctx, nil)
+			r, err := client.DescribeAlias(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
 		{
-			r, err := client.GetImportState(ctx, nil)
-			retCheck(retNotNil, r, err)
-		}
-		{
-			r, err := client.ReportImport(ctx, nil)
+			r, err := client.ListAliases(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
 		{
@@ -240,20 +240,24 @@ func Test_NewClient(t *testing.T) {
 			r, err := client.ListDatabases(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
+		{
+			r, err := client.AlterDatabase(ctx, nil)
+			retCheck(retNotNil, r, err)
+		}
 	}
 
-	client.grpcClient = &mock.GRPCClientBase[rootcoordpb.RootCoordClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[rootcoordpb.RootCoordClient]{
 		GetGrpcClientErr: errors.New("dummy"),
 	}
 
 	newFunc1 := func(cc *grpc.ClientConn) rootcoordpb.RootCoordClient {
 		return &mock.GrpcRootCoordClient{Err: nil}
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc1)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc1)
 
 	checkFunc(false)
 
-	client.grpcClient = &mock.GRPCClientBase[rootcoordpb.RootCoordClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[rootcoordpb.RootCoordClient]{
 		GetGrpcClientErr: nil,
 	}
 
@@ -261,18 +265,18 @@ func Test_NewClient(t *testing.T) {
 		return &mock.GrpcRootCoordClient{Err: errors.New("dummy")}
 	}
 
-	client.grpcClient.SetNewGrpcClientFunc(newFunc2)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc2)
 
 	checkFunc(false)
 
-	client.grpcClient = &mock.GRPCClientBase[rootcoordpb.RootCoordClient]{
+	client.(*Client).grpcClient = &mock.GRPCClientBase[rootcoordpb.RootCoordClient]{
 		GetGrpcClientErr: nil,
 	}
 
 	newFunc3 := func(cc *grpc.ClientConn) rootcoordpb.RootCoordClient {
 		return &mock.GrpcRootCoordClient{Err: nil}
 	}
-	client.grpcClient.SetNewGrpcClientFunc(newFunc3)
+	client.(*Client).grpcClient.SetNewGrpcClientFunc(newFunc3)
 
 	checkFunc(true)
 
@@ -351,6 +355,10 @@ func Test_NewClient(t *testing.T) {
 		retCheck(rTimeout, err)
 	}
 	{
+		rTimeout, err := client.GetPChannelInfo(shortCtx, nil)
+		retCheck(rTimeout, err)
+	}
+	{
 		rTimeout, err := client.GetMetrics(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
@@ -367,15 +375,11 @@ func Test_NewClient(t *testing.T) {
 		retCheck(rTimeout, err)
 	}
 	{
-		rTimeout, err := client.Import(shortCtx, nil)
+		rTimeout, err := client.DescribeAlias(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
 	{
-		rTimeout, err := client.GetImportState(shortCtx, nil)
-		retCheck(rTimeout, err)
-	}
-	{
-		rTimeout, err := client.ReportImport(shortCtx, nil)
+		rTimeout, err := client.ListAliases(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
 	{
@@ -396,10 +400,6 @@ func Test_NewClient(t *testing.T) {
 	}
 	{
 		rTimeout, err := client.ListCredUsers(shortCtx, nil)
-		retCheck(rTimeout, err)
-	}
-	{
-		rTimeout, err := client.ListImportTasks(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
 	{

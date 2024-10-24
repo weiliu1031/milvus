@@ -18,6 +18,7 @@
 
 #include "common/FieldMeta.h"
 #include "common/Span.h"
+#include "common/Types.h"
 
 namespace milvus::query {
 
@@ -25,7 +26,7 @@ template <typename T>
 inline index::ScalarIndexPtr<T>
 generate_scalar_index(Span<T> data) {
     auto indexing = std::make_unique<index::ScalarIndexSort<T>>();
-    indexing->Build(data.row_count(), data.data());
+    indexing->Build(data.row_count(), data.data(), data.valid_data());
     return indexing;
 }
 
@@ -33,13 +34,13 @@ template <>
 inline index::ScalarIndexPtr<std::string>
 generate_scalar_index(Span<std::string> data) {
     auto indexing = index::CreateStringIndexSort();
-    indexing->Build(data.row_count(), data.data());
+    indexing->Build(data.row_count(), data.data(), data.valid_data());
     return indexing;
 }
 
 inline index::IndexBasePtr
 generate_scalar_index(SpanBase data, DataType data_type) {
-    Assert(!datatype_is_vector(data_type));
+    Assert(!IsVectorDataType(data_type));
     switch (data_type) {
         case DataType::BOOL:
             return generate_scalar_index(Span<bool>(data));
@@ -58,8 +59,7 @@ generate_scalar_index(SpanBase data, DataType data_type) {
         case DataType::VARCHAR:
             return generate_scalar_index(Span<std::string>(data));
         default:
-            PanicInfo(DataTypeInvalid,
-                      fmt::format("unsupported type {}", data_type));
+            PanicInfo(DataTypeInvalid, "unsupported type {}", data_type);
     }
 }
 

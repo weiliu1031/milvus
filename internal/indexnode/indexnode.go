@@ -17,7 +17,7 @@
 package indexnode
 
 /*
-#cgo pkg-config: milvus_common milvus_indexbuilder milvus_segcore
+#cgo pkg-config: milvus_core
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -35,7 +35,6 @@ import (
 	"path"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -45,6 +44,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/internal/flushcommon/io"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -53,6 +53,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/expr"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
 	"github.com/milvus-io/milvus/pkg/util/lifetime"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -83,7 +84,7 @@ func getCurrentIndexVersion(v int32) int32 {
 
 type taskKey struct {
 	ClusterID string
-	BuildID   UniqueID
+	TaskID    UniqueID
 }
 
 // IndexNode is a component that executes the task of building indexes.
@@ -105,9 +106,13 @@ type IndexNode struct {
 	etcdCli *clientv3.Client
 	address string
 
-	initOnce  sync.Once
-	stateLock sync.Mutex
-	tasks     map[taskKey]*taskInfo
+	binlogIO io.BinlogIO
+
+	initOnce     sync.Once
+	stateLock    sync.Mutex
+	indexTasks   map[taskKey]*indexTaskInfo
+	analyzeTasks map[taskKey]*analyzeTaskInfo
+	statsTasks   map[taskKey]*statsTaskInfo
 }
 
 // NewIndexNode creates a new IndexNode component.
@@ -120,12 +125,15 @@ func NewIndexNode(ctx context.Context, factory dependency.Factory) *IndexNode {
 		loopCancel:     cancel,
 		factory:        factory,
 		storageFactory: NewChunkMgrFactory(),
-		tasks:          map[taskKey]*taskInfo{},
+		indexTasks:     make(map[taskKey]*indexTaskInfo),
+		analyzeTasks:   make(map[taskKey]*analyzeTaskInfo),
+		statsTasks:     make(map[taskKey]*statsTaskInfo),
 		lifetime:       lifetime.NewLifetime(commonpb.StateCode_Abnormal),
 	}
 	sc := NewTaskScheduler(b.loopCtx)
 
 	b.sched = sc
+	expr.Register("indexnode", b)
 	return b
 }
 
@@ -137,16 +145,7 @@ func (i *IndexNode) Register() error {
 	// start liveness check
 	i.session.LivenessCheck(i.loopCtx, func() {
 		log.Error("Index Node disconnected from etcd, process will exit", zap.Int64("Server Id", i.session.ServerID))
-		if err := i.Stop(); err != nil {
-			log.Fatal("failed to stop server", zap.Error(err))
-		}
-		metrics.NumNodes.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), typeutil.IndexNodeRole).Dec()
-		// manually send signal to starter goroutine
-		if i.session.TriggerKill {
-			if p, err := os.FindProcess(os.Getpid()); err == nil {
-				p.Signal(syscall.SIGINT)
-			}
-		}
+		os.Exit(1)
 	})
 	return nil
 }
@@ -177,10 +176,20 @@ func (i *IndexNode) initSegcore() {
 	C.InitCpuNum(cCPUNum)
 
 	cKnowhereThreadPoolSize := C.uint32_t(hardware.GetCPUNum() * paramtable.DefaultKnowhereThreadPoolNumRatioInBuild)
+	if paramtable.GetRole() == typeutil.StandaloneRole {
+		threadPoolSize := int(float64(hardware.GetCPUNum()) * Params.CommonCfg.BuildIndexThreadPoolRatio.GetAsFloat())
+		if threadPoolSize < 1 {
+			threadPoolSize = 1
+		}
+		cKnowhereThreadPoolSize = C.uint32_t(threadPoolSize)
+	}
 	C.SegcoreSetKnowhereBuildThreadPoolNum(cKnowhereThreadPoolSize)
 
 	localDataRootPath := filepath.Join(Params.LocalStorageCfg.Path.GetValue(), typeutil.IndexNodeRole)
 	initcore.InitLocalChunkManager(localDataRootPath)
+	cGpuMemoryPoolInitSize := C.uint32_t(paramtable.Get().GpuConfig.InitSize.GetAsUint32())
+	cGpuMemoryPoolMaxSize := C.uint32_t(paramtable.Get().GpuConfig.MaxSize.GetAsUint32())
+	C.SegcoreSetKnowhereGpuMemoryPoolSize(cGpuMemoryPoolInitSize, cGpuMemoryPoolMaxSize)
 }
 
 func (i *IndexNode) CloseSegcore() {
@@ -225,11 +234,32 @@ func (i *IndexNode) Start() error {
 		startErr = i.sched.Start()
 
 		i.UpdateStateCode(commonpb.StateCode_Healthy)
-		log.Info("IndexNode", zap.Any("State", i.lifetime.GetState().String()))
+		log.Info("IndexNode", zap.String("State", i.lifetime.GetState().String()))
 	})
 
 	log.Info("IndexNode start finished", zap.Error(startErr))
 	return startErr
+}
+
+func (i *IndexNode) deleteAllTasks() {
+	deletedIndexTasks := i.deleteAllIndexTasks()
+	for _, t := range deletedIndexTasks {
+		if t.cancel != nil {
+			t.cancel()
+		}
+	}
+	deletedAnalyzeTasks := i.deleteAllAnalyzeTasks()
+	for _, t := range deletedAnalyzeTasks {
+		if t.cancel != nil {
+			t.cancel()
+		}
+	}
+	deletedStatsTasks := i.deleteAllStatsTasks()
+	for _, t := range deletedStatsTasks {
+		if t.cancel != nil {
+			t.cancel()
+		}
+	}
 }
 
 // Stop closes the server.
@@ -249,13 +279,8 @@ func (i *IndexNode) Stop() error {
 		i.lifetime.Wait()
 		log.Info("Index node abnormal")
 		// cleanup all running tasks
-		deletedTasks := i.deleteAllTasks()
-		for _, task := range deletedTasks {
-			if task.cancel != nil {
-				task.cancel()
-			}
-		}
-		i.loopCancel()
+		i.deleteAllTasks()
+
 		if i.sched != nil {
 			i.sched.Close()
 		}
@@ -264,6 +289,7 @@ func (i *IndexNode) Stop() error {
 		}
 
 		i.CloseSegcore()
+		i.loopCancel()
 		log.Info("Index node stopped.")
 	})
 	return nil
@@ -340,6 +366,7 @@ func (i *IndexNode) ShowConfigurations(ctx context.Context, req *internalpb.Show
 			Configuations: nil,
 		}, nil
 	}
+	defer i.lifetime.Done()
 
 	configList := make([]*commonpb.KeyValuePair, 0)
 	for key, value := range Params.GetComponentConfigurations("indexnode", req.Pattern) {

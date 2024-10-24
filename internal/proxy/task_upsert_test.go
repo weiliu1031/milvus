@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/util/testutils"
 )
 
 func TestUpsertTask_CheckAligned(t *testing.T) {
@@ -40,11 +41,11 @@ func TestUpsertTask_CheckAligned(t *testing.T) {
 		},
 		upsertMsg: &msgstream.UpsertMsg{
 			InsertMsg: &msgstream.InsertMsg{
-				InsertRequest: msgpb.InsertRequest{},
+				InsertRequest: &msgpb.InsertRequest{},
 			},
 		},
 	}
-	case1.upsertMsg.InsertMsg.InsertRequest = msgpb.InsertRequest{
+	case1.upsertMsg.InsertMsg.InsertRequest = &msgpb.InsertRequest{
 		Base: commonpbutil.NewMsgBase(
 			commonpbutil.WithMsgType(commonpb.MsgType_Insert),
 		),
@@ -58,7 +59,7 @@ func TestUpsertTask_CheckAligned(t *testing.T) {
 	err = case1.upsertMsg.InsertMsg.CheckAligned()
 	assert.NoError(t, err)
 
-	// fillFieldsDataBySchema was already checked by TestUpsertTask_fillFieldsDataBySchema
+	// checkFieldsDataBySchema was already checked by TestUpsertTask_checkFieldsDataBySchema
 
 	boolFieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_Bool}
 	int8FieldSchema := &schemapb.FieldSchema{DataType: schemapb.DataType_Int8}
@@ -73,33 +74,35 @@ func TestUpsertTask_CheckAligned(t *testing.T) {
 
 	numRows := 20
 	dim := 128
+	collSchema := &schemapb.CollectionSchema{
+		Name:        "TestUpsertTask_checkRowNums",
+		Description: "TestUpsertTask_checkRowNums",
+		AutoID:      false,
+		Fields: []*schemapb.FieldSchema{
+			boolFieldSchema,
+			int8FieldSchema,
+			int16FieldSchema,
+			int32FieldSchema,
+			int64FieldSchema,
+			floatFieldSchema,
+			doubleFieldSchema,
+			floatVectorFieldSchema,
+			binaryVectorFieldSchema,
+			varCharFieldSchema,
+		},
+	}
+	schema := newSchemaInfo(collSchema)
 	case2 := upsertTask{
 		req: &milvuspb.UpsertRequest{
 			NumRows:    uint32(numRows),
 			FieldsData: []*schemapb.FieldData{},
 		},
-		rowIDs:     generateInt64Array(numRows),
-		timestamps: generateUint64Array(numRows),
-		schema: &schemapb.CollectionSchema{
-			Name:        "TestUpsertTask_checkRowNums",
-			Description: "TestUpsertTask_checkRowNums",
-			AutoID:      false,
-			Fields: []*schemapb.FieldSchema{
-				boolFieldSchema,
-				int8FieldSchema,
-				int16FieldSchema,
-				int32FieldSchema,
-				int64FieldSchema,
-				floatFieldSchema,
-				doubleFieldSchema,
-				floatVectorFieldSchema,
-				binaryVectorFieldSchema,
-				varCharFieldSchema,
-			},
-		},
+		rowIDs:     testutils.GenerateInt64Array(numRows),
+		timestamps: testutils.GenerateUint64Array(numRows),
+		schema:     schema,
 		upsertMsg: &msgstream.UpsertMsg{
 			InsertMsg: &msgstream.InsertMsg{
-				InsertRequest: msgpb.InsertRequest{},
+				InsertRequest: &msgpb.InsertRequest{},
 			},
 		},
 	}
@@ -117,7 +120,7 @@ func TestUpsertTask_CheckAligned(t *testing.T) {
 		newBinaryVectorFieldData("BinaryVector", numRows, dim),
 		newScalarFieldData(varCharFieldSchema, "VarChar", numRows),
 	}
-	case2.upsertMsg.InsertMsg.InsertRequest = msgpb.InsertRequest{
+	case2.upsertMsg.InsertMsg.InsertRequest = &msgpb.InsertRequest{
 		Base: commonpbutil.NewMsgBase(
 			commonpbutil.WithMsgType(commonpb.MsgType_Insert),
 		),

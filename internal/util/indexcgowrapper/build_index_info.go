@@ -17,7 +17,7 @@
 package indexcgowrapper
 
 /*
-#cgo pkg-config: milvus_indexbuilder
+#cgo pkg-config: milvus_core
 #include <stdlib.h>	// free
 #include "indexbuilder/index_c.h"
 */
@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -51,6 +51,8 @@ func NewBuildIndexInfo(config *indexpb.StorageConfig) (*BuildIndexInfo, error) {
 	cIamEndPoint := C.CString(config.IAMEndpoint)
 	cRegion := C.CString(config.Region)
 	cCloudProvider := C.CString(config.CloudProvider)
+	cSslCACert := C.CString(config.SslCACert)
+	cGcpCredentialJSON := C.CString(config.GcpCredentialJSON)
 	defer C.free(unsafe.Pointer(cAddress))
 	defer C.free(unsafe.Pointer(cBucketName))
 	defer C.free(unsafe.Pointer(cAccessKey))
@@ -60,20 +62,24 @@ func NewBuildIndexInfo(config *indexpb.StorageConfig) (*BuildIndexInfo, error) {
 	defer C.free(unsafe.Pointer(cIamEndPoint))
 	defer C.free(unsafe.Pointer(cRegion))
 	defer C.free(unsafe.Pointer(cCloudProvider))
+	defer C.free(unsafe.Pointer(cSslCACert))
+	defer C.free(unsafe.Pointer(cGcpCredentialJSON))
 	storageConfig := C.CStorageConfig{
-		address:          cAddress,
-		bucket_name:      cBucketName,
-		access_key_id:    cAccessKey,
-		access_key_value: cAccessValue,
-		root_path:        cRootPath,
-		storage_type:     cStorageType,
-		iam_endpoint:     cIamEndPoint,
-		cloud_provider:   cCloudProvider,
-		useSSL:           C.bool(config.UseSSL),
-		useIAM:           C.bool(config.UseIAM),
-		region:           cRegion,
-		useVirtualHost:   C.bool(config.UseVirtualHost),
-		requestTimeoutMs: C.int64_t(config.RequestTimeoutMs),
+		address:             cAddress,
+		bucket_name:         cBucketName,
+		access_key_id:       cAccessKey,
+		access_key_value:    cAccessValue,
+		root_path:           cRootPath,
+		storage_type:        cStorageType,
+		iam_endpoint:        cIamEndPoint,
+		cloud_provider:      cCloudProvider,
+		useSSL:              C.bool(config.UseSSL),
+		sslCACert:           cSslCACert,
+		useIAM:              C.bool(config.UseIAM),
+		region:              cRegion,
+		useVirtualHost:      C.bool(config.UseVirtualHost),
+		requestTimeoutMs:    C.int64_t(config.RequestTimeoutMs),
+		gcp_credential_json: cGcpCredentialJSON,
 	}
 
 	status := C.NewBuildIndexInfo(&cBuildIndexInfo, storageConfig)
@@ -97,6 +103,19 @@ func (bi *BuildIndexInfo) AppendFieldMetaInfo(collectionID int64, partitionID in
 	return HandleCStatus(&status, "appendFieldMetaInfo failed")
 }
 
+func (bi *BuildIndexInfo) AppendFieldMetaInfoV2(collectionID int64, partitionID int64, segmentID int64, fieldID int64, fieldType schemapb.DataType, fieldName string, dim int64) error {
+	cColID := C.int64_t(collectionID)
+	cParID := C.int64_t(partitionID)
+	cSegID := C.int64_t(segmentID)
+	cFieldID := C.int64_t(fieldID)
+	cintDType := uint32(fieldType)
+	cFieldName := C.CString(fieldName)
+	cDim := C.int64_t(dim)
+	defer C.free(unsafe.Pointer(cFieldName))
+	status := C.AppendFieldMetaInfoV2(bi.cBuildIndexInfo, cColID, cParID, cSegID, cFieldID, cFieldName, cintDType, cDim)
+	return HandleCStatus(&status, "appendFieldMetaInfo failed")
+}
+
 func (bi *BuildIndexInfo) AppendIndexMetaInfo(indexID int64, buildID int64, indexVersion int64) error {
 	cIndexID := C.int64_t(indexID)
 	cBuildID := C.int64_t(buildID)
@@ -104,6 +123,16 @@ func (bi *BuildIndexInfo) AppendIndexMetaInfo(indexID int64, buildID int64, inde
 
 	status := C.AppendIndexMetaInfo(bi.cBuildIndexInfo, cIndexID, cBuildID, cIndexVersion)
 	return HandleCStatus(&status, "appendIndexMetaInfo failed")
+}
+
+func (bi *BuildIndexInfo) AppendIndexStorageInfo(dataStorePath, indexStorePath string, dataStoreVersion int64) error {
+	cDataStorePath := C.CString(dataStorePath)
+	defer C.free(unsafe.Pointer(cDataStorePath))
+	cIndexStorePath := C.CString(indexStorePath)
+	defer C.free(unsafe.Pointer(cIndexStorePath))
+	cVersion := C.int64_t(dataStoreVersion)
+	status := C.AppendIndexStorageInfo(bi.cBuildIndexInfo, cDataStorePath, cIndexStorePath, cVersion)
+	return HandleCStatus(&status, "appendIndexStorageInfo failed")
 }
 
 func (bi *BuildIndexInfo) AppendBuildIndexParam(indexParams map[string]string) error {
@@ -157,4 +186,19 @@ func (bi *BuildIndexInfo) AppendIndexEngineVersion(indexEngineVersion int32) err
 
 	status := C.AppendIndexEngineVersionToBuildInfo(bi.cBuildIndexInfo, cIndexEngineVersion)
 	return HandleCStatus(&status, "AppendIndexEngineVersion failed")
+}
+
+func (bi *BuildIndexInfo) AppendOptionalField(optField *indexpb.OptionalFieldInfo) error {
+	cFieldId := C.int64_t(optField.GetFieldID())
+	cFieldType := C.int32_t(optField.GetFieldType())
+	cFieldName := C.CString(optField.GetFieldName())
+	for _, dataPath := range optField.GetDataPaths() {
+		cDataPath := C.CString(dataPath)
+		defer C.free(unsafe.Pointer(cDataPath))
+		status := C.AppendOptionalFieldDataPath(bi.cBuildIndexInfo, cFieldId, cFieldName, cFieldType, cDataPath)
+		if err := HandleCStatus(&status, "AppendOptionalFieldDataPath failed"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

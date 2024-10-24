@@ -28,8 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/util/dependency"
+	"github.com/milvus-io/milvus/pkg/mq/common"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -281,7 +281,7 @@ func (ms *FailMsgStream) Close()                                     {}
 func (ms *FailMsgStream) Chan() <-chan *msgstream.MsgPack            { return nil }
 func (ms *FailMsgStream) AsProducer(channels []string)               {}
 func (ms *FailMsgStream) AsReader(channels []string, subName string) {}
-func (ms *FailMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error {
+func (ms *FailMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position common.SubscriptionInitialPosition) error {
 	return nil
 }
 func (ms *FailMsgStream) SetRepackFunc(repackFunc msgstream.RepackFunc) {}
@@ -293,8 +293,10 @@ func (ms *FailMsgStream) Broadcast(*msgstream.MsgPack) (map[string][]msgstream.M
 	}
 	return nil, nil
 }
-func (ms *FailMsgStream) Consume() *msgstream.MsgPack                                     { return nil }
-func (ms *FailMsgStream) Seek(ctx context.Context, offset []*msgstream.MsgPosition) error { return nil }
+func (ms *FailMsgStream) Consume() *msgstream.MsgPack { return nil }
+func (ms *FailMsgStream) Seek(ctx context.Context, msgPositions []*msgstream.MsgPosition, includeCurrentMsg bool) error {
+	return nil
+}
 
 func (ms *FailMsgStream) GetLatestMsgID(channel string) (msgstream.MessageID, error) {
 	return nil, nil

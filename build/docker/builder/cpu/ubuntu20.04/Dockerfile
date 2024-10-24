@@ -15,12 +15,12 @@ ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates gnupg2 \
     g++ gcc gdb gdbserver ninja-build git make ccache libssl-dev zlib1g-dev zip unzip \
-    clang-format-10 clang-tidy-10 lcov libtool m4 autoconf automake python3 python3-pip \
-    pkg-config uuid-dev libaio-dev  && \
+    clang-format-12 clang-tidy-12 lcov libtool m4 autoconf automake python3 python3-pip \
+    pkg-config uuid-dev libaio-dev libopenblas-dev && \
     apt-get remove --purge -y && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install conan==1.61.0
+RUN pip3 install conan==1.64.1
 
 RUN echo "target arch $TARGETARCH"
 RUN wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-`uname -m`.tar.gz" | tar --strip-components=1 -xz -C /usr/local
@@ -40,24 +40,22 @@ ENV GOPATH /go
 ENV GOROOT /usr/local/go
 ENV GO111MODULE on
 ENV PATH $GOPATH/bin:$GOROOT/bin:$PATH
-RUN mkdir -p /usr/local/go && wget -qO- "https://go.dev/dl/go1.20.7.linux-$TARGETARCH.tar.gz" | tar --strip-components=1 -xz -C /usr/local/go && \
+RUN mkdir -p /usr/local/go && wget -qO- "https://go.dev/dl/go1.21.11.linux-$TARGETARCH.tar.gz" | tar --strip-components=1 -xz -C /usr/local/go && \
     mkdir -p "$GOPATH/src" "$GOPATH/bin" && \
     go clean --modcache && \
     chmod -R 777 "$GOPATH" && chmod -R a+w $(go env GOTOOLDIR)
 
 # refer: https://code.visualstudio.com/docs/remote/containers-advanced#_avoiding-extension-reinstalls-on-container-rebuild
 RUN mkdir -p /home/milvus/.vscode-server/extensions \
-        /home/milvus/.vscode-server-insiders/extensions \
+    /home/milvus/.vscode-server-insiders/extensions \
     && chmod -R 777 /home/milvus
 
 COPY --chown=0:0 build/docker/builder/entrypoint.sh /
 
 RUN curl https://sh.rustup.rs -sSf | \
-    sh -s -- --default-toolchain stable -y
+    sh -s -- --default-toolchain=1.73 -y
 
 ENV PATH=/root/.cargo/bin:$PATH
-
-RUN rustup install 1.73 && rustup default 1.73
 
 ENTRYPOINT [ "/entrypoint.sh" ]
 CMD ["tail", "-f", "/dev/null"]

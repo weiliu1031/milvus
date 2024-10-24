@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/util/streamrpc"
@@ -15,6 +16,8 @@ func NewQueryStreamTask(ctx context.Context,
 	manager *segments.Manager,
 	req *querypb.QueryRequest,
 	srv streamrpc.QueryStreamServer,
+	minMsgSize int,
+	maxMsgSize int,
 ) *QueryStreamTask {
 	return &QueryStreamTask{
 		ctx:            ctx,
@@ -22,6 +25,8 @@ func NewQueryStreamTask(ctx context.Context,
 		segmentManager: manager,
 		req:            req,
 		srv:            srv,
+		minMsgSize:     minMsgSize,
+		maxMsgSize:     maxMsgSize,
 		notifier:       make(chan error, 1),
 	}
 }
@@ -32,6 +37,8 @@ type QueryStreamTask struct {
 	segmentManager *segments.Manager
 	req            *querypb.QueryRequest
 	srv            streamrpc.QueryStreamServer
+	minMsgSize     int
+	maxMsgSize     int
 	notifier       chan error
 }
 
@@ -41,6 +48,10 @@ func (t *QueryStreamTask) Username() string {
 	return t.req.Req.GetUsername()
 }
 
+func (t *QueryStreamTask) IsGpuIndex() bool {
+	return false
+}
+
 // PreExecute the task, only call once.
 func (t *QueryStreamTask) PreExecute() error {
 	return nil
@@ -48,6 +59,7 @@ func (t *QueryStreamTask) PreExecute() error {
 
 func (t *QueryStreamTask) Execute() error {
 	retrievePlan, err := segments.NewRetrievePlan(
+		t.ctx,
 		t.collection,
 		t.req.Req.GetSerializedExprPlan(),
 		t.req.Req.GetMvccTimestamp(),
@@ -58,7 +70,10 @@ func (t *QueryStreamTask) Execute() error {
 	}
 	defer retrievePlan.Delete()
 
-	segments, err := segments.RetrieveStream(t.ctx, t.segmentManager, retrievePlan, t.req, t.srv)
+	srv := streamrpc.NewResultCacheServer(t.srv, t.minMsgSize, t.maxMsgSize)
+	defer srv.Flush()
+
+	segments, err := segments.RetrieveStream(t.ctx, t.segmentManager, retrievePlan, t.req, srv)
 	defer t.segmentManager.Segment.Unpin(segments)
 	if err != nil {
 		return err
@@ -80,4 +95,8 @@ func (t *QueryStreamTask) Wait() error {
 
 func (t *QueryStreamTask) NQ() int64 {
 	return 1
+}
+
+func (t *QueryStreamTask) SearchResult() *internalpb.SearchResults {
+	return nil
 }

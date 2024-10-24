@@ -1,13 +1,11 @@
 package planparserv2
 
 import (
-	"fmt"
-
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 )
 
 var wildcards = map[byte]struct{}{
-	// '_': {}, // TODO
+	'_': {},
 	'%': {},
 }
 
@@ -67,9 +65,5 @@ func translatePatternMatch(pattern string) (op planpb.OpType, operand string, er
 		return planpb.OpType_PrefixMatch, pattern[:loc+1], nil
 	}
 
-	return planpb.OpType_Invalid, "", fmt.Errorf(
-		"unsupported pattern: %s, "+
-			"only prefix pattern match like %s "+
-			"and equal match like %s(no wildcards) are supported",
-		pattern, "ab%", "ab")
+	return planpb.OpType_Match, pattern, nil
 }

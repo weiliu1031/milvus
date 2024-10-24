@@ -17,7 +17,7 @@
 package segments
 
 /*
-#cgo pkg-config: milvus_segcore milvus_storage
+#cgo pkg-config: milvus_core
 
 #include "segcore/collection_c.h"
 #include "common/type_c.h"
@@ -27,46 +27,38 @@ package segments
 import "C"
 
 import (
-	"fmt"
+	"context"
+	"math"
 	"unsafe"
 
-	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus/internal/util/cgoconverter"
 	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/milvus-io/milvus/pkg/util/cgoconverter"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 // HandleCStatus deals with the error returned from CGO
-func HandleCStatus(status *C.CStatus, extraInfo string) error {
+func HandleCStatus(ctx context.Context, status *C.CStatus, extraInfo string, fields ...zap.Field) error {
 	if status.error_code == 0 {
 		return nil
 	}
 	errorCode := status.error_code
-	errorName, ok := commonpb.ErrorCode_name[int32(errorCode)]
-	if !ok {
-		errorName = "UnknownError"
-	}
 	errorMsg := C.GoString(status.error_msg)
 	defer C.free(unsafe.Pointer(status.error_msg))
 
-	finalMsg := fmt.Sprintf("%s: %s", errorName, errorMsg)
-	logMsg := fmt.Sprintf("%s, segcore error: %s\n", extraInfo, finalMsg)
-	log := log.With().WithOptions(zap.AddCallerSkip(1))
-	log.Warn(logMsg)
-	return errors.New(finalMsg)
+	log := log.Ctx(ctx).With(fields...).
+		WithOptions(zap.AddCallerSkip(1)) // Add caller stack to show HandleCStatus caller
+
+	err := merr.SegcoreError(int32(errorCode), errorMsg)
+	log.Warn("CStatus returns err", zap.Error(err), zap.String("extra", extraInfo))
+	return err
 }
 
-// HandleCProto deal with the result proto returned from CGO
-func HandleCProto(cRes *C.CProto, msg proto.Message) error {
-	// Standalone CProto is protobuf created by C side,
-	// Passed from c side
-	// memory is managed manually
-	lease, blob := cgoconverter.UnsafeGoBytes(&cRes.proto_blob, int(cRes.proto_size))
-	defer cgoconverter.Release(lease)
-
+// UnmarshalCProto unmarshal the proto from C memory
+func UnmarshalCProto(cRes *C.CProto, msg proto.Message) error {
+	blob := (*(*[math.MaxInt32]byte)(cRes.proto_blob))[:int(cRes.proto_size):int(cRes.proto_size)]
 	return proto.Unmarshal(blob, msg)
 }
 
@@ -84,14 +76,14 @@ func GetCProtoBlob(cProto *C.CProto) []byte {
 	return blob
 }
 
-func GetLocalUsedSize(path string) (int64, error) {
+func GetLocalUsedSize(ctx context.Context, path string) (int64, error) {
 	var availableSize int64
 	cSize := (*C.int64_t)(&availableSize)
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
 	status := C.GetLocalUsedSize(cPath, cSize)
-	err := HandleCStatus(&status, "get local used size failed")
+	err := HandleCStatus(ctx, &status, "get local used size failed")
 	if err != nil {
 		return 0, err
 	}

@@ -41,7 +41,7 @@ type ControllerImpl struct {
 	client      session.Cluster
 	nodeManager *session.NodeManager
 	dist        *meta.DistributionManager
-	targetMgr   *meta.TargetManager
+	targetMgr   meta.TargetManagerInterface
 	scheduler   task.Scheduler
 }
 
@@ -78,7 +78,7 @@ func (dc *ControllerImpl) SyncAll(ctx context.Context) {
 			if err != nil {
 				log.Warn("SyncAll come across err when getting data distribution", zap.Error(err))
 			} else {
-				handler.handleDistResp(resp)
+				handler.handleDistResp(resp, true)
 			}
 		}(h)
 	}
@@ -98,7 +98,7 @@ func NewDistController(
 	client session.Cluster,
 	nodeManager *session.NodeManager,
 	dist *meta.DistributionManager,
-	targetMgr *meta.TargetManager,
+	targetMgr meta.TargetManagerInterface,
 	scheduler task.Scheduler,
 ) *ControllerImpl {
 	return &ControllerImpl{

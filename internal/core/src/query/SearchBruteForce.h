@@ -27,8 +27,16 @@ SubSearchResult
 BruteForceSearch(const dataset::SearchDataset& dataset,
                  const void* chunk_data_raw,
                  int64_t chunk_rows,
-                 const knowhere::Json& conf,
+                 const SearchInfo& search_info,
                  const BitsetView& bitset,
-                 DataType data_type = DataType::VECTOR_FLOAT);
+                 DataType data_type);
+
+SubSearchResult
+BruteForceSearchIterators(const dataset::SearchDataset& dataset,
+                          const void* chunk_data_raw,
+                          int64_t chunk_rows,
+                          const SearchInfo& search_info,
+                          const BitsetView& bitset,
+                          DataType data_type);
 
 }  // namespace milvus::query

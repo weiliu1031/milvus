@@ -55,7 +55,7 @@ fi
 if [ "${CHECK_BUILDER:-}" == "1" ];then
     awk 'c&&c--{sub(/^/,"#")} /# Command/{c=3} 1' $ROOT_DIR/docker-compose.yml > $ROOT_DIR/docker-compose-devcontainer.yml
 else
-    awk 'c&&c--{sub(/^/,"#")} /# Build devcontainer/{c=5} 1' $ROOT_DIR/docker-compose.yml > $ROOT_DIR/docker-compose-devcontainer.yml.tmp
+    awk 'c&&c--{sub(/^/,"#")} /# Build devcontainer/{c=7} 1' $ROOT_DIR/docker-compose.yml > $ROOT_DIR/docker-compose-devcontainer.yml.tmp
     awk 'c&&c--{sub(/^/,"#")} /# Command/{c=3} 1' $ROOT_DIR/docker-compose-devcontainer.yml.tmp > $ROOT_DIR/docker-compose-devcontainer.yml
     rm $ROOT_DIR/docker-compose-devcontainer.yml.tmp
 fi
@@ -75,20 +75,20 @@ mkdir -p "${DOCKER_VOLUME_DIRECTORY:-.docker}/amd64-${OS_NAME}-conan"
 chmod -R 777 "${DOCKER_VOLUME_DIRECTORY:-.docker}"
 
 if [ "${1-}" = "build" ];then
-   docker-compose -f $ROOT_DIR/docker-compose-devcontainer.yml pull --ignore-pull-failures builder
-   docker-compose -f $ROOT_DIR/docker-compose-devcontainer.yml build builder
+   docker compose -f $ROOT_DIR/docker-compose-devcontainer.yml pull builder
+   docker compose -f $ROOT_DIR/docker-compose-devcontainer.yml build builder
 fi
 
 if [ "${1-}" = "up" ]; then
-    docker-compose -f $ROOT_DIR/docker-compose-devcontainer.yml up -d $(docker-compose config --services | grep -wv "gpubuilder")
+    docker compose -f $ROOT_DIR/docker-compose-devcontainer.yml up -d $(docker compose config --services | grep -wv "gpubuilder")
 fi
 
 if [ "${1-}" = "down" ]; then
-    docker-compose -f $ROOT_DIR/docker-compose-devcontainer.yml down
+    docker compose -f $ROOT_DIR/docker-compose-devcontainer.yml down
 fi
 
 if [ "${1-}" = "gpu" -a  "${2-}" = "up" ]; then
-    docker-compose -f $ROOT_DIR/docker-compose-devcontainer.yml up -d $(docker-compose config --services | grep -wv "builder")
+    docker compose -f $ROOT_DIR/docker-compose-devcontainer.yml up -d $(docker compose config --services | grep -wv "builder")
 fi
 
 popd

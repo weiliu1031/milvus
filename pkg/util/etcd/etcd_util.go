@@ -17,24 +17,29 @@
 package etcd
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util"
 )
 
-var maxTxnNum = 128
-
 // GetEtcdClient returns etcd client
+// should only used for test
 func GetEtcdClient(
 	useEmbedEtcd bool,
 	useSSL bool,
@@ -63,11 +68,30 @@ func GetRemoteEtcdClient(endpoints []string) (*clientv3.Client, error) {
 	return clientv3.New(clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: 5 * time.Second,
+		DialOptions: []grpc.DialOption{
+			grpc.WithBlock(),
+		},
+	})
+}
+
+func GetRemoteEtcdClientWithAuth(endpoints []string, userName, password string) (*clientv3.Client, error) {
+	return clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: 5 * time.Second,
+		Username:    userName,
+		Password:    password,
+		DialOptions: []grpc.DialOption{
+			grpc.WithBlock(),
+		},
 	})
 }
 
 func GetRemoteEtcdSSLClient(endpoints []string, certFile string, keyFile string, caCertFile string, minVersion string) (*clientv3.Client, error) {
 	var cfg clientv3.Config
+	return GetRemoteEtcdSSLClientWithCfg(endpoints, certFile, keyFile, caCertFile, minVersion, cfg)
+}
+
+func GetRemoteEtcdSSLClientWithCfg(endpoints []string, certFile string, keyFile string, caCertFile string, minVersion string, cfg clientv3.Config) (*clientv3.Client, error) {
 	cfg.Endpoints = endpoints
 	cfg.DialTimeout = 5 * time.Second
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -105,7 +129,34 @@ func GetRemoteEtcdSSLClient(endpoints []string, certFile string, keyFile string,
 		return nil, errors.Errorf("unknown TLS version,%s", minVersion)
 	}
 
+	cfg.DialOptions = append(cfg.DialOptions, grpc.WithBlock())
+
 	return clientv3.New(cfg)
+}
+
+func CreateEtcdClient(
+	useEmbedEtcd bool,
+	enableAuth bool,
+	userName,
+	password string,
+	useSSL bool,
+	endpoints []string,
+	certFile string,
+	keyFile string,
+	caCertFile string,
+	minVersion string,
+) (*clientv3.Client, error) {
+	if !enableAuth || useEmbedEtcd {
+		return GetEtcdClient(useEmbedEtcd, useSSL, endpoints, certFile, keyFile, caCertFile, minVersion)
+	}
+	log.Info("create etcd client(enable auth)",
+		zap.Bool("useSSL", useSSL),
+		zap.Any("endpoints", endpoints),
+		zap.String("minVersion", minVersion))
+	if useSSL {
+		return GetRemoteEtcdSSLClientWithCfg(endpoints, certFile, keyFile, caCertFile, minVersion, clientv3.Config{Username: userName, Password: password})
+	}
+	return GetRemoteEtcdClientWithAuth(endpoints, userName, password)
 }
 
 func min(a, b int) int {
@@ -143,18 +194,13 @@ func SaveByBatchWithLimit(kvs map[string]string, limit int, op func(partialKvs m
 	return nil
 }
 
-// SaveByBatch there will not guarantee atomicity.
-func SaveByBatch(kvs map[string]string, op func(partialKvs map[string]string) error) error {
-	return SaveByBatchWithLimit(kvs, maxTxnNum, op)
-}
-
-func RemoveByBatch(removals []string, op func(partialKeys []string) error) error {
+func RemoveByBatchWithLimit(removals []string, limit int, op func(partialKeys []string) error) error {
 	if len(removals) == 0 {
 		return nil
 	}
 
-	for i := 0; i < len(removals); i = i + maxTxnNum {
-		end := min(i+maxTxnNum, len(removals))
+	for i := 0; i < len(removals); i = i + limit {
+		end := min(i+limit, len(removals))
 		batch := removals[i:end]
 		if err := op(batch); err != nil {
 			return err
@@ -186,21 +232,8 @@ func StartTestEmbedEtcdServer() (*embed.Etcd, string, error) {
 		return nil, "", err
 	}
 	config := embed.NewConfig()
-
 	config.Dir = dir
 	config.LogLevel = "warn"
-	config.LogOutputs = []string{"default"}
-	u, err := url.Parse("http://localhost:0")
-	if err != nil {
-		return nil, "", err
-	}
-	config.LCUrls = []url.URL{*u}
-	u, err = url.Parse("http://localhost:0")
-	if err != nil {
-		return nil, "", err
-	}
-	config.LPUrls = []url.URL{*u}
-
 	server, err := embed.StartEtcd(config)
 	return server, dir, err
 }
@@ -212,4 +245,105 @@ func GetEmbedEtcdEndpoints(server *embed.Etcd) []string {
 		addrs = append(addrs, l.Addr().String())
 	}
 	return addrs
+}
+
+func HealthCheck(useEmbedEtcd bool,
+	enableAuth bool,
+	userName,
+	password string,
+	useSSL bool,
+	endpoints []string,
+	certFile string,
+	keyFile string,
+	caCertFile string,
+	minVersion string,
+) common.MetaClusterStatus {
+	var healthList []common.EPHealth
+	clusterStatus := common.MetaClusterStatus{MetaType: util.MetaStoreTypeEtcd}
+
+	client, err := CreateEtcdClient(useEmbedEtcd, enableAuth, userName, password, useSSL, endpoints, certFile, keyFile, caCertFile, minVersion)
+	if err != nil {
+		clusterStatus.Reason = fmt.Sprintf("establish client connection failed, err: %v", err)
+		return clusterStatus
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	defer client.Close()
+	resp, err := client.MemberList(ctx)
+	if err != nil {
+		clusterStatus.Reason = fmt.Sprintf("got member list failed, err: %v", err)
+		return clusterStatus
+	}
+
+	var wg sync.WaitGroup
+	hch := make(chan common.EPHealth, len(resp.Members))
+	for _, member := range resp.Members {
+		wg.Add(1)
+		member := member
+		go func() {
+			defer wg.Done()
+			ep := member.ClientURLs[0]
+			client, err := CreateEtcdClient(useEmbedEtcd, enableAuth, userName, password, useSSL, member.ClientURLs, certFile, keyFile, caCertFile, minVersion)
+			if err != nil {
+				hch <- common.EPHealth{EP: ep, Health: false, Reason: err.Error()}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			defer client.Close()
+
+			_, err = client.Get(ctx, "health")
+			eh := common.EPHealth{EP: ep, Health: false}
+
+			// permission denied is OK since proposal goes through consensus to get it
+			if err == nil || errors.Is(err, rpctypes.ErrPermissionDenied) {
+				eh.Health = true
+			} else {
+				eh.Reason = err.Error()
+			}
+
+			if eh.Health {
+				resp, err := client.AlarmList(ctx)
+				if err == nil && len(resp.Alarms) > 0 {
+					eh.Health = false
+					eh.Reason = "Active Alarm(s): "
+					for _, v := range resp.Alarms {
+						switch v.Alarm {
+						case etcdserverpb.AlarmType_NOSPACE:
+							eh.Reason = eh.Reason + "NOSPACE "
+						case etcdserverpb.AlarmType_CORRUPT:
+							eh.Reason = eh.Reason + "CORRUPT "
+						default:
+							eh.Reason = eh.Reason + "UNKNOWN "
+						}
+					}
+				} else if err != nil {
+					eh.Health = false
+					eh.Reason = "Unable to fetch the alarm list"
+				}
+			}
+			hch <- eh
+		}()
+	}
+
+	wg.Wait()
+	close(hch)
+
+	var hasUnhealthyEP bool
+	for h := range hch {
+		healthList = append(healthList, h)
+		if !h.Health {
+			hasUnhealthyEP = true
+		}
+	}
+
+	if hasUnhealthyEP {
+		clusterStatus.Reason = "some members are unavailable"
+	} else {
+		clusterStatus.Health = true
+	}
+	clusterStatus.Members = healthList
+	return clusterStatus
 }

@@ -92,8 +92,9 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 			mock.Anything,
 			mock.Anything,
 		).Return(errors.New("err"))
+		meta.On("ListAliasesByID", mock.Anything).Return([]string{})
 
-		core := newTestCore(withMeta(meta))
+		core := newTestCore(withValidProxyManager(), withMeta(meta))
 		task := &alterCollectionTask{
 			baseTask: newBaseTask(context.Background(), core),
 			Req: &milvuspb.AlterCollectionRequest{
@@ -121,6 +122,7 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 			mock.Anything,
 			mock.Anything,
 		).Return(nil)
+		meta.On("ListAliasesByID", mock.Anything).Return([]string{})
 
 		broker := newMockBroker()
 		broker.BroadcastAlteredCollectionFunc = func(ctx context.Context, req *milvuspb.AlterCollectionRequest) error {
@@ -141,6 +143,80 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 		assert.Error(t, err)
 	})
 
+	t.Run("expire cache failed", func(t *testing.T) {
+		meta := mockrootcoord.NewIMetaTable(t)
+		meta.On("GetCollectionByName",
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+		).Return(&model.Collection{CollectionID: int64(1)}, nil)
+		meta.On("AlterCollection",
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+		).Return(nil)
+		meta.On("ListAliasesByID", mock.Anything).Return([]string{})
+
+		broker := newMockBroker()
+		broker.BroadcastAlteredCollectionFunc = func(ctx context.Context, req *milvuspb.AlterCollectionRequest) error {
+			return errors.New("err")
+		}
+
+		core := newTestCore(withInvalidProxyManager(), withMeta(meta), withBroker(broker))
+		task := &alterCollectionTask{
+			baseTask: newBaseTask(context.Background(), core),
+			Req: &milvuspb.AlterCollectionRequest{
+				Base:           &commonpb.MsgBase{MsgType: commonpb.MsgType_AlterCollection},
+				CollectionName: "cn",
+				Properties:     properties,
+			},
+		}
+
+		err := task.Execute(context.Background())
+		assert.Error(t, err)
+	})
+
+	t.Run("alter successfully", func(t *testing.T) {
+		meta := mockrootcoord.NewIMetaTable(t)
+		meta.On("GetCollectionByName",
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+			mock.Anything,
+		).Return(&model.Collection{
+			CollectionID: int64(1),
+			Properties: []*commonpb.KeyValuePair{
+				{
+					Key:   common.CollectionTTLConfigKey,
+					Value: "1",
+				},
+				{
+					Key:   common.CollectionAutoCompactionKey,
+					Value: "true",
+				},
+			},
+		}, nil)
+		core := newTestCore(withValidProxyManager(), withMeta(meta))
+		task := &alterCollectionTask{
+			baseTask: newBaseTask(context.Background(), core),
+			Req: &milvuspb.AlterCollectionRequest{
+				Base:           &commonpb.MsgBase{MsgType: commonpb.MsgType_AlterCollection},
+				CollectionName: "cn",
+				Properties: []*commonpb.KeyValuePair{
+					{
+						Key:   common.CollectionAutoCompactionKey,
+						Value: "true",
+					},
+				},
+			},
+		}
+
+		err := task.Execute(context.Background())
+		assert.NoError(t, err)
+	})
+
 	t.Run("alter successfully", func(t *testing.T) {
 		meta := mockrootcoord.NewIMetaTable(t)
 		meta.On("GetCollectionByName",
@@ -155,6 +231,7 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 			mock.Anything,
 			mock.Anything,
 		).Return(nil)
+		meta.On("ListAliasesByID", mock.Anything).Return([]string{})
 
 		broker := newMockBroker()
 		broker.BroadcastAlteredCollectionFunc = func(ctx context.Context, req *milvuspb.AlterCollectionRequest) error {
@@ -191,7 +268,7 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 				Value: "true",
 			},
 		}
-		updateCollectionProperties(coll, updateProps1)
+		coll.Properties = MergeProperties(coll.Properties, updateProps1)
 
 		assert.Contains(t, coll.Properties, &commonpb.KeyValuePair{
 			Key:   common.CollectionTTLConfigKey,
@@ -209,7 +286,7 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 				Value: "2",
 			},
 		}
-		updateCollectionProperties(coll, updateProps2)
+		coll.Properties = MergeProperties(coll.Properties, updateProps2)
 
 		assert.Contains(t, coll.Properties, &commonpb.KeyValuePair{
 			Key:   common.CollectionTTLConfigKey,
@@ -218,6 +295,18 @@ func Test_alterCollectionTask_Execute(t *testing.T) {
 
 		assert.Contains(t, coll.Properties, &commonpb.KeyValuePair{
 			Key:   common.CollectionAutoCompactionKey,
+			Value: "true",
+		})
+
+		updatePropsIso := []*commonpb.KeyValuePair{
+			{
+				Key:   common.PartitionKeyIsolationKey,
+				Value: "true",
+			},
+		}
+		coll.Properties = MergeProperties(coll.Properties, updatePropsIso)
+		assert.Contains(t, coll.Properties, &commonpb.KeyValuePair{
+			Key:   common.PartitionKeyIsolationKey,
 			Value: "true",
 		})
 	})

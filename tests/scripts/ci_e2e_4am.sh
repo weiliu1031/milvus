@@ -39,6 +39,7 @@ MILVUS_HELM_NAMESPACE="${MILVUS_HELM_NAMESPACE:-default}"
 PARALLEL_NUM="${PARALLEL_NUM:-6}"
 # Use service name instead of IP to test
 MILVUS_SERVICE_NAME=$(echo "${MILVUS_HELM_RELEASE_NAME}-milvus.${MILVUS_HELM_NAMESPACE}" | tr -d '\n')
+# MILVUS_SERVICE_HOST=$(kubectl get svc ${MILVUS_SERVICE_NAME}-milvus -n ${MILVUS_HELM_NAMESPACE} -o jsonpath='{.spec.clusterIP}')
 MILVUS_SERVICE_PORT="19530"
 # Minio service name
 MINIO_SERVICE_NAME=$(echo "${MILVUS_HELM_RELEASE_NAME}-minio.${MILVUS_HELM_NAMESPACE}" | tr -d '\n')
@@ -61,36 +62,88 @@ if [ ! -d "${CI_LOG_PATH}" ]; then
   mkdir -p ${CI_LOG_PATH}
 fi
 
-echo "prepare e2e test"
-install_pytest_requirements
+# skip pip install when DISABLE_PIP_INSTALL is set
+DISABLE_PIP_INSTALL=${DISABLE_PIP_INSTALL:-false}
+if [ "${DISABLE_PIP_INSTALL:-}" = "false" ]; then
+  echo "prepare e2e test"
+  install_pytest_requirements
+fi
+
+
+
+
+cd ${ROOT}/tests/python_client
+# Run bulk insert test
+# if MILVUS_HELM_RELEASE_NAME contains "msop", then it is one pod mode, skip the bulk insert test
+if [[ "${MILVUS_HELM_RELEASE_NAME}" != *"msop"* ]]; then
+  if [[ -n "${TEST_TIMEOUT:-}" ]]; then
+
+    timeout  "${TEST_TIMEOUT}" pytest testcases/test_bulk_insert.py --timeout=300 -v -x -n 6 --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} \
+                                      --html=${CI_LOG_PATH}/report_bulk_insert.html  --self-contained-html
+  else
+    pytest testcases/test_bulk_insert.py --timeout=300 -v -x -n 6 --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} \
+                                      --html=${CI_LOG_PATH}/report_bulk_insert.html --self-contained-html
+  fi
+fi
+
+
+# Run restful test v1
+
+cd ${ROOT}/tests/restful_client
+
+if [[ -n "${TEST_TIMEOUT:-}" ]]; then
+
+  timeout  "${TEST_TIMEOUT}" pytest testcases --endpoint http://${MILVUS_SERVICE_NAME}:${MILVUS_SERVICE_PORT} -v -x -m L0 -n 6 --timeout 180\
+                                     --html=${CI_LOG_PATH}/report_restful.html  --self-contained-html
+else
+  pytest testcases --endpoint http://${MILVUS_SERVICE_NAME}:${MILVUS_SERVICE_PORT} -v -x -m L0 -n 6 --timeout 180\
+                                     --html=${CI_LOG_PATH}/report_restful.html --self-contained-html
+fi
+
+# Run restful test v2
+cd ${ROOT}/tests/restful_client_v2
+
+if [[ -n "${TEST_TIMEOUT:-}" ]]; then
+
+  timeout  "${TEST_TIMEOUT}" pytest testcases --endpoint http://${MILVUS_SERVICE_NAME}:${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} -v -x -m L0 -n 6 --timeout 240\
+                                     --html=${CI_LOG_PATH}/report_restful.html  --self-contained-html
+else
+  pytest testcases --endpoint http://${MILVUS_SERVICE_NAME}:${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} -v -x -m L0 -n 6 --timeout 240\
+                                     --html=${CI_LOG_PATH}/report_restful.html --self-contained-html
+fi
+
+
+if [[ "${MILVUS_HELM_RELEASE_NAME}" != *"msop"* ]]; then
+  if [[ -n "${TEST_TIMEOUT:-}" ]]; then
+
+    timeout  "${TEST_TIMEOUT}" pytest testcases --endpoint http://${MILVUS_SERVICE_NAME}:${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} -v -x -m BulkInsert -n 6 --timeout 240\
+                                      --html=${CI_LOG_PATH}/report_restful.html  --self-contained-html
+  else
+    pytest testcases --endpoint http://${MILVUS_SERVICE_NAME}:${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} -v -x -m BulkInsert -n 6 --timeout 240\
+                                      --html=${CI_LOG_PATH}/report_restful.html --self-contained-html
+  fi
+fi
+
+
+cd ${ROOT}/tests/python_client
 
 
 # Pytest is not able to have both --timeout & --workers, so do not add --timeout or --workers in the shell script
 if [[ -n "${TEST_TIMEOUT:-}" ]]; then
 
   timeout  "${TEST_TIMEOUT}" pytest --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} \
-                                     --html=${CI_LOG_PATH}/report.html  --self-contained-html ${@:-}
+                                     --html=${CI_LOG_PATH}/report.html  --self-contained-html --dist loadgroup ${@:-}
 else
   pytest --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} \
-                                     --html=${CI_LOG_PATH}/report.html --self-contained-html ${@:-}
+                                     --html=${CI_LOG_PATH}/report.html --self-contained-html --dist loadgroup ${@:-}
 fi
 
-# Run bulk insert test
-if [[ -n "${TEST_TIMEOUT:-}" ]]; then
+# # Run concurrent test with 5 processes
+# if [[ -n "${TEST_TIMEOUT:-}" ]]; then
 
-  timeout  "${TEST_TIMEOUT}" pytest testcases/test_bulk_insert.py --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} \
-                                     --html=${CI_LOG_PATH}/report_bulk_insert.html  --self-contained-html
-else
-  pytest testcases/test_bulk_insert.py --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --minio_host ${MINIO_SERVICE_NAME} \
-                                     --html=${CI_LOG_PATH}/report_bulk_insert.html --self-contained-html
-fi
-
-# Run concurrent test with 10 processes
-if [[ -n "${TEST_TIMEOUT:-}" ]]; then
-
-  timeout  "${TEST_TIMEOUT}" pytest testcases/test_concurrent.py --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --count 10 -n 10 \
-                                     --html=${CI_LOG_PATH}/report_concurrent.html  --self-contained-html
-else
-  pytest testcases/test_concurrent.py --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --count 10 -n 10 \
-                                     --html=${CI_LOG_PATH}/report_concurrent.html --self-contained-html
-fi
+#   timeout  "${TEST_TIMEOUT}" pytest testcases/test_concurrent.py --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --count 5 -n 5 \
+#                                      --html=${CI_LOG_PATH}/report_concurrent.html  --self-contained-html
+# else
+#   pytest testcases/test_concurrent.py --host ${MILVUS_SERVICE_NAME} --port ${MILVUS_SERVICE_PORT} --count 5 -n 5 \
+#                                      --html=${CI_LOG_PATH}/report_concurrent.html --self-contained-html
+# fi

@@ -126,11 +126,15 @@ type fixedTSOAllocator struct {
 	fixedTime time.Time
 }
 
-func (f *fixedTSOAllocator) allocTimestamp(_ context.Context) (Timestamp, error) {
+func (f *fixedTSOAllocator) AllocTimestamp(_ context.Context) (Timestamp, error) {
 	return tsoutil.ComposeTS(f.fixedTime.UnixNano()/int64(time.Millisecond), 0), nil
 }
 
-func (f *fixedTSOAllocator) allocID(_ context.Context) (UniqueID, error) {
+func (f *fixedTSOAllocator) AllocID(_ context.Context) (UniqueID, error) {
+	panic("not implemented") // TODO: Implement
+}
+
+func (f *fixedTSOAllocator) AllocN(_ context.Context, _ int64) (UniqueID, UniqueID, error) {
 	panic("not implemented") // TODO: Implement
 }
 
@@ -190,7 +194,7 @@ func (suite *UtilSuite) TestCalculateL0SegmentSize() {
 	logsize := int64(100)
 	fields := []*datapb.FieldBinlog{{
 		FieldID: 102,
-		Binlogs: []*datapb.Binlog{{LogSize: logsize}},
+		Binlogs: []*datapb.Binlog{{LogSize: logsize, MemorySize: logsize}},
 	}}
 
 	suite.Equal(calculateL0SegmentSize(fields), float64(logsize))

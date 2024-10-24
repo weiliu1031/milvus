@@ -12,9 +12,11 @@ on:
       - 'scripts/**'
       - 'internal/**'
       - 'pkg/**'
+      - 'client/**'
       - 'cmd/**'
       - 'build/**'
       - 'tests/integration/**'
+      - 'tests/go_client/**'
       - '.github/workflows/code-checker.yaml'
       - '.env'
       - docker-compose.yml
@@ -27,9 +29,13 @@ on:
       - .golangci.yml
       - rules.go
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ubuntu:
-    name: Code Checker AMD64 Ubuntu 20.04
+    name: Code Checker AMD64 Ubuntu 22.04
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -37,6 +43,7 @@ jobs:
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
+        if: ${{ ! startsWith(runner.name, 'self') }} # skip this step if it is self-hosted runner
         with:
           root-reserve-mb: 20480
           swap-size-mb: 1024
@@ -45,38 +52,23 @@ jobs:
           remove-haskell: 'true'
       - name: Checkout
         uses: actions/checkout@v2
-      - name: 'Generate CCache Hash'
-        env:
-          CORE_HASH: ${{ hashFiles( 'internal/core/**/*.cpp', 'internal/core/**/*.cc', 'internal/core/**/*.c', 'internal/core/**/*.h', 'internal/core/**/*.hpp', 'internal/core/**/CMakeLists.txt') }}
-        run: |
-          echo "corehash=${CORE_HASH}" >> $GITHUB_ENV
-          echo "Set CCache hash to ${CORE_HASH}"
-      - name: Cache CCache Volumes
-        uses: pat-s/always-upload-cache@v3
+      - name: Download Caches
+        uses: ./.github/actions/cache-restore
         with:
-          path: .docker/amd64-ubuntu20.04-ccache
-          key: ubuntu20.04-ccache-${{ env.corehash }}
-          restore-keys: ubuntu20.04-ccache-
-      - name: Cache Go Mod Volumes
-        uses: actions/cache@v3
-        with:
-          path: .docker/amd64-ubuntu20.04-go-mod
-          key: ubuntu20.04-go-mod-${{ hashFiles('go.sum, */go.sum') }}
-          restore-keys: ubuntu20.04-go-mod-
-      - name: Cache Conan Packages
-        uses: pat-s/always-upload-cache@v3
-        with:
-          path: .docker/amd64-ubuntu20.04-conan
-          key: ubuntu20.04-conan-${{ hashFiles('internal/core/conanfile.*') }}
-          restore-keys: ubuntu20.04-conan-
-      # - name: Setup upterm session
-      #   uses: lhotari/action-upterm@v1
+          os: 'ubuntu22.04'
       - name: Code Check
         env:
-          OS_NAME: 'ubuntu20.04'
+          OS_NAME: 'ubuntu22.04'
         run: |
-          ./build/builder.sh /bin/bash -c "make check-proto-product && make verifiers"
+          ./build/builder.sh /bin/bash -c "git config --global --add safe.directory /go/src/github.com/milvus-io/milvus && make check-proto-product && make verifiers"
+      - name: Save Caches
+        uses: ./.github/actions/cache-save
+        if: github.event_name != 'pull_request'
+        with:
+          os: 'ubuntu22.04'
+
   amazonlinux:
+    if: ${{ false }} # skip for now
     name: Code Checker Amazonlinux 2023
     # Run in amazonlinux docker
     runs-on: ubuntu-latest
@@ -84,6 +76,7 @@ jobs:
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
+        if: ${{ ! startsWith(runner.name, 'self') }} # skip this step if it is self-hosted runner
         with:
           root-reserve-mb: 20480
           swap-size-mb: 1024
@@ -92,37 +85,48 @@ jobs:
           remove-haskell: 'true'
       - name: Checkout
         uses: actions/checkout@v2
-      - name: 'Generate CCache Hash'
-        env:
-          CORE_HASH: ${{ hashFiles( 'internal/core/**/*.cpp', 'internal/core/**/*.cc', 'internal/core/**/*.c', 'internal/core/**/*.h', 'internal/core/**/*.hpp', 'internal/core/**/CMakeLists.txt') }}
-        run: |
-          echo "corehash=${CORE_HASH}" >> $GITHUB_ENV
-          echo "Set CCache hash to ${CORE_HASH}"
-      - name: Cache CCache Volumes
-        uses: pat-s/always-upload-cache@v3
+      - name: Download Caches
+        uses: ./.github/actions/cache-restore
         with:
-          path: .docker/amd64-amazonlinux2023-ccache
-          key: amazonlinux2023-ccache-${{ env.corehash }}
-          restore-keys: amazonlinux2023-ccache-
-      - name: Cache Third Party
-        uses: actions/cache@v3
-        with:
-          path: .docker/thirdparty
-          key: amazonlinux2023-thirdparty-${{ hashFiles('internal/core/thirdparty/**') }}
-          restore-keys: amazonlinux2023-thirdparty-
-      - name: Cache Go Mod Volumes
-        uses: actions/cache@v3
-        with:
-          path: .docker/amd64-amazonlinux2023-go-mod
-          key: amazonlinux2023-go-mod-${{ hashFiles('go.sum, */go.sum') }}
-          restore-keys: amazonlinux2023-go-mod-
-      - name: Cache Conan Packages
-        uses: pat-s/always-upload-cache@v3
-        with:
-          path: .docker/amd64-amazonlinux2023-conan
-          key: amazonlinux2023-conan-${{ hashFiles('internal/core/conanfile.*') }}
-          restore-keys: amazonlinux2023-conan-
+          os: 'amazonlinux2023'
       - name: Code Check
         run: |
-          sed -i 's/ubuntu20.04/amazonlinux2023/g' .env
+          sed -i 's/ubuntu22.04/amazonlinux2023/g' .env
           ./build/builder.sh /bin/bash -c "make install"
+      - name: Save Caches
+        uses: ./.github/actions/cache-save
+        if: github.event_name != 'pull_request'
+        with:
+          os: 'amazonlinux2023'
+
+  rockylinux:
+    if: ${{ false }} # skip for now
+    name: Code Checker rockylinux8
+    # Run in amazonlinux docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        if: ${{ ! startsWith(runner.name, 'self') }} # skip this step if it is self-hosted runner
+        with:
+          root-reserve-mb: 20480
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Download Caches
+        uses: ./.github/actions/cache-restore
+        with:
+          os: 'rockylinux8'
+      - name: Code Check
+        run: |
+          sed -i 's/ubuntu22.04/rockylinux8/g' .env
+          ./build/builder.sh /bin/bash -c "make install"
+      - name: Save Caches
+        uses: ./.github/actions/cache-save
+        if: github.event_name != 'pull_request'
+        with:
+          os: 'rockylinux8'

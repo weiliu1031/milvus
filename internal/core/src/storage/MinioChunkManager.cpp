@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "storage/MinioChunkManager.h"
+
 #include <fstream>
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
@@ -28,10 +30,11 @@
 #include <aws/s3/model/ListObjectsRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
-#include "storage/MinioChunkManager.h"
 #include "storage/AliyunSTSClient.h"
 #include "storage/AliyunCredentialsProvider.h"
-#include "storage/prometheus_client.h"
+#include "storage/TencentCloudSTSClient.h"
+#include "storage/TencentCloudCredentialsProvider.h"
+#include "monitor/prometheus_client.h"
 #include "common/EasyAssert.h"
 #include "log/Log.h"
 #include "signal.h"
@@ -83,7 +86,7 @@ ConvertFromAwsString(const Aws::String& aws_str) {
 
 void
 AwsLogger::ProcessFormattedStatement(Aws::String&& statement) {
-    LOG_SEGCORE_INFO_ << "[AWS LOG] " << statement;
+    LOG_INFO("[AWS LOG] {}", statement);
 }
 
 void
@@ -112,7 +115,7 @@ MinioChunkManager::InitSDKAPI(RemoteStorageType type,
                     GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials);
             };
         }
-        LOG_SEGCORE_INFO_ << "init aws with log level:" << log_level_str;
+        LOG_INFO("init aws with log level:{}", log_level_str);
         auto get_aws_log_level = [](const std::string& level_str) {
             Aws::Utils::Logging::LogLevel level =
                 Aws::Utils::Logging::LogLevel::Off;
@@ -155,7 +158,7 @@ MinioChunkManager::InitSDKAPIDefault(const std::string& log_level_str) {
         sigemptyset(&psa.sa_mask);
         sigaddset(&psa.sa_mask, SIGPIPE);
         sigaction(SIGPIPE, &psa, 0);
-        LOG_SEGCORE_INFO_ << "init aws with log level:" << log_level_str;
+        LOG_INFO("init aws with log level:{}", log_level_str);
         auto get_aws_log_level = [](const std::string& level_str) {
             Aws::Utils::Logging::LogLevel level =
                 Aws::Utils::Logging::LogLevel::Off;
@@ -219,8 +222,8 @@ MinioChunkManager::BuildS3Client(
 
 void
 MinioChunkManager::PreCheck(const StorageConfig& config) {
-    LOG_SEGCORE_INFO_ << "start to precheck chunk manager with configuration:"
-                      << config.ToString();
+    LOG_INFO("start to precheck chunk manager with configuration: {}",
+             config.ToString());
     try {
         // Just test connection not check real list, avoid cost resource.
         ListWithPrefix("justforconnectioncheck");
@@ -231,7 +234,7 @@ MinioChunkManager::PreCheck(const StorageConfig& config) {
             "configuration:{}",
             e.what(),
             config.ToString());
-        LOG_SEGCORE_ERROR_ << err_message;
+        LOG_ERROR(err_message);
         throw SegcoreError(S3Error, err_message);
     } catch (std::exception& e) {
         throw e;
@@ -319,9 +322,17 @@ MinioChunkManager::MinioChunkManager(const StorageConfig& storage_config)
     Aws::Client::ClientConfiguration config = g_config;
     config.endpointOverride = ConvertToAwsString(storage_config.address);
 
+    // Three cases:
+    // 1. no ssl, verifySSL=false
+    // 2. self-signed certificate, verifySSL=false
+    // 3. CA-signed certificate, verifySSL=true
     if (storage_config.useSSL) {
         config.scheme = Aws::Http::Scheme::HTTPS;
         config.verifySSL = true;
+        if (!storage_config.sslCACert.empty()) {
+            config.caPath = ConvertToAwsString(storage_config.sslCACert);
+            config.verifySSL = false;
+        }
     } else {
         config.scheme = Aws::Http::Scheme::HTTP;
         config.verifySSL = false;
@@ -345,11 +356,13 @@ MinioChunkManager::MinioChunkManager(const StorageConfig& storage_config)
 
     PreCheck(storage_config);
 
-    LOG_SEGCORE_INFO_ << "init MinioChunkManager with parameter[endpoint: '"
-                      << storage_config.address << "', default_bucket_name:'"
-                      << storage_config.bucket_name << "', root_path:'"
-                      << storage_config.root_path << "', use_secure:'"
-                      << std::boolalpha << storage_config.useSSL << "']";
+    LOG_INFO(
+        "init MinioChunkManager with "
+        "parameter[endpoint={}][bucket_name={}][root_path={}][use_secure={}]",
+        storage_config.address,
+        storage_config.bucket_name,
+        storage_config.root_path,
+        storage_config.useSSL);
 }
 
 MinioChunkManager::~MinioChunkManager() {
@@ -471,7 +484,7 @@ MinioChunkManager::ObjectExists(const std::string& bucket_name,
 
     auto start = std::chrono::system_clock::now();
     auto outcome = client_->HeadObject(request);
-    internal_storage_request_latency_stat.Observe(
+    monitor::internal_storage_request_latency_stat.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now() - start)
             .count());
@@ -479,17 +492,17 @@ MinioChunkManager::ObjectExists(const std::string& bucket_name,
     if (!outcome.IsSuccess()) {
         const auto& err = outcome.GetError();
         if (!IsNotFound(err.GetErrorType())) {
-            internal_storage_op_count_stat_fail.Increment();
+            monitor::internal_storage_op_count_stat_fail.Increment();
             ThrowS3Error("ObjectExists",
                          err,
                          "params, bucket={}, object={}",
                          bucket_name,
                          object_name);
         }
-        internal_storage_op_count_stat_suc.Increment();
+        monitor::internal_storage_op_count_stat_suc.Increment();
         return false;
     }
-    internal_storage_op_count_stat_suc.Increment();
+    monitor::internal_storage_op_count_stat_suc.Increment();
     return true;
 }
 
@@ -502,12 +515,12 @@ MinioChunkManager::GetObjectSize(const std::string& bucket_name,
 
     auto start = std::chrono::system_clock::now();
     auto outcome = client_->HeadObject(request);
-    internal_storage_request_latency_stat.Observe(
+    monitor::internal_storage_request_latency_stat.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now() - start)
             .count());
     if (!outcome.IsSuccess()) {
-        internal_storage_op_count_stat_fail.Increment();
+        monitor::internal_storage_op_count_stat_fail.Increment();
         const auto& err = outcome.GetError();
         ThrowS3Error("GetObjectSize",
                      err,
@@ -515,7 +528,7 @@ MinioChunkManager::GetObjectSize(const std::string& bucket_name,
                      bucket_name,
                      object_name);
     }
-    internal_storage_op_count_stat_suc.Increment();
+    monitor::internal_storage_op_count_stat_suc.Increment();
     return outcome.GetResult().GetContentLength();
 }
 
@@ -528,7 +541,7 @@ MinioChunkManager::DeleteObject(const std::string& bucket_name,
 
     auto start = std::chrono::system_clock::now();
     auto outcome = client_->DeleteObject(request);
-    internal_storage_request_latency_remove.Observe(
+    monitor::internal_storage_request_latency_remove.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now() - start)
             .count());
@@ -536,17 +549,17 @@ MinioChunkManager::DeleteObject(const std::string& bucket_name,
     if (!outcome.IsSuccess()) {
         const auto& err = outcome.GetError();
         if (!IsNotFound(err.GetErrorType())) {
-            internal_storage_op_count_remove_fail.Increment();
+            monitor::internal_storage_op_count_remove_fail.Increment();
             ThrowS3Error("DeleteObject",
                          err,
                          "params, bucket={}, object={}",
                          bucket_name,
                          object_name);
         }
-        internal_storage_op_count_remove_suc.Increment();
+        monitor::internal_storage_op_count_remove_suc.Increment();
         return false;
     }
-    internal_storage_op_count_remove_suc.Increment();
+    monitor::internal_storage_op_count_remove_suc.Increment();
     return true;
 }
 
@@ -567,14 +580,14 @@ MinioChunkManager::PutObjectBuffer(const std::string& bucket_name,
 
     auto start = std::chrono::system_clock::now();
     auto outcome = client_->PutObject(request);
-    internal_storage_request_latency_put.Observe(
+    monitor::internal_storage_request_latency_put.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now() - start)
             .count());
-    internal_storage_kv_size_put.Observe(size);
+    monitor::internal_storage_kv_size_put.Observe(size);
 
     if (!outcome.IsSuccess()) {
-        internal_storage_op_count_put_fail.Increment();
+        monitor::internal_storage_op_count_put_fail.Increment();
         const auto& err = outcome.GetError();
         ThrowS3Error("PutObjectBuffer",
                      err,
@@ -582,7 +595,7 @@ MinioChunkManager::PutObjectBuffer(const std::string& bucket_name,
                      bucket_name,
                      object_name);
     }
-    internal_storage_op_count_put_suc.Increment();
+    monitor::internal_storage_op_count_put_suc.Increment();
     return true;
 }
 
@@ -648,14 +661,14 @@ MinioChunkManager::GetObjectBuffer(const std::string& bucket_name,
     });
     auto start = std::chrono::system_clock::now();
     auto outcome = client_->GetObject(request);
-    internal_storage_request_latency_get.Observe(
+    monitor::internal_storage_request_latency_get.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now() - start)
             .count());
-    internal_storage_kv_size_get.Observe(size);
+    monitor::internal_storage_kv_size_get.Observe(size);
 
     if (!outcome.IsSuccess()) {
-        internal_storage_op_count_get_fail.Increment();
+        monitor::internal_storage_op_count_get_fail.Increment();
         const auto& err = outcome.GetError();
         ThrowS3Error("GetObjectBuffer",
                      err,
@@ -663,7 +676,7 @@ MinioChunkManager::GetObjectBuffer(const std::string& bucket_name,
                      bucket_name,
                      object_name);
     }
-    internal_storage_op_count_get_suc.Increment();
+    monitor::internal_storage_op_count_get_suc.Increment();
     return size;
 }
 
@@ -679,13 +692,13 @@ MinioChunkManager::ListObjects(const std::string& bucket_name,
 
     auto start = std::chrono::system_clock::now();
     auto outcome = client_->ListObjects(request);
-    internal_storage_request_latency_list.Observe(
+    monitor::internal_storage_request_latency_list.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now() - start)
             .count());
 
     if (!outcome.IsSuccess()) {
-        internal_storage_op_count_list_fail.Increment();
+        monitor::internal_storage_op_count_list_fail.Increment();
         const auto& err = outcome.GetError();
         ThrowS3Error("ListObjects",
                      err,
@@ -693,7 +706,7 @@ MinioChunkManager::ListObjects(const std::string& bucket_name,
                      bucket_name,
                      prefix);
     }
-    internal_storage_op_count_list_suc.Increment();
+    monitor::internal_storage_op_count_list_suc.Increment();
     auto objects = outcome.GetResult().GetContents();
     for (auto& obj : objects) {
         objects_vec.emplace_back(obj.GetKey());

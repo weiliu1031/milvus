@@ -18,13 +18,14 @@
 
 #include <memory>
 #include <boost/dynamic_bitset.hpp>
+#include "common/FieldData.h"
 #include "common/EasyAssert.h"
 #include "knowhere/comp/index_param.h"
 #include "knowhere/dataset.h"
+#include "knowhere/index/index_factory.h"
+#include "common/Tracer.h"
 #include "common/Types.h"
-
-const std::string kMmapFilepath = "mmap_filepath";
-const std::string kEnableMmap = "enable_mmap";
+#include "index/Meta.h"
 
 namespace milvus::index {
 
@@ -40,10 +41,7 @@ class IndexBase {
     Load(const BinarySet& binary_set, const Config& config = {}) = 0;
 
     virtual void
-    Load(const Config& config = {}) = 0;
-
-    virtual void
-    LoadV2(const Config& config = {}) = 0;
+    Load(milvus::tracer::TraceContext ctx, const Config& config = {}) = 0;
 
     virtual void
     BuildWithRawData(size_t n,
@@ -56,32 +54,17 @@ class IndexBase {
     virtual void
     Build(const Config& config = {}) = 0;
 
-    virtual void
-    BuildV2(const Config& Config = {}) = 0;
-
     virtual int64_t
     Count() = 0;
 
     virtual BinarySet
     Upload(const Config& config = {}) = 0;
 
-    virtual BinarySet
-    UploadV2(const Config& config = {}) = 0;
-
     virtual const bool
     HasRawData() const = 0;
 
-    bool
-    IsMmapSupported() const {
-        return index_type_ == knowhere::IndexEnum::INDEX_HNSW ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_IVFFLAT ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_IVFFLAT_CC ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_IVFPQ ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_IVFSQ8 ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_BIN_IVFFLAT ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_IDMAP ||
-               index_type_ == knowhere::IndexEnum::INDEX_FAISS_BIN_IDMAP;
-    }
+    virtual bool
+    IsMmapSupported() const = 0;
 
     const IndexType&
     Type() const {

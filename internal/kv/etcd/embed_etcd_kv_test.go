@@ -28,9 +28,9 @@ import (
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/exp/maps"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	embed_etcd_kv "github.com/milvus-io/milvus/internal/kv/etcd"
-	"github.com/milvus-io/milvus/internal/kv/predicates"
+	"github.com/milvus-io/milvus/pkg/kv"
+	"github.com/milvus-io/milvus/pkg/kv/predicates"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -565,6 +565,7 @@ func TestEmbedEtcd(te *testing.T) {
 			{map[string]string{"y/c": "vvv"}, []string{}, "y", 2, 3},
 			{map[string]string{"p/a": "vvv"}, []string{"y/a", "y"}, "y", 3, 0},
 			{map[string]string{}, []string{"p"}, "p", 1, 0},
+			{nil, []string{"p"}, "p", 0, 0},
 		}
 
 		for _, test := range multiSaveAndRemoveWithPrefixTests {

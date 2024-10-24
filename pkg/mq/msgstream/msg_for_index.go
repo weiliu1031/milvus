@@ -19,7 +19,7 @@
 package msgstream
 
 import (
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 )
@@ -27,7 +27,7 @@ import (
 // CreateIndexMsg is a message pack that contains create index request
 type CreateIndexMsg struct {
 	BaseMsg
-	milvuspb.CreateIndexRequest
+	*milvuspb.CreateIndexRequest
 }
 
 // interface implementation validation
@@ -56,7 +56,7 @@ func (it *CreateIndexMsg) SourceID() int64 {
 // Marshal is used to serialize a message pack to byte array
 func (it *CreateIndexMsg) Marshal(input TsMsg) (MarshalType, error) {
 	createIndexMsg := input.(*CreateIndexMsg)
-	createIndexRequest := &createIndexMsg.CreateIndexRequest
+	createIndexRequest := createIndexMsg.CreateIndexRequest
 	mb, err := proto.Marshal(createIndexRequest)
 	if err != nil {
 		return nil, err
@@ -66,12 +66,12 @@ func (it *CreateIndexMsg) Marshal(input TsMsg) (MarshalType, error) {
 
 // Unmarshal is used to deserialize a message pack from byte array
 func (it *CreateIndexMsg) Unmarshal(input MarshalType) (TsMsg, error) {
-	createIndexRequest := milvuspb.CreateIndexRequest{}
+	createIndexRequest := &milvuspb.CreateIndexRequest{}
 	in, err := convertToByteArray(input)
 	if err != nil {
 		return nil, err
 	}
-	err = proto.Unmarshal(in, &createIndexRequest)
+	err = proto.Unmarshal(in, createIndexRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -83,13 +83,75 @@ func (it *CreateIndexMsg) Unmarshal(input MarshalType) (TsMsg, error) {
 }
 
 func (it *CreateIndexMsg) Size() int {
-	return proto.Size(&it.CreateIndexRequest)
+	return proto.Size(it.CreateIndexRequest)
+}
+
+// AlterIndexMsg is a message pack that contains create index request
+type AlterIndexMsg struct {
+	BaseMsg
+	*milvuspb.AlterIndexRequest
+}
+
+// interface implementation validation
+var _ TsMsg = &AlterIndexMsg{}
+
+// ID returns the ID of this message pack
+func (it *AlterIndexMsg) ID() UniqueID {
+	return it.Base.MsgID
+}
+
+// SetID set the ID of this message pack
+func (it *AlterIndexMsg) SetID(id UniqueID) {
+	it.Base.MsgID = id
+}
+
+// Type returns the type of this message pack
+func (it *AlterIndexMsg) Type() MsgType {
+	return it.Base.MsgType
+}
+
+// SourceID indicates which component generated this message
+func (it *AlterIndexMsg) SourceID() int64 {
+	return it.Base.SourceID
+}
+
+// Marshal is used to serialize a message pack to byte array
+func (it *AlterIndexMsg) Marshal(input TsMsg) (MarshalType, error) {
+	AlterIndexMsg := input.(*AlterIndexMsg)
+	AlterIndexRequest := AlterIndexMsg.AlterIndexRequest
+	mb, err := proto.Marshal(AlterIndexRequest)
+	if err != nil {
+		return nil, err
+	}
+	return mb, nil
+}
+
+// Unmarshal is used to deserialize a message pack from byte array
+func (it *AlterIndexMsg) Unmarshal(input MarshalType) (TsMsg, error) {
+	alterIndexRequest := &milvuspb.AlterIndexRequest{}
+	in, err := convertToByteArray(input)
+	if err != nil {
+		return nil, err
+	}
+	err = proto.Unmarshal(in, alterIndexRequest)
+	if err != nil {
+		return nil, err
+	}
+	alterIndexMsg := &AlterIndexMsg{AlterIndexRequest: alterIndexRequest}
+	alterIndexMsg.BeginTimestamp = alterIndexMsg.GetBase().GetTimestamp()
+	alterIndexMsg.EndTimestamp = alterIndexMsg.GetBase().GetTimestamp()
+
+	return alterIndexMsg, nil
+}
+
+func (it *AlterIndexMsg) Size() int {
+	return proto.Size(it.AlterIndexRequest)
 }
 
 // DropIndexMsg is a message pack that contains drop index request
 type DropIndexMsg struct {
 	BaseMsg
-	milvuspb.DropIndexRequest
+	*milvuspb.DropIndexRequest
 }
 
 var _ TsMsg = &DropIndexMsg{}
@@ -112,7 +174,7 @@ func (d *DropIndexMsg) SourceID() int64 {
 
 func (d *DropIndexMsg) Marshal(input TsMsg) (MarshalType, error) {
 	dropIndexMsg := input.(*DropIndexMsg)
-	dropIndexRequest := &dropIndexMsg.DropIndexRequest
+	dropIndexRequest := dropIndexMsg.DropIndexRequest
 	mb, err := proto.Marshal(dropIndexRequest)
 	if err != nil {
 		return nil, err
@@ -121,12 +183,12 @@ func (d *DropIndexMsg) Marshal(input TsMsg) (MarshalType, error) {
 }
 
 func (d *DropIndexMsg) Unmarshal(input MarshalType) (TsMsg, error) {
-	dropIndexRequest := milvuspb.DropIndexRequest{}
+	dropIndexRequest := &milvuspb.DropIndexRequest{}
 	in, err := convertToByteArray(input)
 	if err != nil {
 		return nil, err
 	}
-	err = proto.Unmarshal(in, &dropIndexRequest)
+	err = proto.Unmarshal(in, dropIndexRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -138,5 +200,5 @@ func (d *DropIndexMsg) Unmarshal(input MarshalType) (TsMsg, error) {
 }
 
 func (d *DropIndexMsg) Size() int {
-	return proto.Size(&d.DropIndexRequest)
+	return proto.Size(d.DropIndexRequest)
 }

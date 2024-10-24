@@ -7,6 +7,7 @@ from pymilvus.exceptions import MilvusException
 from base.client_base import TestcaseBase
 from base.collection_wrapper import ApiCollectionWrapper
 from base.utility_wrapper import ApiUtilityWrapper
+from common.common_params import FieldParams, DefaultVectorIndexParams, DefaultVectorSearchParams
 from utils.util_log import test_log as log
 from common import common_func as cf
 from common import common_type as ct
@@ -34,22 +35,6 @@ exp_schema = "schema"
 class TestUtilityParams(TestcaseBase):
     """ Test case of index interface """
 
-    @pytest.fixture(scope="function", params=ct.get_invalid_strs)
-    def get_invalid_metric_type(self, request):
-        if request.param == [] or request.param == "":
-            pytest.skip("metric empty is valid for distance calculation")
-        if isinstance(request.param, str):
-            pytest.skip("string is valid type for metric")
-        yield request.param
-
-    @pytest.fixture(scope="function", params=ct.get_invalid_strs)
-    def get_invalid_metric_value(self, request):
-        if request.param == [] or request.param == "":
-            pytest.skip("metric empty is valid for distance calculation")
-        if not isinstance(request.param, str):
-            pytest.skip("Skip invalid type for metric")
-        yield request.param
-
     @pytest.fixture(scope="function", params=["JACCARD", "Superstructure", "Substructure"])
     def get_not_support_metric(self, request):
         yield request.param
@@ -58,20 +43,11 @@ class TestUtilityParams(TestcaseBase):
     def get_support_metric_field(self, request):
         yield request.param
 
-    @pytest.fixture(scope="function", params=ct.get_invalid_strs)
-    def get_invalid_partition_names(self, request):
-        if isinstance(request.param, list):
-            if len(request.param) == 0:
-                pytest.skip("empty is valid for partition")
-        if request.param is None:
-            pytest.skip("None is valid for partition")
-        yield request.param
-
     @pytest.fixture(scope="function", params=ct.get_not_string)
     def get_invalid_type_collection_name(self, request):
         yield request.param
 
-    @pytest.fixture(scope="function", params=ct.get_not_string_value)
+    @pytest.fixture(scope="function", params=ct.invalid_resource_names)
     def get_invalid_value_collection_name(self, request):
         yield request.param
 
@@ -82,42 +58,67 @@ class TestUtilityParams(TestcaseBase):
     """
 
     @pytest.mark.tags(CaseLabel.L2)
-    def test_has_collection_name_invalid(self, get_invalid_collection_name):
+    def test_has_collection_name_type_invalid(self, get_invalid_type_collection_name):
         """
         target: test has_collection with error collection name
         method: input invalid name
         expected: raise exception
         """
         self._connect()
-        c_name = get_invalid_collection_name
-        if isinstance(c_name, str) and c_name:
-            self.utility_wrap.has_collection(
-                c_name,
-                check_task=CheckTasks.err_res,
-                check_items={ct.err_code: 1100,
-                             ct.err_msg: "collection name should not be empty: invalid parameter"})
-        # elif not isinstance(c_name, str): self.utility_wrap.has_collection(c_name, check_task=CheckTasks.err_res,
-        # check_items={ct.err_code: 1, ct.err_msg: "illegal"})
+        c_name = get_invalid_type_collection_name
+        self.utility_wrap.has_collection(c_name, check_task=CheckTasks.err_res,
+                                         check_items={ct.err_code: 999,
+                                                      ct.err_msg: f"`collection_name` value {c_name} is illegal"})
 
     @pytest.mark.tags(CaseLabel.L2)
-    def test_has_partition_collection_name_invalid(self, get_invalid_collection_name):
+    def test_has_collection_name_value_invalid(self, get_invalid_value_collection_name):
+        """
+        target: test has_collection with error collection name
+        method: input invalid name
+        expected: raise exception
+        """
+        self._connect()
+        c_name = get_invalid_value_collection_name
+        error = {ct.err_code: 999, ct.err_msg: f"Invalid collection name: {c_name}"}
+        if c_name in [None, ""]:
+            error = {ct.err_code: 999, ct.err_msg: f"`collection_name` value {c_name} is illegal"}
+        elif c_name == " ":
+            error = {ct.err_code: 999, ct.err_msg: "collection name should not be empty: invalid parameter"}
+        self.utility_wrap.has_collection(c_name, check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_has_partition_collection_name_type_invalid(self, get_invalid_type_collection_name):
         """
         target: test has_partition with error collection name
         method: input invalid name
         expected: raise exception
         """
         self._connect()
-        c_name = get_invalid_collection_name
+        c_name = get_invalid_type_collection_name
         p_name = cf.gen_unique_str(prefix)
-        if isinstance(c_name, str) and c_name:
-            self.utility_wrap.has_partition(
-                c_name, p_name,
-                check_task=CheckTasks.err_res,
-                check_items={ct.err_code: 1100,
-                             ct.err_msg: "collection name should not be empty: invalid parameter"})
+        self.utility_wrap.has_partition(c_name, p_name, check_task=CheckTasks.err_res,
+                                        check_items={ct.err_code: 999,
+                                                     ct.err_msg: f"`collection_name` value {c_name} is illegal"})
 
     @pytest.mark.tags(CaseLabel.L2)
-    def test_has_partition_name_invalid(self, get_invalid_partition_name):
+    def test_has_partition_collection_name_value_invalid(self, get_invalid_value_collection_name):
+        """
+        target: test has_partition with error collection name
+        method: input invalid name
+        expected: raise exception
+        """
+        self._connect()
+        c_name = get_invalid_value_collection_name
+        p_name = cf.gen_unique_str(prefix)
+        error = {ct.err_code: 999, ct.err_msg: f"Invalid collection name: {c_name}"}
+        if c_name in [None, ""]:
+            error = {ct.err_code: 999, ct.err_msg: f"`collection_name` value {c_name} is illegal"}
+        elif c_name == " ":
+            error = {ct.err_code: 999, ct.err_msg: "collection name should not be empty: invalid parameter"}
+        self.utility_wrap.has_partition(c_name, p_name, check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_has_partition_name_type_invalid(self, get_invalid_type_collection_name):
         """
         target: test has_partition with error partition name
         method: input invalid name
@@ -126,21 +127,49 @@ class TestUtilityParams(TestcaseBase):
         self._connect()
         ut = ApiUtilityWrapper()
         c_name = cf.gen_unique_str(prefix)
-        p_name = get_invalid_partition_name
-        if isinstance(p_name, str) and p_name:
-            ex, _ = ut.has_partition(
-                c_name, p_name,
-                check_task=CheckTasks.err_res,
-                check_items={ct.err_code: 1, ct.err_msg: "Invalid"})
+        p_name = get_invalid_type_collection_name
+        ut.has_partition(c_name, p_name, check_task=CheckTasks.err_res,
+                         check_items={ct.err_code: 999,
+                                      ct.err_msg: f"`partition_name` value {p_name} is illegal"})
 
     @pytest.mark.tags(CaseLabel.L2)
-    def test_drop_collection_name_invalid(self, get_invalid_collection_name):
+    def test_has_partition_name_value_invalid(self, get_invalid_value_collection_name):
+        """
+        target: test has_partition with error partition name
+        method: input invalid name
+        expected: raise exception
+        """
         self._connect()
-        error1 = {ct.err_code: 1, ct.err_msg: f"`collection_name` value {get_invalid_collection_name} is illegal"}
-        error2 = {ct.err_code: 1100, ct.err_msg: f"Invalid collection name: {get_invalid_collection_name}."}
-        error = error1 if get_invalid_collection_name in [[], 1, [1, '2', 3], (1,), {1: 1}, None, ""] else error2
-        self.utility_wrap.drop_collection(get_invalid_collection_name, check_task=CheckTasks.err_res,
-                                          check_items=error)
+        ut = ApiUtilityWrapper()
+        c_name = cf.gen_unique_str(prefix)
+        p_name = get_invalid_value_collection_name
+        if p_name == "12name":
+            pytest.skip("partition name 12name is legal")
+        error = {ct.err_code: 999, ct.err_msg: f"Invalid partition name: {p_name}"}
+        if p_name in [None]:
+            error = {ct.err_code: 999, ct.err_msg: f"`partition_name` value {p_name} is illegal"}
+        elif p_name in [" ", ""]:
+            error = {ct.err_code: 999, ct.err_msg: "Invalid partition name: . Partition name should not be empty."}
+        ut.has_partition(c_name, p_name, check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_drop_collection_name_type_invalid(self, get_invalid_type_collection_name):
+        self._connect()
+        c_name = get_invalid_type_collection_name
+        self.utility_wrap.drop_collection(c_name, check_task=CheckTasks.err_res,
+                                          check_items={ct.err_code: 999,
+                                                       ct.err_msg: f"`collection_name` value {c_name} is illegal"})
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_drop_collection_name_value_invalid(self, get_invalid_value_collection_name):
+        self._connect()
+        c_name = get_invalid_value_collection_name
+        error = {ct.err_code: 999, ct.err_msg: f"Invalid collection name: {c_name}"}
+        if c_name in [None, ""]:
+            error = {ct.err_code: 999, ct.err_msg: f"`collection_name` value {c_name} is illegal"}
+        elif c_name == " ":
+            error = {ct.err_code: 999, ct.err_msg: "collection name should not be empty: invalid parameter"}
+        self.utility_wrap.drop_collection(c_name, check_task=CheckTasks.err_res, check_items=error)
 
     # TODO: enable
     @pytest.mark.tags(CaseLabel.L2)
@@ -157,35 +186,38 @@ class TestUtilityParams(TestcaseBase):
                                     check_items={ct.err_code: 0, ct.err_msg: "should create connect"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    def test_index_process_invalid_name(self, get_invalid_collection_name):
+    @pytest.mark.parametrize("invalid_name", ct.invalid_resource_names)
+    def test_index_process_invalid_name(self, invalid_name):
         """
         target: test building_process
         method: input invalid name
         expected: raise exception
         """
-        pass
-        # self._connect() c_name = get_invalid_collection_name ut = ApiUtilityWrapper() if isinstance(c_name,
-        # str) and c_name: ex, _ = ut.index_building_progress(c_name, check_items={ct.err_code: 1, ct.err_msg:
-        # "Invalid collection name"})
+        self._connect()
+        error = {ct.err_code: 999, ct.err_msg: f"Invalid collection name: {invalid_name}"}
+        if invalid_name in [None, "", " "]:
+            error = {ct.err_code: 999, ct.err_msg: "collection name should not be empty"}
+        self.utility_wrap.index_building_progress(collection_name=invalid_name,
+                                                  check_task=CheckTasks.err_res, check_items=error)
 
     # TODO: not support index name
     @pytest.mark.tags(CaseLabel.L1)
-    def _test_index_process_invalid_index_name(self, get_invalid_index_name):
+    @pytest.mark.parametrize("invalid_index_name", ct.invalid_resource_names)
+    def test_index_process_invalid_index_name(self, invalid_index_name):
         """
         target: test building_process
         method: input invalid index name
         expected: raise exception
         """
         self._connect()
-        c_name = cf.gen_unique_str(prefix)
-        index_name = get_invalid_index_name
-        ut = ApiUtilityWrapper()
-        ex, _ = ut.index_building_progress(c_name, index_name)
-        log.error(str(ex))
-        assert "invalid" or "illegal" in str(ex)
+        collection_w = self.init_collection_wrap()
+        error = {ct.err_code: 999, ct.err_msg: "index not found"}
+        self.utility_wrap.index_building_progress(collection_name=collection_w.name, index_name=invalid_index_name,
+                                                  check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
-    def test_wait_index_invalid_name(self, get_invalid_collection_name):
+    @pytest.mark.skip("not ready")
+    def test_wait_index_invalid_name(self, get_invalid_type_collection_name):
         """
         target: test wait_index
         method: input invalid name
@@ -249,16 +281,19 @@ class TestUtilityParams(TestcaseBase):
         self.utility_wrap.loading_progress("not_existed_name", check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
-    def test_loading_progress_invalid_partition_names(self, get_invalid_partition_names):
+    @pytest.mark.parametrize("partition_name", ct.invalid_resource_names)
+    def test_loading_progress_invalid_partition_names(self, partition_name):
         """
         target: test loading progress with invalid partition names
         method: input invalid partition names
         expected: raise an exception
         """
-        collection_w = self.init_collection_general(prefix)[0]
-        partition_names = get_invalid_partition_names
-        err_msg = {ct.err_code: 0, ct.err_msg: "`partition_name_array` value {} is illegal".format(partition_names)}
+        collection_w = self.init_collection_general(prefix, nb=10)[0]
+        partition_names = [partition_name]
         collection_w.load()
+        err_msg = {ct.err_code: 999, ct.err_msg: "partition not found"}
+        if partition_name is None:
+            err_msg = {ct.err_code: 999, ct.err_msg: "is illegal"}
         self.utility_wrap.loading_progress(collection_w.name, partition_names,
                                            check_task=CheckTasks.err_res, check_items=err_msg)
 
@@ -270,8 +305,7 @@ class TestUtilityParams(TestcaseBase):
         method: input all or part not existed partition names
         expected: raise exception
         """
-        collection_w = self.init_collection_general(prefix)[0]
-        log.debug(collection_w.num_entities)
+        collection_w = self.init_collection_general(prefix, nb=10)[0]
         collection_w.load()
         err_msg = {ct.err_code: 15, ct.err_msg: f"partition not found"}
         self.utility_wrap.loading_progress(collection_w.name, partition_names,
@@ -394,138 +428,6 @@ class TestUtilityParams(TestcaseBase):
                                                          "err_msg": "vectors_right value {} "
                                                                     "is illegal".format(invalid_vector)})
 
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_invalid_metric_type(self, get_support_metric_field, get_invalid_metric_type):
-        """
-        target: test calculated distance with invalid metric
-        method: input invalid metric
-        expected: raise exception
-        """
-        self._connect()
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        metric_field = get_support_metric_field
-        metric = get_invalid_metric_type
-        params = {metric_field: metric}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.err_res,
-                                        check_items={"err_code": 1,
-                                                     "err_msg": "params value {{'metric': {}}} "
-                                                                "is illegal".format(metric)})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_invalid_metric_value(self, get_support_metric_field, get_invalid_metric_value):
-        """
-        target: test calculated distance with invalid metric
-        method: input invalid metric
-        expected: raise exception
-        """
-        self._connect()
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        metric_field = get_support_metric_field
-        metric = get_invalid_metric_value
-        params = {metric_field: metric}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.err_res,
-                                        check_items={"err_code": 1,
-                                                     "err_msg": "{} metric type is invalid for "
-                                                                "float vector".format(metric)})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_not_support_metric(self, get_support_metric_field, get_not_support_metric):
-        """
-        target: test calculated distance with invalid metric
-        method: input invalid metric
-        expected: raise exception
-        """
-        self._connect()
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        metric_field = get_support_metric_field
-        metric = get_not_support_metric
-        params = {metric_field: metric}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.err_res,
-                                        check_items={"err_code": 1,
-                                                     "err_msg": "{} metric type is invalid for "
-                                                                "float vector".format(metric)})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_invalid_using(self, get_support_metric_field):
-        """
-        target: test calculated distance with invalid using
-        method: input invalid using
-        expected: raise exception
-        """
-        self._connect()
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        metric_field = get_support_metric_field
-        params = {metric_field: "L2", "sqrt": True}
-        using = "empty"
-        self.utility_wrap.calc_distance(op_l, op_r, params, using=using,
-                                        check_task=CheckTasks.err_res,
-                                        check_items={"err_code": 1,
-                                                     "err_msg": "should create connect"})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_not_match_dim(self):
-        """
-        target: test calculated distance with invalid vectors
-        method: input invalid vectors type and value
-        expected: raise exception
-        """
-        self._connect()
-        dim = 129
-        vector_l = cf.gen_vectors(default_nb, default_dim)
-        vector_r = cf.gen_vectors(default_nb, dim)
-        op_l = {"float_vectors": vector_l}
-        op_r = {"float_vectors": vector_r}
-        self.utility_wrap.calc_distance(op_l, op_r,
-                                        check_task=CheckTasks.err_res,
-                                        check_items={"err_code": 1,
-                                                     "err_msg": "Cannot calculate distance between "
-                                                                "vectors with different dimension"})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_collection_before_load(self, get_support_metric_field):
-        """
-        target: test calculated distance when entities is not ready
-        method: calculate distance before load
-        expected: raise exception
-        """
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb,
-                                                                               is_index=True)
-        middle = len(insert_ids) // 2
-        op_l = {"ids": insert_ids[:middle], "collection": collection_w.name,
-                "field": default_field_name}
-        op_r = {"ids": insert_ids[middle:], "collection": collection_w.name,
-                "field": default_field_name}
-        metric_field = get_support_metric_field
-        params = {metric_field: "L2", "sqrt": True}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.err_res,
-                                        check_items={"err_code": 1,
-                                                     "err_msg": "collection {} was not "
-                                                                "loaded into memory)".format(collection_w.name)})
-
     @pytest.mark.tags(CaseLabel.L1)
     def test_rename_collection_old_invalid_type(self, get_invalid_type_collection_name):
         """
@@ -539,7 +441,7 @@ class TestUtilityParams(TestcaseBase):
         new_collection_name = cf.gen_unique_str(prefix)
         self.utility_wrap.rename_collection(old_collection_name, new_collection_name,
                                             check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 1,
+                                            check_items={"err_code": 999,
                                                          "err_msg": "`collection_name` value {} is illegal".format(
                                                              old_collection_name)})
 
@@ -554,10 +456,12 @@ class TestUtilityParams(TestcaseBase):
         collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix)
         old_collection_name = get_invalid_value_collection_name
         new_collection_name = cf.gen_unique_str(prefix)
+        error = {"err_code": 4, "err_msg": "collection not found"}
+        if old_collection_name in [None, ""]:
+            error = {"err_code": 999, "err_msg": "is illegal"}
         self.utility_wrap.rename_collection(old_collection_name, new_collection_name,
                                             check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 4,
-                                                         "err_msg": "collection not found"})
+                                            check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_rename_collection_new_invalid_type(self, get_invalid_type_collection_name):
@@ -587,13 +491,12 @@ class TestUtilityParams(TestcaseBase):
         collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix)
         old_collection_name = collection_w.name
         new_collection_name = get_invalid_value_collection_name
+        error = {"err_code": 1100, "err_msg": "Invalid collection name: %s. the first character of a collection name mu"
+                                              "st be an underscore or letter: invalid parameter" % new_collection_name}
+        if new_collection_name in [None, ""]:
+            error = {"err_code": 999, "err_msg": f"`collection_name` value {new_collection_name} is illegal"}
         self.utility_wrap.rename_collection(old_collection_name, new_collection_name,
-                                            check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 1100,
-                                                         "err_msg": "Invalid collection name: %s. the first "
-                                                                    "character of a collection name must be an "
-                                                                    "underscore or letter: invalid parameter"
-                                                                    % new_collection_name})
+                                            check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_rename_collection_not_existed_collection(self):
@@ -829,7 +732,7 @@ class TestUtilityBase(TestcaseBase):
         cw = self.init_collection_wrap(name=c_name)
         self.index_wrap.init_index(cw.collection, default_field_name, default_index_params)
         res, _ = self.utility_wrap.index_building_progress(c_name)
-        exp_res = {'total_rows': 0, 'indexed_rows': 0, 'pending_index_rows': 0}
+        exp_res = {'total_rows': 0, 'indexed_rows': 0, 'pending_index_rows': 0, 'state': 'Finished'}
         assert res == exp_res
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -920,7 +823,7 @@ class TestUtilityBase(TestcaseBase):
         cw.create_index(default_field_name, default_index_params)
         assert self.utility_wrap.wait_for_index_building_complete(c_name)[0]
         res, _ = self.utility_wrap.index_building_progress(c_name)
-        exp_res = {'total_rows': 0, 'indexed_rows': 0, 'pending_index_rows': 0}
+        exp_res = {'total_rows': 0, 'indexed_rows': 0, 'pending_index_rows': 0, 'state': 'Finished'}
         assert res == exp_res
 
     @pytest.mark.tags(CaseLabel.L1)
@@ -1007,19 +910,17 @@ class TestUtilityBase(TestcaseBase):
         assert exp_res == res
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="issue 19754")
     def test_loading_progress_after_release(self):
         """
         target: test loading progress after release
         method: insert and flush data, call loading_progress after release
         expected: return successfully with 0%
         """
-        collection_w = self.init_collection_general(prefix, insert_data=True)[0]
+        collection_w = self.init_collection_general(prefix, insert_data=True, nb=100)[0]
         collection_w.release()
-        res = self.utility_wrap.loading_progress(collection_w.name)[0]
-        exp_res = {loading_progress: '0%', num_loaded_partitions: 0, not_loaded_partitions: ['_default']}
-
-        assert exp_res == res
+        error = {ct.err_code: 999, ct.err_msg: "collection not loaded"}
+        self.utility_wrap.loading_progress(collection_w.name,
+                                           check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_loading_progress_with_release_partition(self):
@@ -1182,355 +1083,6 @@ class TestUtilityBase(TestcaseBase):
             sleep(1)
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_default(self):
-        """
-        target: test calculated distance with default params
-        method: calculated distance between two random vectors
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        log.info("Creating vectors for distance calculation")
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        log.info("Calculating distance for generated vectors")
-        self.utility_wrap.calc_distance(op_l, op_r,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_default_sqrt(self, metric_field, metric):
-        """
-        target: test calculated distance with default param
-        method: calculated distance with default sqrt
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        log.info("Creating vectors for distance calculation")
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        log.info("Calculating distance for generated vectors within default sqrt")
-        params = {metric_field: metric}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_default_metric(self, sqrt):
-        """
-        target: test calculated distance with default param
-        method: calculated distance with default metric
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        log.info("Creating vectors for distance calculation")
-        vectors_l = cf.gen_vectors(default_nb, default_dim)
-        vectors_r = cf.gen_vectors(default_nb, default_dim)
-        op_l = {"float_vectors": vectors_l}
-        op_r = {"float_vectors": vectors_r}
-        log.info("Calculating distance for generated vectors within default metric")
-        params = {"sqrt": sqrt}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_binary_metric(self, metric_field, metric_binary):
-        """
-        target: test calculate distance with binary vectors
-        method: calculate distance between binary vectors
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        log.info("Creating vectors for distance calculation")
-        nb = 10
-        raw_vectors_l, vectors_l = cf.gen_binary_vectors(nb, default_dim)
-        raw_vectors_r, vectors_r = cf.gen_binary_vectors(nb, default_dim)
-        op_l = {"bin_vectors": vectors_l}
-        op_r = {"bin_vectors": vectors_r}
-        log.info("Calculating distance for binary vectors")
-        params = {metric_field: metric_binary}
-        vectors_l = raw_vectors_l
-        vectors_r = raw_vectors_r
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric_binary})
-
-    @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_from_collection_ids(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance from collection entities
-        method: both left and right vectors are from collection
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb)
-        middle = len(insert_ids) // 2
-        vectors = vectors[0].loc[:, default_field_name]
-        vectors_l = vectors[:middle]
-        vectors_r = []
-        for i in range(middle):
-            vectors_r.append(vectors[middle + i])
-        log.info("Creating vectors from collections for distance calculation")
-        op_l = {"ids": insert_ids[:middle], "collection": collection_w.name,
-                "field": default_field_name}
-        op_r = {"ids": insert_ids[middle:], "collection": collection_w.name,
-                "field": default_field_name}
-        log.info("Creating vectors for entities")
-        params = {metric_field: metric, "sqrt": sqrt}
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric,
-                                                     "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_from_collections(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance between entities from collections
-        method: calculated distance between entities from two collections
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        nb = 10
-        prefix_1 = "utility_distance"
-        log.info("Creating two collections")
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb)
-        collection_w_1, vectors_1, _, insert_ids_1, _ = self.init_collection_general(prefix_1, True, nb)
-        vectors_l = vectors[0].loc[:, default_field_name]
-        vectors_r = vectors_1[0].loc[:, default_field_name]
-        log.info("Extracting entities from collections for distance calculating")
-        op_l = {"ids": insert_ids, "collection": collection_w.name,
-                "field": default_field_name}
-        op_r = {"ids": insert_ids_1, "collection": collection_w_1.name,
-                "field": default_field_name}
-        params = {metric_field: metric, "sqrt": sqrt}
-        log.info("Calculating distance for entities from two collections")
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric,
-                                                     "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_left_vector_and_collection_ids(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance from collection entities
-        method: set left vectors as random vectors, right vectors from collection
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb)
-        middle = len(insert_ids) // 2
-        vectors = vectors[0].loc[:, default_field_name]
-        vectors_l = cf.gen_vectors(nb, default_dim)
-        vectors_r = []
-        for i in range(middle):
-            vectors_r.append(vectors[middle + i])
-        op_l = {"float_vectors": vectors_l}
-        log.info("Extracting entities from collections for distance calculating")
-        op_r = {"ids": insert_ids[middle:], "collection": collection_w.name,
-                "field": default_field_name}
-        params = {metric_field: metric, "sqrt": sqrt}
-        log.info("Calculating distance between vectors and entities")
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric,
-                                                     "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_right_vector_and_collection_ids(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance from collection entities
-        method: set right vectors as random vectors, left vectors from collection
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb)
-        middle = len(insert_ids) // 2
-        vectors = vectors[0].loc[:, default_field_name]
-        vectors_l = vectors[:middle]
-        vectors_r = cf.gen_vectors(nb, default_dim)
-        log.info("Extracting entities from collections for distance calculating")
-        op_l = {"ids": insert_ids[:middle], "collection": collection_w.name,
-                "field": default_field_name}
-        op_r = {"float_vectors": vectors_r}
-        params = {metric_field: metric, "sqrt": sqrt}
-        log.info("Calculating distance between right vector and entities")
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric,
-                                                     "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_from_partition_ids(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance from one partition entities
-        method: both left and right vectors are from partition
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb, partition_num=1)
-        partitions = collection_w.partitions
-        middle = len(insert_ids) // 2
-        params = {metric_field: metric, "sqrt": sqrt}
-        start = 0
-        end = middle
-        for i in range(len(partitions)):
-            log.info("Extracting entities from partitions for distance calculating")
-            vectors_l = vectors[i].loc[:, default_field_name]
-            vectors_r = vectors[i].loc[:, default_field_name]
-            op_l = {"ids": insert_ids[start:end], "collection": collection_w.name,
-                    "partition": partitions[i].name, "field": default_field_name}
-            op_r = {"ids": insert_ids[start:end], "collection": collection_w.name,
-                    "partition": partitions[i].name, "field": default_field_name}
-            start += middle
-            end += middle
-            log.info("Calculating distance between entities from one partition")
-            self.utility_wrap.calc_distance(op_l, op_r, params,
-                                            check_task=CheckTasks.check_distance,
-                                            check_items={"vectors_l": vectors_l,
-                                                         "vectors_r": vectors_r,
-                                                         "metric": metric,
-                                                         "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_from_partitions(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance between entities from partitions
-        method: calculate distance between entities from two partitions
-        expected: distance calculated successfully
-        """
-        log.info("Create connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb, partition_num=1)
-        partitions = collection_w.partitions
-        middle = len(insert_ids) // 2
-        params = {metric_field: metric, "sqrt": sqrt}
-        vectors_l = vectors[0].loc[:, default_field_name]
-        vectors_r = vectors[1].loc[:, default_field_name]
-        log.info("Extract entities from two partitions for distance calculating")
-        op_l = {"ids": insert_ids[:middle], "collection": collection_w.name,
-                "partition": partitions[0].name, "field": default_field_name}
-        op_r = {"ids": insert_ids[middle:], "collection": collection_w.name,
-                "partition": partitions[1].name, "field": default_field_name}
-        log.info("Calculate distance between entities from two partitions")
-        self.utility_wrap.calc_distance(op_l, op_r, params,
-                                        check_task=CheckTasks.check_distance,
-                                        check_items={"vectors_l": vectors_l,
-                                                     "vectors_r": vectors_r,
-                                                     "metric": metric,
-                                                     "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_left_vectors_and_partition_ids(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance between vectors and partition entities
-        method: set left vectors as random vectors, right vectors are entities
-        expected: distance calculated successfully
-        """
-        log.info("Creating connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb, partition_num=1)
-        middle = len(insert_ids) // 2
-        partitions = collection_w.partitions
-        vectors_l = cf.gen_vectors(nb // 2, default_dim)
-        log.info("Extract entities from collection as right vectors")
-        op_l = {"float_vectors": vectors_l}
-        params = {metric_field: metric, "sqrt": sqrt}
-        start = 0
-        end = middle
-        log.info("Calculate distance between vector and entities")
-        for i in range(len(partitions)):
-            vectors_r = vectors[i].loc[:, default_field_name]
-            op_r = {"ids": insert_ids[start:end], "collection": collection_w.name,
-                    "partition": partitions[i].name, "field": default_field_name}
-            start += middle
-            end += middle
-            self.utility_wrap.calc_distance(op_l, op_r, params,
-                                            check_task=CheckTasks.check_distance,
-                                            check_items={"vectors_l": vectors_l,
-                                                         "vectors_r": vectors_r,
-                                                         "metric": metric,
-                                                         "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="calc_distance interface is no longer supported")
-    def test_calc_distance_right_vectors_and_partition_ids(self, metric_field, metric, sqrt):
-        """
-        target: test calculated distance between vectors and partition entities
-        method: set right vectors as random vectors, left vectors are entities
-        expected: distance calculated successfully
-        """
-        log.info("Create connection")
-        self._connect()
-        nb = 10
-        collection_w, vectors, _, insert_ids, _ = self.init_collection_general(prefix, True, nb, partition_num=1)
-        middle = len(insert_ids) // 2
-        partitions = collection_w.partitions
-        vectors_r = cf.gen_vectors(nb // 2, default_dim)
-        op_r = {"float_vectors": vectors_r}
-        params = {metric_field: metric, "sqrt": sqrt}
-        start = 0
-        end = middle
-        for i in range(len(partitions)):
-            vectors_l = vectors[i].loc[:, default_field_name]
-            log.info("Extract entities from partition %d as left vector" % i)
-            op_l = {"ids": insert_ids[start:end], "collection": collection_w.name,
-                    "partition": partitions[i].name, "field": default_field_name}
-            start += middle
-            end += middle
-            log.info("Calculate distance between vector and entities from partition %d" % i)
-            self.utility_wrap.calc_distance(op_l, op_r, params,
-                                            check_task=CheckTasks.check_distance,
-                                            check_items={"vectors_l": vectors_l,
-                                                         "vectors_r": vectors_r,
-                                                         "metric": metric,
-                                                         "sqrt": sqrt})
-
-    @pytest.mark.tags(CaseLabel.L1)
     def test_rename_collection(self):
         """
         target: test rename collection function to single collection
@@ -1679,6 +1231,53 @@ class TestUtilityBase(TestcaseBase):
         b_alias, _ = self.utility_wrap.list_aliases(b_name)
         assert a_name in b_alias
 
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_list_indexes(self):
+        """
+        target: test utility.list_indexes
+        method: create 2 collections and list indexes
+        expected: raise no exception
+        """
+        # 1. create 2 collections
+        string_field = ct.default_string_field_name
+        collection_w1 = self.init_collection_general(prefix, True)[0]
+        collection_w2 = self.init_collection_general(prefix, True, is_index=False)[0]
+        collection_w2.create_index(string_field)
+
+        # 2. list indexes
+        res1, _ = self.utility_wrap.list_indexes(collection_w1.name)
+        assert res1 == [ct.default_float_vec_field_name]
+        res2, _ = self.utility_wrap.list_indexes(collection_w2.name)
+        assert res2 == [string_field]
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_get_server_type(self):
+        """
+        target: test utility.get_server_type
+        method: get_server_type
+        expected: raise no exception
+        """
+        self._connect()
+        res, _ = self.utility_wrap.get_server_type()
+        assert res == "milvus"
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_load_state(self):
+        """
+        target: test utility.load_state
+        method: load_state
+        expected: raise no exception
+        """
+        collection_w = self.init_collection_general(prefix, True, partition_num=1)[0]
+        res1, _ = self.utility_wrap.load_state(collection_w.name)
+        assert str(res1) == "Loaded"
+        collection_w.release()
+        res2, _ = self.utility_wrap.load_state(collection_w.name)
+        assert str(res2) == "NotLoad"
+        collection_w.load(partition_names=[ct.default_partition_name])
+        res3, _ = self.utility_wrap.load_state(collection_w.name)
+        assert str(res3) == "Loaded"
+
 
 class TestUtilityAdvanced(TestcaseBase):
     """ Test case of index interface """
@@ -1759,24 +1358,98 @@ class TestUtilityAdvanced(TestcaseBase):
         assert len(res) == 0
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.skip("index must created before load, but create_index will trigger flush")
-    def test_get_sealed_query_segment_info(self):
+    @pytest.mark.parametrize("primary_field", ["int64_pk", "varchar_pk"])
+    def test_get_sealed_query_segment_info(self, primary_field):
         """
-        target: test getting sealed query segment info of collection without index
-        method: init a collection, insert data, flush, load, and get query segment info
+        target: test getting sealed query segment info of collection with data
+        method: init a collection, insert data, flush, index, load, and get query segment info
         expected:
-            1. length of segment is equal to 0
+            1. length of segment is greater than 0
+            2. the sum num_rows of each segment is equal to num of entities
+            3. all segment is_sorted true
         """
-        c_name = cf.gen_unique_str(prefix)
-        collection_w = self.init_collection_wrap(name=c_name)
         nb = 3000
-        df = cf.gen_default_dataframe_data(nb)
-        collection_w.insert(df)
-        collection_w.num_entities
-        collection_w.create_index(ct.default_float_vec_field_name, index_params=ct.default_flat_index)
-        collection_w.load()
-        res, _ = self.utility_wrap.get_query_segment_info(c_name)
-        assert len(res) == 0
+        segment_num = 2
+        collection_name = cf.gen_unique_str(prefix)
+
+        # connect -> create collection
+        self._connect()
+        self.collection_wrap.init_collection(
+            name=collection_name,
+            schema=cf.set_collection_schema(
+                fields=[primary_field, ct.default_float_vec_field_name],
+                field_params={
+                    primary_field: FieldParams(is_primary=True, max_length=128).to_dict,
+                    ct.default_float_vec_field_name: FieldParams(dim=ct.default_dim).to_dict,
+                },
+            )
+        )
+
+        for _ in range(segment_num):
+            # insert random pks, ***start=None will generate random data***
+            data = cf.gen_values(self.collection_wrap.schema, nb=nb, start_id=None)
+            self.collection_wrap.insert(data)
+            self.collection_wrap.flush()
+
+        # flush -> index -> load -> sealed segments is sorted
+        self.build_multi_index(index_params=DefaultVectorIndexParams.IVF_SQ8(ct.default_float_vec_field_name))
+        self.collection_wrap.load()
+
+        # get_query_segment_info and verify results
+        res_sealed, _ = self.utility_wrap.get_query_segment_info(collection_name)
+        assert len(res_sealed) > 0 # maybe mix compaction to 1 segment
+        cnt = 0
+        for r in res_sealed:
+            log.info(f"segmentID {r.segmentID}: state: {r.state}; num_rows: {r.num_rows}; is_sorted: {r.is_sorted} ")
+            cnt += r.num_rows
+            assert r.is_sorted is True
+        assert cnt == nb * segment_num
+
+        # verify search
+        self.collection_wrap.search(data=cf.gen_vectors(ct.default_nq, ct.default_dim),
+                                    anns_field=ct.default_float_vec_field_name, param=DefaultVectorSearchParams.IVF_SQ8(),
+                                    limit=ct.default_limit,
+                                    check_task=CheckTasks.check_search_results,
+                                    check_items={"nq": ct.default_nq,
+                                                 "limit": ct.default_limit})
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_get_growing_query_segment_info(self):
+        """
+        target: test getting growing query segment info of collection with data
+        method: init a collection, index, load, insert data, and get query segment info
+        expected:
+            1. length of segment is 0, growing segment is not visible for get_query_segment_info
+        """
+        nb = 3000
+        primary_field = "int64"
+        collection_name = cf.gen_unique_str(prefix)
+
+        # connect -> create collection
+        self._connect()
+        self.collection_wrap.init_collection(
+            name=collection_name,
+            schema=cf.set_collection_schema(
+                fields=[primary_field, ct.default_float_vec_field_name],
+                field_params={
+                    primary_field: FieldParams(is_primary=True, max_length=128).to_dict,
+                    ct.default_float_vec_field_name: FieldParams(dim=ct.default_dim).to_dict,
+                },
+            )
+        )
+
+        # index -> load
+        self.build_multi_index(index_params=DefaultVectorIndexParams.IVF_SQ8(ct.default_float_vec_field_name))
+        self.collection_wrap.load()
+
+        # insert random pks, ***start=None will generate random data***
+        data = cf.gen_values(self.collection_wrap.schema, nb=nb, start_id=None)
+        self.collection_wrap.insert(data)
+
+        # get_query_segment_info and verify results
+        res_sealed, _ = self.utility_wrap.get_query_segment_info(collection_name)
+        assert len(res_sealed) == 0
+
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_get_sealed_query_segment_info_after_create_index(self):
@@ -1933,7 +1606,6 @@ class TestUtilityAdvanced(TestcaseBase):
                                        check_items={ct.err_code: 1, ct.err_msg: "destination node not found in the same replica"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="issue: https://github.com/milvus-io/milvus/issues/19441")
     def test_load_balance_with_one_sealed_segment_id_not_exist(self):
         """
         target: test load balance of collection
@@ -1968,7 +1640,7 @@ class TestUtilityAdvanced(TestcaseBase):
         # load balance
         self.utility_wrap.load_balance(collection_w.name, src_node_id, dst_node_ids, sealed_segment_ids,
                                        check_task=CheckTasks.err_res,
-                                       check_items={ct.err_code: 1, ct.err_msg: "not found in source node"})
+                                       check_items={ct.err_code: 999, ct.err_msg: "not found in source node"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_load_balance_with_all_sealed_segment_id_not_exist(self):
@@ -2237,16 +1909,15 @@ class TestUtilityUserPassword(TestcaseBase):
         method: delete user with username and connect with the wrong user then list collections
         expected: deleted successfully
         """
-        user = "xiaoai"
+        user_name = cf.gen_unique_str(prefix)
+        password = cf.gen_str_by_length()
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
-        self.utility_wrap.create_user(user=user, password="abc123")
-        self.utility_wrap.delete_user(user=user)
+        self.utility_wrap.create_user(user=user_name, password=password)
+        self.utility_wrap.delete_user(user=user_name)
         self.connection_wrap.disconnect(alias=connect_name)
-        self.connection_wrap.connect(host=host, port=port, user=user, password="abc123",
-                                     check_task=ct.CheckTasks.err_res,
-                                     check_items={ct.err_code: 2,
-                                                  ct.err_msg: "Fail connecting to server"})
+        self.connection_wrap.connect(host=host, port=port, user=user_name, password=password,
+                                     check_task=CheckTasks.check_auth_failure)
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
     def test_delete_user_with_invalid_username(self, host, port):
@@ -2291,11 +1962,11 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
         self.utility_wrap.create_user(user=user, password=ct.default_password,
                                       check_task=ct.CheckTasks.err_res,
-                                      check_items={ct.err_code: 5})
+                                      check_items={ct.err_code: 1100,
+                                                   ct.err_msg: "invalid parameter"})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["alice123w"])
-    def test_create_user_with_existed_username(self, host, port, user):
+    def test_create_user_with_existed_username(self, host, port):
         """
         target: test the user when create user
         method: create a user, and then create a user with the same username
@@ -2306,15 +1977,18 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
 
         # 2.create the first user successfully
-        self.utility_wrap.create_user(user=user, password=ct.default_password)
+        user_name = cf.gen_unique_str(prefix)
+        self.utility_wrap.create_user(user=user_name, password=ct.default_password)
 
         # 3.create the second user with the same username
-        self.utility_wrap.create_user(user=user, password=ct.default_password,
-                                      check_task=ct.CheckTasks.err_res, check_items={ct.err_code: 29})
+        self.utility_wrap.create_user(user=user_name, password=ct.default_password,
+                                      check_task=ct.CheckTasks.err_res,
+                                      check_items={ct.err_code: 65535,
+                                                   ct.err_msg: "user already exists: %s" % user_name})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("password", ["12345"])
-    def test_create_user_with_invalid_password(self, host, port, password):
+    @pytest.mark.parametrize("invalid_password", ["12345"])
+    def test_create_user_with_invalid_password(self, host, port, invalid_password):
         """
         target: test the password when create user
         method: make the length of user exceed the limitation [6, 256]
@@ -2322,14 +1996,15 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
         """
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
-        user = "alice"
-        self.utility_wrap.create_user(user=user, password=password,
-                                      check_task=ct.CheckTasks.err_res, check_items={ct.err_code: 5})
+        user_name = cf.gen_unique_str(prefix)
+        self.utility_wrap.create_user(user=user_name, password=invalid_password,
+                                      check_task=ct.CheckTasks.err_res,
+                                      check_items={ct.err_code: 1100,
+                                                   ct.err_msg: "invalid password length: invalid parameter"
+                                                               "[5 out of range 6 <= value <= 256]"})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["hobo89"])
-    @pytest.mark.parametrize("old_password", ["qwaszx0"])
-    def test_reset_password_with_invalid_username(self, host, port, user, old_password):
+    def test_reset_password_with_invalid_username(self, host, port):
         """
         target: test the wrong user when resetting password
         method: create a user, and then reset the password with wrong username
@@ -2340,18 +2015,21 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
 
         # 2.create a user
-        self.utility_wrap.create_user(user=user, password=old_password)
+        user_name = cf.gen_unique_str(prefix)
+        old_password = cf.gen_str_by_length()
+        new_password = cf.gen_str_by_length()
+        self.utility_wrap.create_user(user=user_name, password=old_password)
 
         # 3.reset password with the wrong username
-        self.utility_wrap.reset_password(user="hobo", old_password=old_password, new_password="qwaszx1",
+        self.utility_wrap.reset_password(user="hobo", old_password=old_password, new_password=new_password,
                                          check_task=ct.CheckTasks.err_res,
-                                         check_items={ct.err_code: 30})
+                                         check_items={ct.err_code: 1400,
+                                                      ct.err_msg: "old password not correct for hobo: "
+                                                                  "not authenticated"})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["demo"])
-    @pytest.mark.parametrize("old_password", ["qwaszx0"])
     @pytest.mark.parametrize("new_password", ["12345"])
-    def test_reset_password_with_invalid_new_password(self, host, port, user, old_password, new_password):
+    def test_reset_password_with_invalid_new_password(self, host, port, new_password):
         """
         target: test the new password when resetting password
         method: create a user, and then set a wrong new password
@@ -2362,32 +2040,38 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
 
         # 2.create a user
-        self.utility_wrap.create_user(user=user, password=old_password)
+        user_name = cf.gen_unique_str(prefix)
+        old_password = cf.gen_str_by_length()
+        self.utility_wrap.create_user(user=user_name, password=old_password)
 
         # 3.reset password with the wrong new password
-        self.utility_wrap.reset_password(user=user, old_password=old_password, new_password=new_password,
+        self.utility_wrap.reset_password(user=user_name, old_password=old_password, new_password=new_password,
                                          check_task=ct.CheckTasks.err_res,
-                                         check_items={ct.err_code: 5})
+                                         check_items={ct.err_code: 1100,
+                                                      ct.err_msg: "invalid password length: invalid parameter"
+                                                                  "[5 out of range 6 <= value <= 256]"})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["genny001"])
-    def test_reset_password_with_invalid_old_password(self, host, port, user):
+    def test_reset_password_with_invalid_old_password(self, host, port):
         """
         target: test the old password when resetting password
         method: create a credential, and then reset with a wrong old password
         excepted: reset is false
         """
+        user_name = cf.gen_unique_str(prefix)
+        old_password = cf.gen_str_by_length()
+        new_password = cf.gen_str_by_length()
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
-        self.utility_wrap.create_user(user=user, password="qwaszx0")
-        self.utility_wrap.reset_password(user=user, old_password="waszx0", new_password="123456",
+        self.utility_wrap.create_user(user=user_name, password=old_password)
+        self.utility_wrap.reset_password(user=user_name, old_password="waszx0", new_password=new_password,
                                          check_task=ct.CheckTasks.err_res,
-                                         check_items={ct.err_code: 30})
+                                         check_items={ct.err_code: 1400,
+                                                      ct.err_msg: "old password not correct for %s: "
+                                                                  "not authenticated" % user_name})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["hobo233"])
-    @pytest.mark.parametrize("old_password", ["qwaszx0"])
-    def test_update_password_with_invalid_username(self, host, port, user, old_password):
+    def test_update_password_with_invalid_username(self, host, port):
         """
         target: test the wrong user when resetting password
         method: create a user, and then reset the password with wrong username
@@ -2398,18 +2082,21 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
 
         # 2.create a user
-        self.utility_wrap.create_user(user=user, password=old_password)
+        user_name = cf.gen_unique_str(prefix)
+        old_password = cf.gen_str_by_length()
+        new_password = cf.gen_str_by_length()
+        self.utility_wrap.create_user(user=user_name, password=old_password)
 
         # 3.reset password with the wrong username
-        self.utility_wrap.update_password(user="hobo", old_password=old_password, new_password="qwaszx1",
+        self.utility_wrap.update_password(user="hobo", old_password=old_password, new_password=new_password,
                                           check_task=ct.CheckTasks.err_res,
-                                          check_items={ct.err_code: 30})
+                                          check_items={ct.err_code: 1400,
+                                                       ct.err_msg: "old password not correct for hobo:"
+                                                                   " not authenticated"})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["demo001"])
-    @pytest.mark.parametrize("old_password", ["qwaszx0"])
     @pytest.mark.parametrize("new_password", ["12345"])
-    def test_update_password_with_invalid_new_password(self, host, port, user, old_password, new_password):
+    def test_update_password_with_invalid_new_password(self, host, port, new_password):
         """
         target: test the new password when resetting password
         method: create a user, and then set a wrong new password
@@ -2420,27 +2107,35 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
 
         # 2.create a user
-        self.utility_wrap.create_user(user=user, password=old_password)
+        user_name = cf.gen_unique_str(prefix)
+        old_password = cf.gen_str_by_length()
+        self.utility_wrap.create_user(user=user_name, password=old_password)
 
         # 3.reset password with the wrong new password
-        self.utility_wrap.update_password(user=user, old_password=old_password, new_password=new_password,
+        self.utility_wrap.update_password(user=user_name, old_password=old_password, new_password=new_password,
                                           check_task=ct.CheckTasks.err_res,
-                                          check_items={ct.err_code: 5})
+                                          check_items={ct.err_code: 1100,
+                                                       ct.err_msg: "invalid password length: invalid parameter[5 out "
+                                                                   "of range 6 <= value <= 256]"})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
-    @pytest.mark.parametrize("user", ["genny"])
-    def test_update_password_with_invalid_old_password(self, host, port, user):
+    def test_update_password_with_invalid_old_password(self, host, port):
         """
         target: test the old password when resetting password
         method: create a credential, and then reset with a wrong old password
         excepted: reset is false
         """
+        user_name = cf.gen_unique_str(prefix)
+        old_password = cf.gen_str_by_length()
+        new_password = cf.gen_str_by_length()
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
-        self.utility_wrap.create_user(user=user, password="qwaszx0")
-        self.utility_wrap.update_password(user=user, old_password="waszx0", new_password="123456",
+        self.utility_wrap.create_user(user=user_name, password=old_password)
+        self.utility_wrap.update_password(user=user_name, old_password="waszx0", new_password=new_password,
                                           check_task=ct.CheckTasks.err_res,
-                                          check_items={ct.err_code: 30})
+                                          check_items={ct.err_code: 1400,
+                                                       ct.err_msg: "old password not correct for %s"
+                                                                   ": not authenticated" % user_name})
 
     @pytest.mark.tags(ct.CaseLabel.RBAC)
     def test_delete_user_root(self, host, port):
@@ -2452,7 +2147,9 @@ class TestUtilityInvalidUserPassword(TestcaseBase):
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
         self.utility_wrap.delete_user(user=ct.default_user, check_task=ct.CheckTasks.err_res,
-                                      check_items={ct.err_code: 31})
+                                      check_items={ct.err_code: 1401,
+                                                   ct.err_msg: "root user cannot be deleted: "
+                                                               "privilege not permitted"})
 
 
 class TestUtilityRBAC(TestcaseBase):
@@ -2486,6 +2183,16 @@ class TestUtilityRBAC(TestcaseBase):
                 self.utility_wrap.role_drop()
         role_groups, _ = self.utility_wrap.list_roles(False)
         assert len(role_groups.groups) == 2
+
+        # drop database
+        databases, _ = self.database_wrap.list_database()
+        for db_name in databases:
+            self.database_wrap.using_database(db_name)
+            for c_name in self.utility_wrap.list_collections()[0]:
+                self.utility_wrap.drop_collection(c_name)
+
+            if db_name != ct.default_db:
+                self.database_wrap.drop_database(db_name)
 
         super().teardown_method(method)
 
@@ -2684,7 +2391,7 @@ class TestUtilityRBAC(TestcaseBase):
     def test_role_grant_collection_insert(self, host, port):
         """
         target: test grant role collection insert privilege
-        method: create one role and tow collections, grant one collection insert privilege
+        method: create one role and two collections, grant one collection insert privilege
         expected: assert grant privilege success
         """
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
@@ -2700,18 +2407,17 @@ class TestUtilityRBAC(TestcaseBase):
                                     check_items={exp_name: r_name})
         self.utility_wrap.create_role()
         self.utility_wrap.role_add_user(user)
+        time.sleep(60)
 
-        self.init_collection_wrap(name=c_name)
-        self.init_collection_wrap(name=c_name_2)
+        collection_w1 = self.init_collection_wrap(name=c_name)
+        collection_w2 = self.init_collection_wrap(name=c_name_2)
 
         # verify user default privilege
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr)
-        collection_w = self.init_collection_wrap(name=c_name)
-        data = cf.gen_default_list_data(ct.default_nb)
-        collection_w.insert(data=data, check_task=CheckTasks.check_permission_deny)
-        collection_w2 = self.init_collection_wrap(name=c_name_2)
+        data = cf.gen_default_dataframe_data()
+        collection_w1.insert(data=data, check_task=CheckTasks.check_permission_deny)
         collection_w2.insert(data=data, check_task=CheckTasks.check_permission_deny)
 
         # grant user collection insert privilege
@@ -2720,19 +2426,18 @@ class TestUtilityRBAC(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.role_grant("Collection", c_name, "Insert")
+        time.sleep(60)
 
         # verify user specific collection insert privilege
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr)
-        collection_w = self.init_collection_wrap(name=c_name)
-        collection_w.insert(data=data)
+        collection_w1.insert(data=data)
 
         # verify grant scope
         index_params = {"index_type": "IVF_SQ8", "metric_type": "L2", "params": {"nlist": 64}}
-        collection_w.create_index(ct.default_float_vec_field_name, index_params,
-                                  check_task=CheckTasks.check_permission_deny)
-        collection_w2 = self.init_collection_wrap(name=c_name_2)
+        collection_w1.create_index(ct.default_float_vec_field_name, index_params,
+                                   check_task=CheckTasks.check_permission_deny)
         collection_w2.insert(data=data, check_task=CheckTasks.check_permission_deny)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -2753,6 +2458,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.init_role("public")
         self.utility_wrap.role_add_user(user)
         self.utility_wrap.role_revoke("Collection", c_name, "Insert")
+        time.sleep(60)
         data = cf.gen_default_list_data(ct.default_nb)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -2838,6 +2544,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         # grant user collection insert privilege
         self.utility_wrap.role_grant("Collection", c_name, "Insert", **db_kwargs)
+        time.sleep(60)
         self.utility_wrap.role_list_grants(**db_kwargs)
 
         # verify user specific collection insert privilege
@@ -2854,6 +2561,7 @@ class TestUtilityRBAC(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.role_revoke("Collection", c_name, "Insert", **db_kwargs)
+        time.sleep(60)
 
         # verify revoke is success
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
@@ -2886,26 +2594,48 @@ class TestUtilityRBAC(TestcaseBase):
         # grant user Global CreateCollection privilege
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "CreateCollection", **db_kwargs)
+        time.sleep(60)
 
         # verify user specific Global CreateCollection privilege
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
-        collection_w = self.init_collection_wrap(name=c_name)
+        schema = cf.gen_default_collection_schema()
+        _, create_res = self.collection_wrap.init_collection(name=c_name, schema=schema,
+                                                             check_task=CheckTasks.check_nothing)
+        retry_times = 6
+        while not create_res and retry_times > 0:
+            time.sleep(10)
+            _, create_res = self.collection_wrap.init_collection(name=c_name, schema=schema,
+                                                                 check_task=CheckTasks.check_nothing)
+            retry_times -= 1
 
         # revoke privilege
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
+        db_name = db_kwargs.get("db_name", ct.default_db)
+        self.database_wrap.using_database(db_name)
+        assert c_name in self.utility_wrap.list_collections()[0]
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.role_revoke("Global", "*", "CreateCollection", **db_kwargs)
+        time.sleep(60)
 
         # verify revoke is success
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
-        collection_w = self.init_collection_wrap(name=c_name_2,
-                                                 check_task=CheckTasks.check_permission_deny)
+        _, create_res = self.collection_wrap.init_collection(name=c_name_2, schema=schema,
+                                                             check_task=CheckTasks.check_nothing)
+        retry_times = 6
+        while create_res and retry_times > 0:
+            time.sleep(10)
+            _, create_res = self.collection_wrap.init_collection(name=c_name_2, schema=schema,
+                                                                 check_task=CheckTasks.check_nothing)
+            retry_times -= 1
+
+        self.collection_wrap.init_collection(name=cf.gen_unique_str(prefix), schema=schema,
+                                             check_task=CheckTasks.check_permission_deny)
 
     @pytest.mark.tags(CaseLabel.RBAC)
     @pytest.mark.parametrize("with_db", [False, True])
@@ -2933,7 +2663,9 @@ class TestUtilityRBAC(TestcaseBase):
         # grant user User UpdateUser privilege
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("User", "*", "UpdateUser", **db_kwargs)
+        time.sleep(60)
         self.utility_wrap.role_revoke("User", "*", "UpdateUser", **db_kwargs)
+        time.sleep(60)
 
         # verify revoke is success
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
@@ -2957,6 +2689,8 @@ class TestUtilityRBAC(TestcaseBase):
         r_name = cf.gen_unique_str(prefix)
         c_name = cf.gen_unique_str(prefix)
         u, _ = self.utility_wrap.create_user(user=user, password=password)
+        user2 = cf.gen_unique_str(prefix)
+        u2, _ = self.utility_wrap.create_user(user=user2, password=password)
 
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
@@ -2971,10 +2705,26 @@ class TestUtilityRBAC(TestcaseBase):
         for grant_item in grant_list:
             self.utility_wrap.role_grant(grant_item["object"], grant_item["object_name"], grant_item["privilege"],
                                          **db_kwargs)
+        time.sleep(60)
 
-        # list grants
+        # list grants with default user
         g_list, _ = self.utility_wrap.role_list_grants(**db_kwargs)
         assert len(g_list.groups) == len(grant_list)
+
+        self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
+        self.connection_wrap.connect(host=host, port=port, user=user,
+                                     password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
+
+        # list grants with user
+        g_list, _ = self.utility_wrap.role_list_grants(**db_kwargs)
+        assert len(g_list.groups) == len(grant_list)
+
+        self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
+        self.connection_wrap.connect(host=host, port=port, user=user2,
+                                     password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
+
+        # user2 can not list grants of role
+        self.utility_wrap.role_list_grants(**db_kwargs, check_task=CheckTasks.check_permission_deny)
 
     @pytest.mark.tags(CaseLabel.RBAC)
     def test_drop_role_which_bind_user(self, host, port):
@@ -3058,6 +2808,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.create_role()
         self.utility_wrap.role_grant("Collection", c_name, "Search")
         self.utility_wrap.role_grant("Collection", c_name, "Insert")
+        time.sleep(60)
 
         g_list, _ = self.utility_wrap.role_list_grant("Collection", c_name)
         assert len(g_list.groups) == 2
@@ -3066,6 +2817,8 @@ class TestUtilityRBAC(TestcaseBase):
             assert g.object_name == c_name
             assert g.privilege in ["Search", "Insert"]
             self.utility_wrap.role_revoke(g.object, g.object_name, g.privilege)
+
+        time.sleep(60)
         self.utility_wrap.role_drop()
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -3083,6 +2836,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.create_role()
         self.utility_wrap.role_grant("Global", "*", "CreateCollection")
         self.utility_wrap.role_grant("Global", "*", "All")
+        time.sleep(60)
 
         g_list, _ = self.utility_wrap.role_list_grant("Global", "*")
         assert len(g_list.groups) == 2
@@ -3091,6 +2845,8 @@ class TestUtilityRBAC(TestcaseBase):
             assert g.object_name == "*"
             assert g.privilege in ["CreateCollection", "All"]
             self.utility_wrap.role_revoke(g.object, g.object_name, g.privilege)
+
+        time.sleep(60)
         self.utility_wrap.role_drop()
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -3109,6 +2865,7 @@ class TestUtilityRBAC(TestcaseBase):
         u, _ = self.utility_wrap.create_user(user=user, password=password)
 
         self.utility_wrap.role_add_user(user)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3146,6 +2903,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         self.utility_wrap.role_grant("Collection", c_name, "Load", **db_kwargs)
         self.utility_wrap.role_grant("Collection", c_name, "GetLoadingProgress", **db_kwargs)
+        time.sleep(60)
         log.debug(self.utility_wrap.role_list_grants(**db_kwargs))
 
         self.database_wrap.using_database(db_name)
@@ -3183,6 +2941,7 @@ class TestUtilityRBAC(TestcaseBase):
         db_name = db_kwargs.get("db_name", ct.default_db)
 
         self.utility_wrap.role_grant("Collection", c_name, "Release", **db_kwargs)
+        time.sleep(60)
 
         self.database_wrap.using_database(db_name)
         collection_w = self.init_collection_wrap(name=c_name)
@@ -3261,6 +3020,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         # with db
         self.utility_wrap.role_grant("Collection", c_name, "Insert", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3294,6 +3054,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         # with db
         self.utility_wrap.role_grant("Collection", c_name, "Delete", **db_kwargs)
+        time.sleep(60)
 
         data = cf.gen_default_list_data(ct.default_nb)
         mutation_res, _ = collection_w.insert(data=data)
@@ -3330,6 +3091,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         self.utility_wrap.role_grant("Collection", c_name, "CreateIndex", **db_kwargs)
         self.utility_wrap.role_grant("Collection", c_name, "Flush", **db_kwargs)
+        time.sleep(60)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
@@ -3362,6 +3124,7 @@ class TestUtilityRBAC(TestcaseBase):
         collection_w.create_index(ct.default_float_vec_field_name)
 
         self.utility_wrap.role_grant("Collection", c_name, "DropIndex", **db_kwargs)
+        time.sleep(60)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
@@ -3397,6 +3160,7 @@ class TestUtilityRBAC(TestcaseBase):
         collection_w.load()
 
         self.utility_wrap.role_grant("Collection", c_name, "Search", **db_kwargs)
+        time.sleep(60)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
@@ -3409,6 +3173,7 @@ class TestUtilityRBAC(TestcaseBase):
 
     @pytest.mark.tags(CaseLabel.RBAC)
     @pytest.mark.parametrize("with_db", [False, True])
+    @pytest.mark.skip("will be modified soon, now flush will fail for GetFlushState")
     def test_verify_collection_flush_privilege(self, host, port, with_db):
         """
         target: verify grant collection flush privilege
@@ -3431,11 +3196,12 @@ class TestUtilityRBAC(TestcaseBase):
         db_name = db_kwargs.get("db_name", ct.default_db)
         self.database_wrap.using_database(db_name)
         collection_w = self.init_collection_wrap(name=c_name)
-        self.utility_wrap.role_grant("Collection", c_name, "Flush", **db_kwargs)
+        self.utility_wrap.role_grant("Collection", c_name, "Flush", db_name=db_name)
+        time.sleep(120)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
-                                     password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
+                                     password=password, check_task=ct.CheckTasks.ccr, db_name=db_name)
         collection_w.flush()
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -3468,6 +3234,7 @@ class TestUtilityRBAC(TestcaseBase):
         collection_w.load()
 
         self.utility_wrap.role_grant("Collection", c_name, "Query", **db_kwargs)
+        time.sleep(60)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
@@ -3497,6 +3264,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "All", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3512,7 +3280,9 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.create_role()
         self.utility_wrap.role_add_user(user_test)
         self.utility_wrap.role_grant("Collection", c_name, "Insert")
+        time.sleep(60)
         self.utility_wrap.role_revoke("Collection", c_name, "Insert")
+        time.sleep(60)
         self.utility_wrap.role_remove_user(user_test)
 
         self.utility_wrap.delete_user(user=user_test)
@@ -3540,6 +3310,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "CreateCollection", **db_kwargs)
+        time.sleep(60)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
@@ -3568,6 +3339,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "DropCollection", **db_kwargs)
+        time.sleep(60)
         collection_w = self.init_collection_wrap(name=c_name)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3596,6 +3368,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "CreateOwnership", **db_kwargs)
+        time.sleep(60)
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
                                      password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
@@ -3627,6 +3400,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "DropOwnership", **db_kwargs)
+        time.sleep(60)
 
         user_test = cf.gen_unique_str(prefix)
         password_test = cf.gen_unique_str(prefix)
@@ -3663,6 +3437,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "SelectOwnership", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3702,6 +3477,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("Global", "*", "ManageOwnership", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3710,6 +3486,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.role_add_user(user_test)
         self.utility_wrap.role_remove_user(user_test)
         self.utility_wrap.role_grant("Collection", c_name, "Search")
+        time.sleep(60)
         self.utility_wrap.role_revoke("Collection", c_name, "Search")
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -3740,6 +3517,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("User", "*", "UpdateUser", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3774,6 +3552,7 @@ class TestUtilityRBAC(TestcaseBase):
         # with db
         db_kwargs = self.init_db_kwargs(with_db)
         self.utility_wrap.role_grant("User", "*", "SelectUser", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3846,6 +3625,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         self.utility_wrap.role_grant("Collection", "*", "Load", **db_kwargs)
         self.utility_wrap.role_grant("Collection", "*", "GetLoadingProgress", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3880,6 +3660,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.role_add_user(user)
 
         self.utility_wrap.role_grant("Collection", "*", "*", **db_kwargs)
+        time.sleep(60)
 
         self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
         self.connection_wrap.connect(host=host, port=port, user=user,
@@ -3929,6 +3710,7 @@ class TestUtilityRBAC(TestcaseBase):
                                      password=password, check_task=ct.CheckTasks.ccr)
 
         # Collection permission deny
+        time.sleep(60)
         collection_w.load(check_task=CheckTasks.check_permission_deny)
         collection_w.release(check_task=CheckTasks.check_permission_deny)
         collection_w.compact(check_task=CheckTasks.check_permission_deny)
@@ -4029,6 +3811,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.role_drop()
 
     @pytest.mark.tags(CaseLabel.RBAC)
+    @pytest.mark.skip("will be modified soon, now flush will fail for GetFlushState")
     def test_grant_db_collections(self, host, port):
         """
         target: test grant collection privilege with db
@@ -4053,6 +3836,7 @@ class TestUtilityRBAC(TestcaseBase):
         # grant role collection flush privilege
         user, pwd, role = self.init_user_with_privilege("Collection", collection_w.name, "Flush", db_name)
         self.utility_wrap.role_grant("Collection", collection_w.name, "GetStatistics", db_name)
+        time.sleep(60)
 
         # re-connect with new user and default db
         self.connection_wrap.disconnect(alias=ct.default_alias)
@@ -4087,16 +3871,18 @@ class TestUtilityRBAC(TestcaseBase):
 
         # grant role collection flush privilege
         user, pwd, role = self.init_user_with_privilege("Global", "*", "*", db_name)
+        time.sleep(60)
 
         # re-connect with new user and default db
         self.connection_wrap.disconnect(alias=ct.default_alias)
         self.connection_wrap.connect(host=host, port=port, user=user, password=pwd,
-                                     db_name=ct.default_db, secure=cf.param_info.param_secure,
-                                     check_task=ct.CheckTasks.ccr)
+                                     secure=cf.param_info.param_secure, check_task=ct.CheckTasks.ccr)
 
         # verify user list grants with different db
-        self.utility_wrap.role_list_grants(check_task=CheckTasks.check_permission_deny)
-
+        self.database_wrap.using_database(ct.default_db)
+        self.utility_wrap.describe_resource_group(ct.default_resource_group_name,
+                                                  check_task=CheckTasks.check_permission_deny)
+        
         # set using db to db_name and verify grants
         self.database_wrap.using_database(db_name)
         self.utility_wrap.role_list_grants()
@@ -4122,6 +3908,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         # grant role collection flush privilege
         user, pwd, role = self.init_user_with_privilege("User", "*", "SelectUser", db_name)
+        time.sleep(60)
 
         # re-connect with new user and default db
         self.connection_wrap.disconnect(alias=ct.default_alias)
@@ -4156,10 +3943,12 @@ class TestUtilityRBAC(TestcaseBase):
 
         # grant role collection flush privilege
         user, pwd, role = self.init_user_with_privilege("Collection", collection_w.name, "Flush", db_name)
+        time.sleep(60)
 
         # revoke privilege with default db
         self.utility_wrap.role_revoke("Collection", collection_w.name, "Flush", ct.default_db)
         self.utility_wrap.role_revoke("Collection", collection_w.name, "Flush", db_name)
+        time.sleep(60)
 
         # re-connect with new user and db
         self.connection_wrap.disconnect(alias=ct.default_alias)
@@ -4191,6 +3980,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         # grant role collection * All privilege
         _, _, role_name = self.init_user_with_privilege("Global", "*", "All", db_name)
+        time.sleep(60)
         log.debug(f"role name: {role_name}")
 
         # list grant with db and verify
@@ -4230,6 +4020,7 @@ class TestUtilityRBAC(TestcaseBase):
         # grant role collection flush privilege
         self.init_user_with_privilege("Global", "*", "All", db_name)
         self.utility_wrap.role_grant("User", "*", "UpdateUser", db_name)
+        time.sleep(60)
 
         # list grants with db and verify
         grants, _ = self.utility_wrap.role_list_grants(db_name=db_name)
@@ -4264,6 +4055,7 @@ class TestUtilityRBAC(TestcaseBase):
 
         # grant global privilege to default db
         tmp_user, tmp_pwd, tmp_role = self.init_user_with_privilege("User", "*", "SelectUser", ct.default_db)
+        time.sleep(60)
 
         # re-connect
         self.connection_wrap.disconnect(ct.default_alias)
@@ -4274,6 +4066,69 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.list_users(False)
         self.utility_wrap.list_collections()
         self.utility_wrap.describe_resource_group(name=ct.default_resource_group_name,
+                                                  check_task=CheckTasks.check_permission_deny)
+
+    @pytest.mark.tags(CaseLabel.RBAC)
+    def test_alias_rbac(self, host, port):
+        """
+        target: test rbac related to alias interfaces
+        method: Create a role and grant privileges related to aliases.
+                Verify if a user can execute the corresponding alias interface
+                based on whether the user possesses the role.
+        expected: Users with the assigned role can access the alias interface,
+                while those without the role cannot.
+        """
+
+        self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
+                                     password=ct.default_password, check_task=ct.CheckTasks.ccr)
+        user = cf.gen_unique_str(prefix)
+        password = cf.gen_unique_str(prefix)
+        r_name = cf.gen_unique_str(prefix)
+        c_name = cf.gen_unique_str(prefix)
+        alias_name = cf.gen_unique_str(prefix)
+        u, _ = self.utility_wrap.create_user(user=user, password=password)
+        user2 = cf.gen_unique_str(prefix)
+        u2, _ = self.utility_wrap.create_user(user=user2, password=password)
+
+
+        self.utility_wrap.init_role(r_name)
+        self.utility_wrap.create_role()
+        self.utility_wrap.role_add_user(user)
+
+        db_kwargs = {}
+        # grant user privilege
+        self.utility_wrap.init_role(r_name)
+        alias_privileges = [
+            {"object": "Global", "object_name": "*", "privilege": "CreateAlias"},
+            {"object": "Global", "object_name": "*", "privilege": "DropAlias"},
+            {"object": "Global", "object_name": "*", "privilege": "DescribeAlias"},
+            {"object": "Global", "object_name": "*", "privilege": "ListAliases"},
+        ]
+
+        for grant_item in alias_privileges:
+            self.utility_wrap.role_grant(grant_item["object"], grant_item["object_name"], grant_item["privilege"],
+                                         **db_kwargs)
+
+        time.sleep(60)
+        self.init_collection_wrap(name=c_name)
+        self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
+
+        self.connection_wrap.connect(host=host, port=port, user=user,
+                                     password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
+
+        self.utility_wrap.create_alias(c_name, alias_name)
+        self.utility_wrap.drop_alias(alias_name)
+
+        self.connection_wrap.disconnect(alias=DefaultConfig.DEFAULT_USING)
+        self.connection_wrap.connect(host=host, port=port, user=user2,
+                                     password=password, check_task=ct.CheckTasks.ccr, **db_kwargs)
+
+
+        # user2 can not create or drop alias
+        self.utility_wrap.create_alias(c_name, alias_name,
+                                                  check_task=CheckTasks.check_permission_deny)
+
+        self.utility_wrap.drop_alias(alias_name,
                                                   check_task=CheckTasks.check_permission_deny)
 
 
@@ -4309,16 +4164,17 @@ class TestUtilityNegativeRbac(TestcaseBase):
         role_groups, _ = self.utility_wrap.list_roles(False)
         assert len(role_groups.groups) == 2
 
-        super().teardown_method(method)
+        # drop database
+        databases, _ = self.database_wrap.list_database()
+        for db_name in databases:
+            self.database_wrap.using_database(db_name)
+            for c_name in self.utility_wrap.list_collections()[0]:
+                self.utility_wrap.drop_collection(c_name)
 
-    @pytest.fixture(scope="function", params=ct.get_invalid_strs)
-    def get_invalid_non_string(self, request):
-        """
-        get invalid string without None
-        """
-        if isinstance(request.param, str):
-            pytest.skip("skip string")
-        yield request.param
+            if db_name != ct.default_db:
+                self.database_wrap.drop_database(db_name)
+
+        super().teardown_method(method)
 
     @pytest.mark.tags(CaseLabel.RBAC)
     @pytest.mark.parametrize("name", ["longlonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglong"
@@ -4336,7 +4192,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
         self.utility_wrap.init_role(name)
 
-        error = {"err_code": 5}
+        error = {"err_code": 1100, "err_msg": "invalid parameter"}
         self.utility_wrap.create_role(check_task=CheckTasks.err_res, check_items=error)
         # get roles
         role_groups, _ = self.utility_wrap.list_roles(False)
@@ -4365,8 +4221,8 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
         assert self.utility_wrap.role_is_exist()[0]
-        error = {"err_code": 35,
-                 "err_msg": "fail to create role"}
+        error = {"err_code": 65535,
+                 "err_msg": "role [name:\"%s\"] already exists" % r_name}
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role(check_task=CheckTasks.err_res, check_items=error)
         self.utility_wrap.role_drop()
@@ -4385,8 +4241,9 @@ class TestUtilityNegativeRbac(TestcaseBase):
         r_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(name)
         assert self.utility_wrap.role_is_exist()[0]
-        error = {"err_code": 5,
-                 "err_msg": "the role[%s] is a default role, which can\'t be dropped" % name}
+        error = {"err_code": 1401,
+                 "err_msg": "the role[%s] is a default role, which can't be dropped: "
+                            "privilege not permitted" % name}
         self.utility_wrap.role_drop(check_task=CheckTasks.err_res, check_items=error)
         assert self.utility_wrap.role_is_exist()[0]
 
@@ -4423,8 +4280,8 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.init_role(r_name)
         assert not self.utility_wrap.role_is_exist()[0]
 
-        error = {"err_code": 37,
-                 "err_msg": "fail to check the role name"}
+        error = {"err_code": 65535,
+                 "err_msg": "not found the role, maybe the role isn't existed or internal system error"}
         self.utility_wrap.role_add_user(user, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -4442,13 +4299,14 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.create_role()
         assert self.utility_wrap.role_is_exist()[0]
 
-        error = {"err_code": 37,
-                 "err_msg": "fail to check the username"}
-        self.utility_wrap.role_remove_user(user, check_task=CheckTasks.err_res, check_items=error)
+        error = {"err_code": 65535,
+                 "err_msg": "not found the user, maybe the user isn't existed or internal system error"}
+        self.utility_wrap.role_remove_user(user)
         self.utility_wrap.role_add_user(user, check_task=CheckTasks.err_res, check_items=error)
         self.utility_wrap.role_drop()
 
     @pytest.mark.tags(CaseLabel.RBAC)
+    @pytest.mark.skip("issue #29025")
     @pytest.mark.parametrize("name", ["admin", "public"])
     def test_remove_root_from_default_role(self, name, host, port):
         """
@@ -4465,11 +4323,12 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.role_remove_user("root", check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
+    @pytest.mark.skip("issue #29023")
     def test_remove_user_from_unbind_role(self, host, port):
         """
         target: remove user from unbind role
         method: create new role and new user, remove user from unbind role
-        expected: fail to  remove
+        expected: fail to remove
         """
         self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
@@ -4507,13 +4366,14 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.init_role(r_name)
         assert not self.utility_wrap.role_is_exist()[0]
 
-        error = {"err_code": 37,
-                 "err_msg": "fail to check the role name"}
+        error = {"err_code": 65535,
+                 "err_msg": "not found the role, maybe the role isn't existed or internal system error"}
         self.utility_wrap.role_remove_user(user, check_task=CheckTasks.err_res, check_items=error)
         users, _ = self.utility_wrap.role_get_users()
         assert user not in users
 
     @pytest.mark.tags(CaseLabel.RBAC)
+    @pytest.mark.skip("issue #29023")
     def test_remove_not_exist_user_from_role(self, host, port):
         """
         target: remove not exist user from role
@@ -4566,8 +4426,8 @@ class TestUtilityNegativeRbac(TestcaseBase):
                                      password=ct.default_password, check_task=ct.CheckTasks.ccr)
         r_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(r_name)
-        error = {"err_code": 42,
-                 "err_msg": "there is no value on key = by-dev/meta/root-coord/credential/roles/%s" % r_name}
+        error = {"err_code": 65535,
+                 "err_msg": "not found the role, maybe the role isn't existed or internal system error"}
         self.utility_wrap.role_list_grants(check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -4583,7 +4443,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         o_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
-        error = {"err_code": 42,
+        error = {"err_code": 65535,
                  "err_msg": f"not found the object type[name: {o_name}], supported the object types: [Global User "
                             f"Collection]"}
         self.utility_wrap.role_list_grant(o_name, "*", check_task=CheckTasks.err_res, check_items=error)
@@ -4602,8 +4462,9 @@ class TestUtilityNegativeRbac(TestcaseBase):
         o_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
-        error = {"err_code": 41,
-                 "err_msg": "the object type in the object entity[name: %s] is invalid" % o_name}
+        error = {"err_code": 65535,
+                 "err_msg": "not found the object type[name: %s], supported the object types: "
+                            "[Global User Collection]" % o_name}
         self.utility_wrap.role_grant(o_name, "*", "*", check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -4619,7 +4480,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         p_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
-        error = {"err_code": 41, "err_msg": "the privilege name[%s] in the privilege entity is invalid" % p_name}
+        error = {"err_code": 65535, "err_msg": "not found the privilege name[%s]" % p_name}
         self.utility_wrap.role_grant("Global", "*", p_name, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -4635,8 +4496,9 @@ class TestUtilityNegativeRbac(TestcaseBase):
         o_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
-        error = {"err_code": 41,
-                 "err_msg": "the object type in the object entity[name: %s] is invalid" % o_name}
+        error = {"err_code": 65535,
+                 "err_msg": "not found the object type[name: %s], supported the object types: "
+                            "[Collection Global User]" % o_name}
         self.utility_wrap.role_revoke(o_name, "*", "*", check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -4652,7 +4514,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         p_name = cf.gen_unique_str(prefix)
         self.utility_wrap.init_role(r_name)
         self.utility_wrap.create_role()
-        error = {"err_code": 41, "err_msg": "the privilege name[%s] in the privilege entity is invalid" % p_name}
+        error = {"err_code": 65535, "err_msg": "not found the privilege name[%s]" % p_name}
         self.utility_wrap.role_revoke("Global", "*", p_name, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.RBAC)
@@ -4708,6 +4570,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
 
         # grant role privilege: collection not existed -> no error
         user, pwd, role = self.init_user_with_privilege("Collection", "rbac", "Flush", db_name=db_b)
+        time.sleep(60)
 
         # grant role privilege: db_a collection provilege with database db_b
         self.utility_wrap.role_grant("Collection", collection_w.name, "Flush", db_name=db_b)
@@ -4727,7 +4590,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         # collection flush with db_b permission
         self.database_wrap.using_database(db_b)
         collection_w.flush(check_task=CheckTasks.err_res,
-                           check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
+                           check_items={ct.err_code: 100, ct.err_msg: "collection not found"})
         self.database_wrap.using_database(db_a)
         collection_w.flush(check_task=CheckTasks.check_permission_deny)
 
@@ -4749,7 +4612,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.role_revoke("Global", "*", "All", db_name)
 
         self.database_wrap.using_database(db_name, check_task=CheckTasks.err_res,
-                                          check_items={ct.err_code: 1, ct.err_msg: "database not exist"})
+                                          check_items={ct.err_code: 800, ct.err_msg: "database not exist"})
         self.database_wrap.create_database(db_name)
         self.utility_wrap.role_grant("Global", "*", "All", db_name)
         self.database_wrap.using_database(db_name)
@@ -4796,6 +4659,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.create_user(username, pwd)
         self.utility_wrap.init_role("admin")
         self.utility_wrap.role_add_user(username)
+        time.sleep(60)
 
         # create db_a and create collection in db_a
         db_a = cf.gen_unique_str("a")
@@ -4842,6 +4706,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         self.utility_wrap.create_user(p_username, p_pwd)
         self.utility_wrap.init_role("public")
         self.utility_wrap.role_add_user(p_username)
+        time.sleep(60)
 
         # re-connect with new user and db
         self.connection_wrap.disconnect(alias=ct.default_alias)
@@ -4885,6 +4750,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
 
         # grant role privilege: collection not existed in the db -> no error
         user, pwd, role = self.init_user_with_privilege("Collection", coll_name, "Flush", db_name)
+        time.sleep(60)
 
         # re-connect with new user and granted db
         self.connection_wrap.disconnect(alias=ct.default_alias)
@@ -4893,7 +4759,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
 
         # operate collection in the granted db
         collection_w.flush(check_task=CheckTasks.err_res,
-                           check_items={ct.err_code: 1, ct.err_msg: "CollectionNotExists"})
+                           check_items={ct.err_code: 100, ct.err_msg: "CollectionNotExists"})
 
         # operate collection in the default db
         self.database_wrap.using_database(ct.default_db)

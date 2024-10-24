@@ -44,6 +44,7 @@ const (
 
 var StatusSuccess = commonpb.Status{
 	ErrorCode: commonpb.ErrorCode_Success,
+	Code:      merr.Code(nil),
 	Reason:    "",
 }
 
@@ -56,7 +57,7 @@ var DefaultShowCollectionsResp = milvuspb.ShowCollectionsResponse{
 
 var DefaultDescCollectionResp = milvuspb.DescribeCollectionResponse{
 	CollectionName: DefaultCollectionName,
-	Schema:         generateCollectionSchema(schemapb.DataType_Int64, false),
+	Schema:         generateCollectionSchema(schemapb.DataType_Int64),
 	ShardsNum:      ShardNumDefault,
 	Status:         &StatusSuccess,
 }
@@ -81,18 +82,22 @@ var DefaultFalseResp = milvuspb.BoolResponse{
 	Value:  false,
 }
 
+func getDefaultRootPassword() string {
+	paramtable.Init()
+	return paramtable.Get().CommonCfg.DefaultRootPassword.GetValue()
+}
+
 func versional(path string) string {
 	return URIPrefixV1 + path
 }
 
 func initHTTPServer(proxy types.ProxyComponent, needAuth bool) *gin.Engine {
-	h := NewHandlers(proxy)
+	h := NewHandlersV1(proxy)
 	ginHandler := gin.Default()
 	ginHandler.Use(func(c *gin.Context) {
 		_, err := strconv.ParseBool(c.Request.Header.Get(HTTPHeaderAllowInt64))
 		if err != nil {
-			httpParams := &paramtable.Get().HTTPCfg
-			if httpParams.AcceptTypeAllowInt64.GetAsBool() {
+			if paramtable.Get().HTTPCfg.AcceptTypeAllowInt64.GetAsBool() {
 				c.Request.Header.Set(HTTPHeaderAllowInt64, "true")
 			} else {
 				c.Request.Header.Set(HTTPHeaderAllowInt64, "false")
@@ -101,7 +106,7 @@ func initHTTPServer(proxy types.ProxyComponent, needAuth bool) *gin.Engine {
 		c.Next()
 	})
 	app := ginHandler.Group(URIPrefixV1, genAuthMiddleWare(needAuth))
-	NewHandlers(h.proxy).RegisterRoutesToV1(app)
+	NewHandlersV1(h.proxy).RegisterRoutesToV1(app)
 	return ginHandler
 }
 
@@ -128,7 +133,7 @@ func genAuthMiddleWare(needAuth bool) gin.HandlerFunc {
 			username, password, ok := ParseUsernamePassword(c)
 			if !ok {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{HTTPReturnCode: merr.Code(merr.ErrNeedAuthenticate), HTTPReturnMessage: merr.ErrNeedAuthenticate.Error()})
-			} else if username == util.UserRoot && password != util.DefaultRootPassword {
+			} else if username == util.UserRoot && password != getDefaultRootPassword() {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{HTTPReturnCode: merr.Code(merr.ErrNeedAuthenticate), HTTPReturnMessage: merr.ErrNeedAuthenticate.Error()})
 			} else {
 				c.Set(ContextUsername, username)
@@ -183,7 +188,7 @@ func TestVectorAuthenticate(t *testing.T) {
 
 	t.Run("root's password correct", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, versional(VectorCollectionsPath), nil)
-		req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+		req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 		w := httptest.NewRecorder()
 		testEngine.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -237,7 +242,7 @@ func TestVectorListCollection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testEngine := initHTTPServer(tt.mp, true)
 			req := httptest.NewRequest(http.MethodGet, versional(VectorCollectionsPath), nil)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -272,7 +277,7 @@ func TestVectorCollectionsDescribe(t *testing.T) {
 		name:         "get load status fail",
 		mp:           mp2,
 		exceptCode:   http.StatusOK,
-		expectedBody: "{\"code\":200,\"data\":{\"collectionName\":\"" + DefaultCollectionName + "\",\"description\":\"\",\"enableDynamicField\":true,\"fields\":[{\"autoId\":false,\"description\":\"\",\"name\":\"book_id\",\"primaryKey\":true,\"type\":\"Int64\"},{\"autoId\":false,\"description\":\"\",\"name\":\"word_count\",\"primaryKey\":false,\"type\":\"Int64\"},{\"autoId\":false,\"description\":\"\",\"name\":\"book_intro\",\"primaryKey\":false,\"type\":\"FloatVector(2)\"}],\"indexes\":[{\"fieldName\":\"book_intro\",\"indexName\":\"" + DefaultIndexName + "\",\"metricType\":\"L2\"}],\"load\":\"\",\"shardsNum\":1}}",
+		expectedBody: "{\"code\":200,\"data\":{\"collectionName\":\"" + DefaultCollectionName + "\",\"description\":\"\",\"enableDynamicField\":true,\"fields\":[{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"book_id\",\"partitionKey\":false,\"primaryKey\":true,\"type\":\"Int64\"},{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"word_count\",\"partitionKey\":false,\"primaryKey\":false,\"type\":\"Int64\"},{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"book_intro\",\"partitionKey\":false,\"primaryKey\":false,\"type\":\"FloatVector(2)\"}],\"indexes\":[{\"fieldName\":\"book_intro\",\"indexName\":\"" + DefaultIndexName + "\",\"metricType\":\"COSINE\"}],\"load\":\"\",\"shardsNum\":1}}",
 	})
 
 	mp3 := mocks.NewMockProxy(t)
@@ -283,7 +288,7 @@ func TestVectorCollectionsDescribe(t *testing.T) {
 		name:         "get indexes fail",
 		mp:           mp3,
 		exceptCode:   http.StatusOK,
-		expectedBody: "{\"code\":200,\"data\":{\"collectionName\":\"" + DefaultCollectionName + "\",\"description\":\"\",\"enableDynamicField\":true,\"fields\":[{\"autoId\":false,\"description\":\"\",\"name\":\"book_id\",\"primaryKey\":true,\"type\":\"Int64\"},{\"autoId\":false,\"description\":\"\",\"name\":\"word_count\",\"primaryKey\":false,\"type\":\"Int64\"},{\"autoId\":false,\"description\":\"\",\"name\":\"book_intro\",\"primaryKey\":false,\"type\":\"FloatVector(2)\"}],\"indexes\":[],\"load\":\"LoadStateLoaded\",\"shardsNum\":1}}",
+		expectedBody: "{\"code\":200,\"data\":{\"collectionName\":\"" + DefaultCollectionName + "\",\"description\":\"\",\"enableDynamicField\":true,\"fields\":[{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"book_id\",\"partitionKey\":false,\"primaryKey\":true,\"type\":\"Int64\"},{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"word_count\",\"partitionKey\":false,\"primaryKey\":false,\"type\":\"Int64\"},{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"book_intro\",\"partitionKey\":false,\"primaryKey\":false,\"type\":\"FloatVector(2)\"}],\"indexes\":[],\"load\":\"LoadStateLoaded\",\"shardsNum\":1}}",
 	})
 
 	mp4 := mocks.NewMockProxy(t)
@@ -294,14 +299,14 @@ func TestVectorCollectionsDescribe(t *testing.T) {
 		name:         "show collection details success",
 		mp:           mp4,
 		exceptCode:   http.StatusOK,
-		expectedBody: "{\"code\":200,\"data\":{\"collectionName\":\"" + DefaultCollectionName + "\",\"description\":\"\",\"enableDynamicField\":true,\"fields\":[{\"autoId\":false,\"description\":\"\",\"name\":\"book_id\",\"primaryKey\":true,\"type\":\"Int64\"},{\"autoId\":false,\"description\":\"\",\"name\":\"word_count\",\"primaryKey\":false,\"type\":\"Int64\"},{\"autoId\":false,\"description\":\"\",\"name\":\"book_intro\",\"primaryKey\":false,\"type\":\"FloatVector(2)\"}],\"indexes\":[{\"fieldName\":\"book_intro\",\"indexName\":\"" + DefaultIndexName + "\",\"metricType\":\"L2\"}],\"load\":\"LoadStateLoaded\",\"shardsNum\":1}}",
+		expectedBody: "{\"code\":200,\"data\":{\"collectionName\":\"" + DefaultCollectionName + "\",\"description\":\"\",\"enableDynamicField\":true,\"fields\":[{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"book_id\",\"partitionKey\":false,\"primaryKey\":true,\"type\":\"Int64\"},{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"word_count\",\"partitionKey\":false,\"primaryKey\":false,\"type\":\"Int64\"},{\"autoId\":false,\"clusteringKey\":false,\"description\":\"\",\"name\":\"book_intro\",\"partitionKey\":false,\"primaryKey\":false,\"type\":\"FloatVector(2)\"}],\"indexes\":[{\"fieldName\":\"book_intro\",\"indexName\":\"" + DefaultIndexName + "\",\"metricType\":\"COSINE\"}],\"load\":\"LoadStateLoaded\",\"shardsNum\":1}}",
 	})
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			testEngine := initHTTPServer(tt.mp, true)
 			req := httptest.NewRequest(http.MethodGet, versional(VectorCollectionsDescribePath)+"?collectionName="+DefaultCollectionName, nil)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -315,7 +320,7 @@ func TestVectorCollectionsDescribe(t *testing.T) {
 	t.Run("need collectionName", func(t *testing.T) {
 		testEngine := initHTTPServer(mocks.NewMockProxy(t), true)
 		req := httptest.NewRequest(http.MethodGet, versional(VectorCollectionsDescribePath)+"?"+DefaultCollectionName, nil)
-		req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+		req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 		w := httptest.NewRecorder()
 		testEngine.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -336,7 +341,7 @@ func TestVectorCreateCollection(t *testing.T) {
 		expectedBody: PrintErr(ErrDefault),
 	})
 
-	err := merr.WrapErrCollectionNumLimitExceeded(65535)
+	err := merr.WrapErrCollectionNumLimitExceeded("default", 65535)
 	mp2 := mocks.NewMockProxy(t)
 	mp2.EXPECT().CreateCollection(mock.Anything, mock.Anything).Return(merr.Status(err), nil).Once()
 	testCases = append(testCases, testCase{
@@ -384,7 +389,7 @@ func TestVectorCreateCollection(t *testing.T) {
 			jsonBody := []byte(`{"collectionName": "` + DefaultCollectionName + `", "dimension": 2}`)
 			bodyReader := bytes.NewReader(jsonBody)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorCollectionsCreatePath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -441,7 +446,7 @@ func TestVectorDropCollection(t *testing.T) {
 			jsonBody := []byte(`{"collectionName": "` + DefaultCollectionName + `"}`)
 			bodyReader := bytes.NewReader(jsonBody)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorCollectionsDropPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -517,7 +522,7 @@ func TestQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testEngine := initHTTPServer(tt.mp, true)
 			for _, req := range reqs {
-				req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+				req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 				w := httptest.NewRecorder()
 				testEngine.ServeHTTP(w, req)
 				assert.Equal(t, tt.exceptCode, w.Code)
@@ -602,7 +607,7 @@ func TestDelete(t *testing.T) {
 			jsonBody := []byte(`{"collectionName": "` + DefaultCollectionName + `" , "id": [1,2,3]}`)
 			bodyReader := bytes.NewReader(jsonBody)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorDeletePath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -634,7 +639,7 @@ func TestDeleteForFilter(t *testing.T) {
 			testEngine := initHTTPServer(mp, true)
 			bodyReader := bytes.NewReader(jsonBody)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorDeletePath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -692,7 +697,7 @@ func TestInsert(t *testing.T) {
 	mp5, _ = wrapWithDescribeColl(t, mp5, ReturnSuccess, 1, nil)
 	mp5.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 		Status:    &StatusSuccess,
-		IDs:       genIds(schemapb.DataType_Int64),
+		IDs:       genIDs(schemapb.DataType_Int64),
 		InsertCnt: 3,
 	}, nil).Once()
 	testCases = append(testCases, testCase{
@@ -706,7 +711,7 @@ func TestInsert(t *testing.T) {
 	mp6, _ = wrapWithDescribeColl(t, mp6, ReturnSuccess, 1, nil)
 	mp6.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 		Status:    &StatusSuccess,
-		IDs:       genIds(schemapb.DataType_VarChar),
+		IDs:       genIDs(schemapb.DataType_VarChar),
 		InsertCnt: 3,
 	}, nil).Once()
 	testCases = append(testCases, testCase{
@@ -726,7 +731,7 @@ func TestInsert(t *testing.T) {
 			testEngine := initHTTPServer(tt.mp, true)
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -747,7 +752,7 @@ func TestInsert(t *testing.T) {
 		testEngine := initHTTPServer(mp, true)
 		bodyReader := bytes.NewReader([]byte(`{"collectionName": "` + DefaultCollectionName + `", "data": {}}`))
 		req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-		req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+		req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 		w := httptest.NewRecorder()
 		testEngine.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -762,9 +767,9 @@ func TestInsertForDataType(t *testing.T) {
 	paramtable.Init()
 	paramtable.Get().Save(proxy.Params.HTTPCfg.AcceptTypeAllowInt64.Key, "true")
 	schemas := map[string]*schemapb.CollectionSchema{
-		"[success]kinds of data type": newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64, false)),
-		"[success]use binary vector":  newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64, true)),
-		"[success]with dynamic field": withDynamicField(newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64, false))),
+		"[success]kinds of data type": newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64)),
+		"[success]with dynamic field": withDynamicField(newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64))),
+		"[success]with array fields":  withArrayField(newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64))),
 	}
 	for name, schema := range schemas {
 		t.Run(name, func(t *testing.T) {
@@ -777,7 +782,7 @@ func TestInsertForDataType(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(schemapb.DataType_Int64),
+				IDs:       genIDs(schemapb.DataType_Int64),
 				InsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -788,16 +793,14 @@ func TestInsertForDataType(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
 			assert.Equal(t, "{\"code\":200,\"data\":{\"insertCount\":3,\"insertIds\":[1,2,3]}}", w.Body.String())
 		})
 	}
-	schemas = map[string]*schemapb.CollectionSchema{
-		"with unsupport field type": withUnsupportField(newCollectionSchema(generateCollectionSchema(schemapb.DataType_Int64, false))),
-	}
+	schemas = map[string]*schemapb.CollectionSchema{}
 	for name, schema := range schemas {
 		t.Run(name, func(t *testing.T) {
 			mp := mocks.NewMockProxy(t)
@@ -815,7 +818,7 @@ func TestInsertForDataType(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -837,7 +840,7 @@ func TestReturnInt64(t *testing.T) {
 	}
 	for _, dataType := range schemas {
 		t.Run("[insert]httpCfg.allow: false", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -847,7 +850,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				InsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -858,7 +861,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -868,7 +871,7 @@ func TestReturnInt64(t *testing.T) {
 
 	for _, dataType := range schemas {
 		t.Run("[upsert]httpCfg.allow: false", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -878,7 +881,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Upsert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				UpsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -889,7 +892,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorUpsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -899,7 +902,7 @@ func TestReturnInt64(t *testing.T) {
 
 	for _, dataType := range schemas {
 		t.Run("[insert]httpCfg.allow: false, Accept-Type-Allow-Int64: true", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -909,7 +912,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				InsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -920,7 +923,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			req.Header.Set(HTTPHeaderAllowInt64, "true")
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
@@ -931,7 +934,7 @@ func TestReturnInt64(t *testing.T) {
 
 	for _, dataType := range schemas {
 		t.Run("[upsert]httpCfg.allow: false, Accept-Type-Allow-Int64: true", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -941,7 +944,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Upsert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				UpsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -952,7 +955,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorUpsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			req.Header.Set(HTTPHeaderAllowInt64, "true")
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
@@ -964,7 +967,7 @@ func TestReturnInt64(t *testing.T) {
 	paramtable.Get().Save(proxy.Params.HTTPCfg.AcceptTypeAllowInt64.Key, "true")
 	for _, dataType := range schemas {
 		t.Run("[insert]httpCfg.allow: true", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -974,7 +977,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				InsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -985,7 +988,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -995,7 +998,7 @@ func TestReturnInt64(t *testing.T) {
 
 	for _, dataType := range schemas {
 		t.Run("[upsert]httpCfg.allow: true", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -1005,7 +1008,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Upsert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				UpsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -1016,7 +1019,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorUpsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code)
@@ -1026,7 +1029,7 @@ func TestReturnInt64(t *testing.T) {
 
 	for _, dataType := range schemas {
 		t.Run("[insert]httpCfg.allow: true, Accept-Type-Allow-Int64: false", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -1036,7 +1039,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Insert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				InsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -1047,7 +1050,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorInsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			req.Header.Set(HTTPHeaderAllowInt64, "false")
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
@@ -1058,7 +1061,7 @@ func TestReturnInt64(t *testing.T) {
 
 	for _, dataType := range schemas {
 		t.Run("[upsert]httpCfg.allow: true, Accept-Type-Allow-Int64: false", func(t *testing.T) {
-			schema := newCollectionSchema(generateCollectionSchema(dataType, false))
+			schema := newCollectionSchema(generateCollectionSchema(dataType))
 			mp := mocks.NewMockProxy(t)
 			mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 				CollectionName: DefaultCollectionName,
@@ -1068,7 +1071,7 @@ func TestReturnInt64(t *testing.T) {
 			}, nil).Once()
 			mp.EXPECT().Upsert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 				Status:    &StatusSuccess,
-				IDs:       genIds(dataType),
+				IDs:       genIDs(dataType),
 				UpsertCnt: 3,
 			}, nil).Once()
 			testEngine := initHTTPServer(mp, true)
@@ -1079,7 +1082,7 @@ func TestReturnInt64(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorUpsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			req.Header.Set(HTTPHeaderAllowInt64, "false")
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
@@ -1135,7 +1138,7 @@ func TestUpsert(t *testing.T) {
 	mp5, _ = wrapWithDescribeColl(t, mp5, ReturnSuccess, 1, nil)
 	mp5.EXPECT().Upsert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 		Status:    &StatusSuccess,
-		IDs:       genIds(schemapb.DataType_Int64),
+		IDs:       genIDs(schemapb.DataType_Int64),
 		UpsertCnt: 3,
 	}, nil).Once()
 	testCases = append(testCases, testCase{
@@ -1149,7 +1152,7 @@ func TestUpsert(t *testing.T) {
 	mp6, _ = wrapWithDescribeColl(t, mp6, ReturnSuccess, 1, nil)
 	mp6.EXPECT().Upsert(mock.Anything, mock.Anything).Return(&milvuspb.MutationResult{
 		Status:    &StatusSuccess,
-		IDs:       genIds(schemapb.DataType_VarChar),
+		IDs:       genIDs(schemapb.DataType_VarChar),
 		UpsertCnt: 3,
 	}, nil).Once()
 	testCases = append(testCases, testCase{
@@ -1169,7 +1172,7 @@ func TestUpsert(t *testing.T) {
 			testEngine := initHTTPServer(tt.mp, true)
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorUpsertPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -1190,7 +1193,7 @@ func TestUpsert(t *testing.T) {
 		testEngine := initHTTPServer(mp, true)
 		bodyReader := bytes.NewReader([]byte(`{"collectionName": "` + DefaultCollectionName + `", "data": {}}`))
 		req := httptest.NewRequest(http.MethodPost, versional(VectorUpsertPath), bodyReader)
-		req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+		req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 		w := httptest.NewRecorder()
 		testEngine.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -1201,8 +1204,8 @@ func TestUpsert(t *testing.T) {
 	})
 }
 
-func genIds(dataType schemapb.DataType) *schemapb.IDs {
-	return generateIds(dataType, 3)
+func genIDs(dataType schemapb.DataType) *schemapb.IDs {
+	return generateIDs(dataType, 3)
 }
 
 func TestSearch(t *testing.T) {
@@ -1273,7 +1276,7 @@ func TestSearch(t *testing.T) {
 			})
 			bodyReader := bytes.NewReader(data)
 			req := httptest.NewRequest(http.MethodPost, versional(VectorSearchPath), bodyReader)
-			req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+			req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 			w := httptest.NewRecorder()
 			testEngine.ServeHTTP(w, req)
 			assert.Equal(t, tt.exceptCode, w.Code)
@@ -1294,6 +1297,38 @@ func TestSearch(t *testing.T) {
 			}
 		})
 	}
+	mp := mocks.NewMockProxy(t)
+	mp.EXPECT().Search(mock.Anything, mock.Anything).Return(&milvuspb.SearchResults{
+		Status: &StatusSuccess,
+		Results: &schemapb.SearchResultData{
+			FieldsData: generateFieldData(),
+			Scores:     []float32{0.01, 0.04, 0.09},
+			TopK:       3,
+		},
+	}, nil).Once()
+	tt := testCase{
+		name:       "search success with params",
+		mp:         mp,
+		exceptCode: 200,
+	}
+	t.Run(tt.name, func(t *testing.T) {
+		testEngine := initHTTPServer(tt.mp, true)
+		rows := []float32{0.0, 0.0}
+		data, _ := json.Marshal(map[string]interface{}{
+			HTTPCollectionName: DefaultCollectionName,
+			"vector":           rows,
+			Params: map[string]float64{
+				ParamRadius:      0.9,
+				ParamRangeFilter: 0.1,
+			},
+		})
+		bodyReader := bytes.NewReader(data)
+		req := httptest.NewRequest(http.MethodPost, versional(VectorSearchPath), bodyReader)
+		req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
+		w := httptest.NewRecorder()
+		testEngine.ServeHTTP(w, req)
+		assert.Equal(t, tt.exceptCode, w.Code)
+	})
 }
 
 type ReturnType int
@@ -1405,12 +1440,14 @@ func TestHttpRequestFormat(t *testing.T) {
 		merr.ErrMissingRequiredParameters,
 		merr.ErrMissingRequiredParameters,
 		merr.ErrMissingRequiredParameters,
+		merr.ErrIncorrectParameterFormat,
 	}
 	requestJsons := [][]byte{
 		[]byte(`{"collectionName": {"` + DefaultCollectionName + `", "dimension": 2}`),
 		[]byte(`{"collName": "` + DefaultCollectionName + `", "dimension": 2}`),
 		[]byte(`{"collName": "` + DefaultCollectionName + `", "dim": 2}`),
 		[]byte(`{"collectionName": "` + DefaultCollectionName + `"}`),
+		[]byte(`{"collectionName": "` + DefaultCollectionName + `", "vector": [0.0, 0.0], "` + Params + `": {"` + ParamRangeFilter + `": 0.1}}`),
 	}
 	paths := [][]string{
 		{
@@ -1439,6 +1476,8 @@ func TestHttpRequestFormat(t *testing.T) {
 			versional(VectorInsertPath),
 			versional(VectorUpsertPath),
 			versional(VectorDeletePath),
+		}, {
+			versional(VectorSearchPath),
 		},
 	}
 	for i, pathArr := range paths {
@@ -1447,7 +1486,7 @@ func TestHttpRequestFormat(t *testing.T) {
 				testEngine := initHTTPServer(mocks.NewMockProxy(t), true)
 				bodyReader := bytes.NewReader(requestJsons[i])
 				req := httptest.NewRequest(http.MethodPost, path, bodyReader)
-				req.SetBasicAuth(util.UserRoot, util.DefaultRootPassword)
+				req.SetBasicAuth(util.UserRoot, getDefaultRootPassword())
 				w := httptest.NewRecorder()
 				testEngine.ServeHTTP(w, req)
 				assert.Equal(t, http.StatusOK, w.Code)
@@ -1529,7 +1568,6 @@ func TestAuthorization(t *testing.T) {
 
 	paths = map[string][]string{
 		errorStr: {
-			versional(VectorCollectionsPath),
 			versional(VectorCollectionsDescribePath) + "?collectionName=" + DefaultCollectionName,
 		},
 	}
@@ -1727,7 +1765,7 @@ func wrapWithDescribeIndex(t *testing.T, mp *mocks.MockProxy, returnType int, ti
 }
 
 func TestInterceptor(t *testing.T) {
-	h := Handlers{}
+	h := HandlersV1{}
 	v := atomic.NewInt32(0)
 	h.interceptors = []RestRequestInterceptor{
 		func(ctx context.Context, ginCtx *gin.Context, req any, handler func(reqCtx context.Context, req any) (any, error)) (any, error) {

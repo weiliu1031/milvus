@@ -4,8 +4,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/milvus-io/milvus/cmd/tools/migration/configs"
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 )
 
@@ -20,8 +20,11 @@ func (b etcdBasedBackend) CleanWithPrefix(prefix string) error {
 }
 
 func newEtcdBasedBackend(cfg *configs.MilvusConfig) (*etcdBasedBackend, error) {
-	etcdCli, err := etcd.GetEtcdClient(
+	etcdCli, err := etcd.CreateEtcdClient(
 		cfg.EtcdCfg.UseEmbedEtcd.GetAsBool(),
+		cfg.EtcdCfg.EtcdEnableAuth.GetAsBool(),
+		cfg.EtcdCfg.EtcdAuthUserName.GetValue(),
+		cfg.EtcdCfg.EtcdAuthPassword.GetValue(),
 		cfg.EtcdCfg.EtcdUseSSL.GetAsBool(),
 		cfg.EtcdCfg.Endpoints.GetAsStrings(),
 		cfg.EtcdCfg.EtcdTLSCert.GetValue(),

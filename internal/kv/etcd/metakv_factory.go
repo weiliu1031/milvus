@@ -22,7 +22,7 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
 
-	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -53,8 +53,11 @@ func NewWatchKVFactory(rootPath string, etcdCfg *paramtable.EtcdConfig) (kv.Watc
 		}
 		return watchKv, err
 	}
-	client, err := etcd.GetEtcdClient(
+	client, err := etcd.CreateEtcdClient(
 		etcdCfg.UseEmbedEtcd.GetAsBool(),
+		etcdCfg.EtcdEnableAuth.GetAsBool(),
+		etcdCfg.EtcdAuthUserName.GetValue(),
+		etcdCfg.EtcdAuthPassword.GetValue(),
 		etcdCfg.EtcdUseSSL.GetAsBool(),
 		etcdCfg.Endpoints.GetAsStrings(),
 		etcdCfg.EtcdTLSCert.GetValue(),

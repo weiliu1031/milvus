@@ -55,17 +55,16 @@ func PhysicalTime(ts uint64) time.Time {
 	return physicalTime
 }
 
+// PhysicalTimeSeconds returns the physical time in seconds
+func PhysicalTimeSeconds(ts uint64) float64 {
+	return float64(ts>>logicalBits) / 1000
+}
+
 // ParseHybridTs parses the ts to (physical, logical), physical part is of utc-timestamp format.
 func ParseHybridTs(ts uint64) (int64, int64) {
 	logical := ts & logicalBitsMask
 	physical := ts >> logicalBits
 	return int64(physical), int64(logical)
-}
-
-// ParseAndFormatHybridTs parses the ts and returns its human-readable format.
-func ParseAndFormatHybridTs(ts uint64) string {
-	physicalTs, _ := ParseHybridTs(ts)
-	return time.Unix(physicalTs, 0).Format(time.RFC3339) // Convert to RFC3339 format
 }
 
 // CalculateDuration returns the number of milliseconds obtained by subtracting ts2 from ts1.

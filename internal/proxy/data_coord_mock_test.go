@@ -98,14 +98,6 @@ func (coord *DataCoordMock) Flush(ctx context.Context, req *datapb.FlushRequest,
 	panic("implement me")
 }
 
-func (coord *DataCoordMock) SaveImportSegment(ctx context.Context, req *datapb.SaveImportSegmentRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	panic("implement me")
-}
-
-func (coord *DataCoordMock) UnsetIsImportingState(ctx context.Context, in *datapb.UnsetIsImportingStateRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
-	panic("implement me")
-}
-
 func (coord *DataCoordMock) MarkSegmentsDropped(ctx context.Context, req *datapb.MarkSegmentsDroppedRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	panic("implement me")
 }
@@ -247,10 +239,6 @@ func (coord *DataCoordMock) SetSegmentState(ctx context.Context, req *datapb.Set
 	return &datapb.SetSegmentStateResponse{}, nil
 }
 
-func (coord *DataCoordMock) Import(ctx context.Context, req *datapb.ImportTaskRequest, opts ...grpc.CallOption) (*datapb.ImportTaskResponse, error) {
-	return &datapb.ImportTaskResponse{}, nil
-}
-
 func (coord *DataCoordMock) UpdateSegmentStatistics(ctx context.Context, req *datapb.UpdateSegmentStatisticsRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return merr.Success(), nil
 }
@@ -268,6 +256,9 @@ func (coord *DataCoordMock) DropIndex(ctx context.Context, req *indexpb.DropInde
 }
 
 func (coord *DataCoordMock) GetIndexState(ctx context.Context, req *indexpb.GetIndexStateRequest, opts ...grpc.CallOption) (*indexpb.GetIndexStateResponse, error) {
+	if coord.GetIndexStateFunc != nil {
+		return coord.GetIndexStateFunc(ctx, req, opts...)
+	}
 	return &indexpb.GetIndexStateResponse{
 		Status:     merr.Success(),
 		State:      commonpb.IndexState_Finished,
@@ -291,6 +282,9 @@ func (coord *DataCoordMock) GetIndexInfos(ctx context.Context, req *indexpb.GetI
 
 // DescribeIndex describe the index info of the collection.
 func (coord *DataCoordMock) DescribeIndex(ctx context.Context, req *indexpb.DescribeIndexRequest, opts ...grpc.CallOption) (*indexpb.DescribeIndexResponse, error) {
+	if coord.DescribeIndexFunc != nil {
+		return coord.DescribeIndexFunc(ctx, req, opts...)
+	}
 	return &indexpb.DescribeIndexResponse{
 		Status:     merr.Success(),
 		IndexInfos: nil,

@@ -5,6 +5,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type floatVectorBaseChecker struct {
@@ -12,8 +13,8 @@ type floatVectorBaseChecker struct {
 }
 
 func (c floatVectorBaseChecker) staticCheck(params map[string]string) error {
-	if !CheckStrByValues(params, Metric, METRICS) {
-		return fmt.Errorf("metric type not found or not supported, supported: %v", METRICS)
+	if !CheckStrByValues(params, Metric, FloatVectorMetrics) {
+		return fmt.Errorf("metric type %s not found or not supported, supported: %v", params[Metric], FloatVectorMetrics)
 	}
 
 	return nil
@@ -27,14 +28,14 @@ func (c floatVectorBaseChecker) CheckTrain(params map[string]string) error {
 	return c.staticCheck(params)
 }
 
-func (c floatVectorBaseChecker) CheckValidDataType(dType schemapb.DataType) error {
-	if dType != schemapb.DataType_FloatVector && dType != schemapb.DataType_Float16Vector {
-		return fmt.Errorf("float or float16 vector are only supported")
+func (c floatVectorBaseChecker) CheckValidDataType(field *schemapb.FieldSchema) error {
+	if !typeutil.IsDenseFloatVectorType(field.GetDataType()) {
+		return fmt.Errorf("data type should be FloatVector, Float16Vector or BFloat16Vector")
 	}
 	return nil
 }
 
-func (c floatVectorBaseChecker) SetDefaultMetricTypeIfNotExist(params map[string]string) {
+func (c floatVectorBaseChecker) SetDefaultMetricTypeIfNotExist(params map[string]string, dType schemapb.DataType) {
 	setDefaultIfNotExist(params, common.MetricTypeKey, FloatVectorDefaultMetricType)
 }
 

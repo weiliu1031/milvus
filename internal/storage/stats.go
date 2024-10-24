@@ -17,32 +17,34 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"math"
 
-	"github.com/bits-and-blooms/bloom/v3"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/util/bloomfilter"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-const (
-	// TODO silverxia maybe need set from config
-	BloomFilterSize       uint    = 100000
-	MaxBloomFalsePositive float64 = 0.005
-)
-
-// PrimaryKeyStats contains statistics data for pk column
+// PrimaryKeyStats contains rowsWithToken data for pk column
 type PrimaryKeyStats struct {
-	FieldID int64              `json:"fieldID"`
-	Max     int64              `json:"max"` // useless, will delete
-	Min     int64              `json:"min"` // useless, will delete
-	BF      *bloom.BloomFilter `json:"bf"`
-	PkType  int64              `json:"pkType"`
-	MaxPk   PrimaryKey         `json:"maxPk"`
-	MinPk   PrimaryKey         `json:"minPk"`
+	FieldID int64                            `json:"fieldID"`
+	Max     int64                            `json:"max"` // useless, will delete
+	Min     int64                            `json:"min"` // useless, will delete
+	BFType  bloomfilter.BFType               `json:"bfType"`
+	BF      bloomfilter.BloomFilterInterface `json:"bf"`
+	PkType  int64                            `json:"pkType"`
+	MaxPk   PrimaryKey                       `json:"maxPk"`
+	MinPk   PrimaryKey                       `json:"minPk"`
 }
 
 // UnmarshalJSON unmarshal bytes to PrimaryKeyStats
@@ -115,12 +117,22 @@ func (stats *PrimaryKeyStats) UnmarshalJSON(data []byte) error {
 		}
 	}
 
-	if bfMessage, ok := messageMap["bf"]; ok && bfMessage != nil {
-		stats.BF = &bloom.BloomFilter{}
-		err = stats.BF.UnmarshalJSON(*bfMessage)
+	bfType := bloomfilter.BasicBF
+	if bfTypeMessage, ok := messageMap["bfType"]; ok && bfTypeMessage != nil {
+		err := json.Unmarshal(*bfTypeMessage, &bfType)
 		if err != nil {
 			return err
 		}
+		stats.BFType = bfType
+	}
+
+	if bfMessage, ok := messageMap["bf"]; ok && bfMessage != nil {
+		bf, err := bloomfilter.UnmarshalJSON(*bfMessage, bfType)
+		if err != nil {
+			log.Warn("Failed to unmarshal bloom filter, use AlwaysTrueBloomFilter instead of return err", zap.Error(err))
+			bf = bloomfilter.AlwaysTrueBloomFilter
+		}
+		stats.BF = bf
 	}
 
 	return nil
@@ -192,12 +204,18 @@ func (stats *PrimaryKeyStats) UpdateMinMax(pk PrimaryKey) {
 
 func NewPrimaryKeyStats(fieldID, pkType, rowNum int64) (*PrimaryKeyStats, error) {
 	if rowNum <= 0 {
-		return nil, merr.WrapErrParameterInvalidMsg("non zero & non negative row num", rowNum)
+		return nil, merr.WrapErrParameterInvalidMsg("zero or negative row num", rowNum)
 	}
+
+	bfType := paramtable.Get().CommonCfg.BloomFilterType.GetValue()
 	return &PrimaryKeyStats{
 		FieldID: fieldID,
 		PkType:  pkType,
-		BF:      bloom.NewWithEstimates(uint(rowNum), MaxBloomFalsePositive),
+		BFType:  bloomfilter.BFTypeFromString(bfType),
+		BF: bloomfilter.NewBloomFilterWithType(
+			uint(rowNum),
+			paramtable.Get().CommonCfg.MaxBloomFalsePositive.GetAsFloat(),
+			bfType),
 	}, nil
 }
 
@@ -233,10 +251,15 @@ func (sw *StatsWriter) Generate(stats *PrimaryKeyStats) error {
 
 // GenerateByData writes Int64Stats or StringStats from @msgs with @fieldID to @buffer
 func (sw *StatsWriter) GenerateByData(fieldID int64, pkType schemapb.DataType, msgs FieldData) error {
+	bfType := paramtable.Get().CommonCfg.BloomFilterType.GetValue()
 	stats := &PrimaryKeyStats{
 		FieldID: fieldID,
 		PkType:  int64(pkType),
-		BF:      bloom.NewWithEstimates(uint(msgs.RowNum()), MaxBloomFalsePositive),
+		BFType:  bloomfilter.BFTypeFromString(bfType),
+		BF: bloomfilter.NewBloomFilterWithType(
+			uint(msgs.RowNum()),
+			paramtable.Get().CommonCfg.MaxBloomFalsePositive.GetAsFloat(),
+			bfType),
 	}
 
 	stats.UpdateByMsgs(msgs)
@@ -279,6 +302,175 @@ func (sr *StatsReader) GetPrimaryKeyStatsList() ([]*PrimaryKeyStats, error) {
 	}
 
 	return stats, nil
+}
+
+type BM25Stats struct {
+	rowsWithToken map[uint32]int32 // mapping token => row num include token
+	numRow        int64            // total row num
+	numToken      int64            // total token num
+}
+
+const BM25VERSION int32 = 0
+
+func NewBM25Stats() *BM25Stats {
+	return &BM25Stats{
+		rowsWithToken: map[uint32]int32{},
+	}
+}
+
+func NewBM25StatsWithBytes(bytes []byte) (*BM25Stats, error) {
+	stats := NewBM25Stats()
+	err := stats.Deserialize(bytes)
+	if err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
+func (m *BM25Stats) Append(rows ...map[uint32]float32) {
+	for _, row := range rows {
+		for key, value := range row {
+			m.rowsWithToken[key] += 1
+			m.numToken += int64(value)
+		}
+
+		m.numRow += 1
+	}
+}
+
+func (m *BM25Stats) AppendFieldData(datas ...*SparseFloatVectorFieldData) {
+	for _, data := range datas {
+		m.AppendBytes(data.GetContents()...)
+	}
+}
+
+// Update BM25Stats by sparse vector bytes
+func (m *BM25Stats) AppendBytes(datas ...[]byte) {
+	for _, data := range datas {
+		dim := typeutil.SparseFloatRowElementCount(data)
+		for i := 0; i < dim; i++ {
+			index := typeutil.SparseFloatRowIndexAt(data, i)
+			value := typeutil.SparseFloatRowValueAt(data, i)
+			m.rowsWithToken[index] += 1
+			m.numToken += int64(value)
+		}
+		m.numRow += 1
+	}
+}
+
+func (m *BM25Stats) NumRow() int64 {
+	return m.numRow
+}
+
+func (m *BM25Stats) NumToken() int64 {
+	return m.numToken
+}
+
+func (m *BM25Stats) Merge(meta *BM25Stats) {
+	for key, value := range meta.rowsWithToken {
+		m.rowsWithToken[key] += value
+	}
+	m.numRow += meta.NumRow()
+	m.numToken += meta.numToken
+}
+
+func (m *BM25Stats) Minus(meta *BM25Stats) {
+	for key, value := range meta.rowsWithToken {
+		m.rowsWithToken[key] -= value
+	}
+	m.numRow -= meta.numRow
+	m.numToken -= meta.numToken
+}
+
+func (m *BM25Stats) Clone() *BM25Stats {
+	return &BM25Stats{
+		rowsWithToken: maps.Clone(m.rowsWithToken),
+		numRow:        m.numRow,
+		numToken:      m.numToken,
+	}
+}
+
+func (m *BM25Stats) Serialize() ([]byte, error) {
+	buffer := bytes.NewBuffer(make([]byte, 0, len(m.rowsWithToken)*8+20))
+
+	if err := binary.Write(buffer, common.Endian, BM25VERSION); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, common.Endian, m.numRow); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buffer, common.Endian, m.numToken); err != nil {
+		return nil, err
+	}
+
+	for key, value := range m.rowsWithToken {
+		if err := binary.Write(buffer, common.Endian, key); err != nil {
+			return nil, err
+		}
+
+		if err := binary.Write(buffer, common.Endian, value); err != nil {
+			return nil, err
+		}
+	}
+
+	// TODO ADD Serialize Time Metric
+	return buffer.Bytes(), nil
+}
+
+func (m *BM25Stats) Deserialize(bs []byte) error {
+	buffer := bytes.NewBuffer(bs)
+	dim := (len(bs) - 20) / 8
+	var numRow, tokenNum int64
+	var version int32
+	if err := binary.Read(buffer, common.Endian, &version); err != nil {
+		return err
+	}
+
+	if err := binary.Read(buffer, common.Endian, &numRow); err != nil {
+		return err
+	}
+
+	if err := binary.Read(buffer, common.Endian, &tokenNum); err != nil {
+		return err
+	}
+
+	var keys []uint32 = make([]uint32, dim)
+	var values []int32 = make([]int32, dim)
+	for i := 0; i < dim; i++ {
+		if err := binary.Read(buffer, common.Endian, &keys[i]); err != nil {
+			return err
+		}
+
+		if err := binary.Read(buffer, common.Endian, &values[i]); err != nil {
+			return err
+		}
+	}
+
+	m.numRow += numRow
+	m.numToken += tokenNum
+	for i := 0; i < dim; i++ {
+		m.rowsWithToken[keys[i]] += values[i]
+	}
+
+	return nil
+}
+
+func (m *BM25Stats) BuildIDF(tf []byte) (idf []byte) {
+	dim := typeutil.SparseFloatRowElementCount(tf)
+	idf = make([]byte, len(tf))
+	for idx := 0; idx < dim; idx++ {
+		key := typeutil.SparseFloatRowIndexAt(tf, idx)
+		value := typeutil.SparseFloatRowValueAt(tf, idx)
+		nq := m.rowsWithToken[key]
+		typeutil.SparseFloatRowSetAt(idf, idx, key, value*float32(math.Log(1+(float64(m.numRow)-float64(nq)+0.5)/(float64(nq)+0.5))))
+	}
+	return
+}
+
+func (m *BM25Stats) GetAvgdl() float64 {
+	return float64(m.numToken) / float64(m.numRow)
 }
 
 // DeserializeStats deserialize @blobs as []*PrimaryKeyStats

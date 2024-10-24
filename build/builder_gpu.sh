@@ -2,20 +2,26 @@
 
 set -euo pipefail
 
+source ./build/util.sh
+
 # Absolute path to the toplevel milvus directory.
 toplevel=$(dirname "$(cd "$(dirname "${0}")"; pwd)")
 
-export OS_NAME="${OS_NAME:-ubuntu20.04}"
+if [[ "$IS_NETWORK_MODE_HOST" == "true" ]]; then
+  sed -i '/gpubuilder:/,/^\s*$/s/image: \${IMAGE_REPO}\/milvus-env:gpu-\${OS_NAME}-\${GPU_DATE_VERSION}/&\n    network_mode: "host"/'   $toplevel/docker-compose.yml
+fi
+
+export OS_NAME="${OS_NAME:-ubuntu22.04}"
 
 pushd "${toplevel}"
 
 if [[ "${1-}" == "pull" ]]; then
-    docker-compose pull --ignore-pull-failures gpubuilder
+    $DOCKER_COMPOSE_COMMAND pull  gpubuilder
     exit 0
 fi
 
 if [[ "${1-}" == "down" ]]; then
-    docker-compose down
+    $DOCKER_COMPOSE_COMMAND down
     exit 0
 fi
 
@@ -38,15 +44,15 @@ mkdir -p "${DOCKER_VOLUME_DIRECTORY:-.docker-gpu}/amd64-${OS_NAME}-vscode-extens
 mkdir -p "${DOCKER_VOLUME_DIRECTORY:-.docker-gpu}/amd64-${OS_NAME}-conan"
 chmod -R 777 "${DOCKER_VOLUME_DIRECTORY:-.docker-gpu}"
 
-docker-compose pull --ignore-pull-failures gpubuilder
+docker compose pull  gpubuilder
 if [[ "${CHECK_BUILDER:-}" == "1" ]]; then
-    docker-compose build gpubuilder 
+    $DOCKER_COMPOSE_COMMAND build gpubuilder 
 fi
 
 if [[ "$(id -u)" != "0" ]]; then
-    docker-compose run --no-deps --rm -u "$uid:$gid" gpubuilder "$@"
+    $DOCKER_COMPOSE_COMMAND run --no-deps --rm -u "$uid:$gid" gpubuilder "$@"
 else
-    docker-compose run --no-deps --rm --entrypoint "/tini -- /entrypoint.sh" gpubuilder "$@"
+    $DOCKER_COMPOSE_COMMAND run --no-deps --rm gpubuilder "$@"
 fi
 
 popd

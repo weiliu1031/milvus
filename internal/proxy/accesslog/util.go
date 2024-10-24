@@ -18,33 +18,51 @@ package accesslog
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 
-	"github.com/milvus-io/milvus/pkg/util"
-	"github.com/milvus-io/milvus/pkg/util/crypto"
+	"github.com/milvus-io/milvus/internal/proxy/accesslog/info"
 )
 
 type AccessKey struct{}
 
-func UnaryAccessLogInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	accessInfo := NewGrpcAccessInfo(ctx, info, req)
+const ContextLogKey = "accesslog"
+
+func UnaryAccessLogInterceptor(ctx context.Context, req any, rpcInfo *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	accessInfo := info.NewGrpcAccessInfo(ctx, rpcInfo, req)
 	newCtx := context.WithValue(ctx, AccessKey{}, accessInfo)
 	resp, err := handler(newCtx, req)
 	accessInfo.SetResult(resp, err)
-	accessInfo.Write()
+	_globalL.Write(accessInfo)
 	return resp, err
 }
 
-func UnaryUpdateAccessInfoInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	accessInfo := ctx.Value(AccessKey{}).(*GrpcAccessInfo)
+func UnaryUpdateAccessInfoInterceptor(ctx context.Context, req any, rpcInfonfo *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	accessInfo := ctx.Value(AccessKey{}).(*info.GrpcAccessInfo)
 	accessInfo.UpdateCtx(ctx)
 	return handler(ctx, req)
+}
+
+func AccessLogMiddleware(ctx *gin.Context) {
+	accessInfo := info.NewRestfulInfo()
+	ctx.Set(ContextLogKey, accessInfo)
+	ctx.Next()
+	accessInfo.InitReq()
+	_globalL.Write(accessInfo)
+}
+
+func SetHTTPParams(p *gin.LogFormatterParams) {
+	value, ok := p.Keys[ContextLogKey]
+	if !ok {
+		return
+	}
+
+	info := value.(*info.RestfulInfo)
+	info.SetParams(p)
 }
 
 func join(path1, path2 string) string {
@@ -63,26 +81,4 @@ func timeFromName(filename, prefix, ext string) (time.Time, error) {
 	}
 	ts := filename[len(prefix) : len(filename)-len(ext)]
 	return time.Parse(timeNameFormat, ts)
-}
-
-func getCurUserFromContext(ctx context.Context) (string, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", fmt.Errorf("fail to get md from the context")
-	}
-	authorization, ok := md[strings.ToLower(util.HeaderAuthorize)]
-	if !ok || len(authorization) < 1 {
-		return "", fmt.Errorf("fail to get authorization from the md, authorize:[%s]", util.HeaderAuthorize)
-	}
-	token := authorization[0]
-	rawToken, err := crypto.Base64Decode(token)
-	if err != nil {
-		return "", fmt.Errorf("fail to decode the token, token: %s", token)
-	}
-	secrets := strings.SplitN(rawToken, util.CredentialSeperator, 2)
-	if len(secrets) < 2 {
-		return "", fmt.Errorf("fail to get user info from the raw token, raw token: %s", rawToken)
-	}
-	username := secrets[0]
-	return username, nil
 }

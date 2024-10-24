@@ -15,7 +15,9 @@ func (c *raftIVFPQChecker) CheckTrain(params map[string]string) error {
 	if err := c.ivfBaseChecker.CheckTrain(params); err != nil {
 		return err
 	}
-
+	if !CheckStrByValues(params, Metric, RaftMetrics) {
+		return fmt.Errorf("metric type not found or not supported, supported: %v", RaftMetrics)
+	}
 	return c.checkPQParams(params)
 }
 
@@ -55,6 +57,13 @@ func (c *raftIVFPQChecker) checkPQParams(params map[string]string) error {
 	if dimension%m != 0 {
 		return fmt.Errorf("dimension must be able to be divided by `m`, dimension: %d, m: %d", dimension, m)
 	}
+
+	setDefaultIfNotExist(params, RaftCacheDatasetOnDevice, "false")
+
+	if !CheckStrByValues(params, RaftCacheDatasetOnDevice, []string{"true", "false"}) {
+		return fmt.Errorf("raft index cache_dataset_on_device param only support true false")
+	}
+
 	return nil
 }
 

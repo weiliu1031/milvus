@@ -18,10 +18,10 @@ package querycoordv2
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 
@@ -34,7 +34,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
-	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -47,7 +46,7 @@ import (
 func (s *Server) checkAnyReplicaAvailable(collectionID int64) bool {
 	for _, replica := range s.meta.ReplicaManager.GetByCollection(collectionID) {
 		isAvailable := true
-		for _, node := range replica.GetNodes() {
+		for _, node := range replica.GetRONodes() {
 			if s.nodeMgr.Get(node) == nil {
 				isAvailable = false
 				break
@@ -61,7 +60,7 @@ func (s *Server) checkAnyReplicaAvailable(collectionID int64) bool {
 }
 
 func (s *Server) getCollectionSegmentInfo(collection int64) []*querypb.SegmentInfo {
-	segments := s.dist.SegmentDistManager.GetByCollection(collection)
+	segments := s.dist.SegmentDistManager.GetByFilter(meta.WithCollectionID(collection))
 	currentTargetSegmentsMap := s.targetMgr.GetSealedSegmentsByCollection(collection, meta.CurrentTarget)
 	infos := make(map[int64]*querypb.SegmentInfo)
 	for _, segment := range segments {
@@ -87,86 +86,160 @@ func (s *Server) getCollectionSegmentInfo(collection int64) []*querypb.SegmentIn
 	return lo.Values(infos)
 }
 
-// parseBalanceRequest parses the load balance request,
-// returns the collection, replica, and segments
-func (s *Server) balanceSegments(ctx context.Context, req *querypb.LoadBalanceRequest, replica *meta.Replica) error {
-	srcNode := req.GetSourceNodeIDs()[0]
-	dstNodeSet := typeutil.NewUniqueSet(req.GetDstNodeIDs()...)
-	if dstNodeSet.Len() == 0 {
-		outboundNodes := s.meta.ResourceManager.CheckOutboundNodes(replica)
-		availableNodes := lo.Filter(replica.Replica.GetNodes(), func(node int64, _ int) bool {
-			stop, err := s.nodeMgr.IsStoppingNode(node)
-			if err != nil {
-				return false
-			}
-			return !outboundNodes.Contain(node) && !stop
-		})
-		dstNodeSet.Insert(availableNodes...)
+// generate balance segment task and submit to scheduler
+// if sync is true, this func call will wait task to finish, until reach the segment task timeout
+// if copyMode is true, this func call will generate a load segment task, instead a balance segment task
+func (s *Server) balanceSegments(ctx context.Context,
+	collectionID int64,
+	replica *meta.Replica,
+	srcNode int64,
+	dstNodes []int64,
+	segments []*meta.Segment,
+	sync bool,
+	copyMode bool,
+) error {
+	log := log.Ctx(ctx).With(zap.Int64("collectionID", collectionID), zap.Int64("srcNode", srcNode))
+	plans := s.getBalancerFunc().AssignSegment(collectionID, segments, dstNodes, true)
+	for i := range plans {
+		plans[i].From = srcNode
+		plans[i].Replica = replica
 	}
-	dstNodeSet.Remove(srcNode)
-
-	toBalance := typeutil.NewSet[*meta.Segment]()
-	// Only balance segments in targets
-	segments := s.dist.SegmentDistManager.GetByCollectionAndNode(req.GetCollectionID(), srcNode)
-	segments = lo.Filter(segments, func(segment *meta.Segment, _ int) bool {
-		return s.targetMgr.GetSealedSegment(segment.GetCollectionID(), segment.GetID(), meta.CurrentTarget) != nil
-	})
-	allSegments := make(map[int64]*meta.Segment)
-	for _, segment := range segments {
-		allSegments[segment.GetID()] = segment
-	}
-
-	if len(req.GetSealedSegmentIDs()) == 0 {
-		toBalance.Insert(segments...)
-	} else {
-		for _, segmentID := range req.GetSealedSegmentIDs() {
-			segment, ok := allSegments[segmentID]
-			if !ok {
-				return fmt.Errorf("segment %d not found in source node %d", segmentID, srcNode)
-			}
-			toBalance.Insert(segment)
-		}
-	}
-
-	log := log.With(
-		zap.Int64("collectionID", req.GetCollectionID()),
-		zap.Int64("srcNodeID", srcNode),
-		zap.Int64s("destNodeIDs", dstNodeSet.Collect()),
-	)
-	plans := s.balancer.AssignSegment(req.GetCollectionID(), toBalance.Collect(), dstNodeSet.Collect())
 	tasks := make([]task.Task, 0, len(plans))
 	for _, plan := range plans {
 		log.Info("manually balance segment...",
-			zap.Int64("destNodeID", plan.To),
+			zap.Int64("replica", plan.Replica.GetID()),
+			zap.String("channel", plan.Segment.InsertChannel),
+			zap.Int64("from", plan.From),
+			zap.Int64("to", plan.To),
 			zap.Int64("segmentID", plan.Segment.GetID()),
 		)
-		task, err := task.NewSegmentTask(ctx,
+		actions := make([]task.Action, 0)
+		loadAction := task.NewSegmentActionWithScope(plan.To, task.ActionTypeGrow, plan.Segment.GetInsertChannel(), plan.Segment.GetID(), querypb.DataScope_Historical)
+		actions = append(actions, loadAction)
+		if !copyMode {
+			// if in copy mode, the release action will be skip
+			releaseAction := task.NewSegmentActionWithScope(plan.From, task.ActionTypeReduce, plan.Segment.GetInsertChannel(), plan.Segment.GetID(), querypb.DataScope_Historical)
+			actions = append(actions, releaseAction)
+		}
+
+		t, err := task.NewSegmentTask(s.ctx,
 			Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond),
-			task.WrapIDSource(req.GetBase().GetMsgID()),
-			req.GetCollectionID(),
-			replica.GetID(),
-			task.NewSegmentActionWithScope(plan.To, task.ActionTypeGrow, plan.Segment.GetInsertChannel(), plan.Segment.GetID(), querypb.DataScope_Historical),
-			task.NewSegmentActionWithScope(srcNode, task.ActionTypeReduce, plan.Segment.GetInsertChannel(), plan.Segment.GetID(), querypb.DataScope_Historical),
+			utils.ManualBalance,
+			collectionID,
+			plan.Replica,
+			actions...,
 		)
 		if err != nil {
 			log.Warn("create segment task for balance failed",
-				zap.Int64("collection", req.GetCollectionID()),
-				zap.Int64("replica", replica.GetID()),
+				zap.Int64("replica", plan.Replica.GetID()),
 				zap.String("channel", plan.Segment.InsertChannel),
-				zap.Int64("from", srcNode),
+				zap.Int64("from", plan.From),
+				zap.Int64("to", plan.To),
+				zap.Int64("segmentID", plan.Segment.GetID()),
+				zap.Error(err),
+			)
+			continue
+		}
+		t.SetReason("manual balance")
+		// set manual balance to normal, to avoid manual balance be canceled by other segment task
+		t.SetPriority(task.TaskPriorityNormal)
+		err = s.taskScheduler.Add(t)
+		if err != nil {
+			t.Cancel(err)
+			log.Info("skip balance segment task", zap.Int64("segmentID", plan.Segment.GetID()), zap.Error(err))
+			continue
+		}
+		tasks = append(tasks, t)
+	}
+
+	if sync {
+		err := task.Wait(ctx, Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond), tasks...)
+		if err != nil {
+			msg := "failed to wait all balance task finished"
+			log.Warn(msg, zap.Error(err))
+			return errors.Wrap(err, msg)
+		}
+	}
+
+	return nil
+}
+
+// generate balance channel task and submit to scheduler
+// if sync is true, this func call will wait task to finish, until reach the channel task timeout
+// if copyMode is true, this func call will generate a load channel task, instead a balance channel task
+func (s *Server) balanceChannels(ctx context.Context,
+	collectionID int64,
+	replica *meta.Replica,
+	srcNode int64,
+	dstNodes []int64,
+	channels []*meta.DmChannel,
+	sync bool,
+	copyMode bool,
+) error {
+	log := log.Ctx(ctx).With(zap.Int64("collectionID", collectionID))
+
+	plans := s.getBalancerFunc().AssignChannel(channels, dstNodes, true)
+	for i := range plans {
+		plans[i].From = srcNode
+		plans[i].Replica = replica
+	}
+
+	tasks := make([]task.Task, 0, len(plans))
+	for _, plan := range plans {
+		log.Info("manually balance channel...",
+			zap.Int64("replica", plan.Replica.GetID()),
+			zap.String("channel", plan.Channel.GetChannelName()),
+			zap.Int64("from", plan.From),
+			zap.Int64("to", plan.To),
+		)
+
+		actions := make([]task.Action, 0)
+		loadAction := task.NewChannelAction(plan.To, task.ActionTypeGrow, plan.Channel.GetChannelName())
+		actions = append(actions, loadAction)
+		if !copyMode {
+			// if in copy mode, the release action will be skip
+			releaseAction := task.NewChannelAction(plan.From, task.ActionTypeReduce, plan.Channel.GetChannelName())
+			actions = append(actions, releaseAction)
+		}
+		t, err := task.NewChannelTask(s.ctx,
+			Params.QueryCoordCfg.ChannelTaskTimeout.GetAsDuration(time.Millisecond),
+			utils.ManualBalance,
+			collectionID,
+			plan.Replica,
+			actions...,
+		)
+		if err != nil {
+			log.Warn("create channel task for balance failed",
+				zap.Int64("replica", plan.Replica.GetID()),
+				zap.String("channel", plan.Channel.GetChannelName()),
+				zap.Int64("from", plan.From),
 				zap.Int64("to", plan.To),
 				zap.Error(err),
 			)
 			continue
 		}
-		err = s.taskScheduler.Add(task)
+		t.SetReason("manual balance")
+		// set manual balance channel to high, to avoid manual balance be canceled by other channel task
+		t.SetPriority(task.TaskPriorityHigh)
+		err = s.taskScheduler.Add(t)
 		if err != nil {
-			task.Cancel(err)
-			return err
+			t.Cancel(err)
+			log.Info("skip balance channel task", zap.String("channel", plan.Channel.GetChannelName()), zap.Error(err))
+			continue
 		}
-		tasks = append(tasks, task)
+		tasks = append(tasks, t)
 	}
-	return task.Wait(ctx, Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond), tasks...)
+
+	if sync {
+		err := task.Wait(ctx, Params.QueryCoordCfg.ChannelTaskTimeout.GetAsDuration(time.Millisecond), tasks...)
+		if err != nil {
+			msg := "failed to wait all balance task finished"
+			log.Warn(msg, zap.Error(err))
+			return errors.Wrap(err, msg)
+		}
+	}
+
+	return nil
 }
 
 // TODO(dragondriver): add more detail metrics
@@ -304,7 +377,7 @@ func (s *Server) tryGetNodesMetrics(ctx context.Context, req *milvuspb.GetMetric
 	return ret
 }
 
-func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*milvuspb.ReplicaInfo, error) {
+func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) *milvuspb.ReplicaInfo {
 	info := &milvuspb.ReplicaInfo{
 		ReplicaID:         replica.GetID(),
 		CollectionID:      replica.GetCollectionID(),
@@ -315,13 +388,14 @@ func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*m
 
 	channels := s.targetMgr.GetDmChannelsByCollection(replica.GetCollectionID(), meta.CurrentTarget)
 	if len(channels) == 0 {
-		msg := "failed to get channels, collection not loaded"
-		log.Warn(msg)
-		return nil, merr.WrapErrCollectionNotFound(replica.GetCollectionID(), msg)
+		log.Warn("failed to get channels, collection may be not loaded or in recovering", zap.Int64("collectionID", replica.GetCollectionID()))
+		return info
 	}
+	shardReplicas := make([]*milvuspb.ShardReplica, 0, len(channels))
+
 	var segments []*meta.Segment
 	if withShardNodes {
-		segments = s.dist.SegmentDistManager.GetByCollection(replica.GetCollectionID())
+		segments = s.dist.SegmentDistManager.GetByFilter(meta.WithCollectionID(replica.GetCollectionID()))
 	}
 
 	for _, channel := range channels {
@@ -331,9 +405,11 @@ func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*m
 			leaderInfo = s.nodeMgr.Get(leader)
 		}
 		if leaderInfo == nil {
-			msg := fmt.Sprintf("failed to get shard leader for shard %s", channel)
-			log.Warn(msg)
-			return nil, merr.WrapErrNodeNotFound(leader, msg)
+			log.Warn("failed to get shard leader for shard",
+				zap.Int64("collectionID", replica.GetCollectionID()),
+				zap.Int64("replica", replica.GetID()),
+				zap.String("shard", channel.GetChannelName()))
+			return info
 		}
 
 		shard := &milvuspb.ShardReplica{
@@ -351,44 +427,8 @@ func (s *Server) fillReplicaInfo(replica *meta.Replica, withShardNodes bool) (*m
 			})
 			shard.NodeIds = typeutil.NewUniqueSet(shardNodes...).Collect()
 		}
-		info.ShardReplicas = append(info.ShardReplicas, shard)
+		shardReplicas = append(shardReplicas, shard)
 	}
-	return info, nil
-}
-
-func checkNodeAvailable(nodeID int64, info *session.NodeInfo) error {
-	if info == nil {
-		return merr.WrapErrNodeOffline(nodeID)
-	} else if time.Since(info.LastHeartbeat()) > Params.QueryCoordCfg.HeartbeatAvailableInterval.GetAsDuration(time.Millisecond) {
-		return merr.WrapErrNodeOffline(nodeID, fmt.Sprintf("lastHB=%v", info.LastHeartbeat()))
-	}
-	return nil
-}
-
-func filterDupLeaders(replicaManager *meta.ReplicaManager, leaders map[int64]*meta.LeaderView) map[int64]*meta.LeaderView {
-	type leaderID struct {
-		ReplicaID int64
-		Shard     string
-	}
-
-	newLeaders := make(map[leaderID]*meta.LeaderView)
-	for _, view := range leaders {
-		replica := replicaManager.GetByCollectionAndNode(view.CollectionID, view.ID)
-		if replica == nil {
-			continue
-		}
-
-		id := leaderID{replica.GetID(), view.Channel}
-		if old, ok := newLeaders[id]; ok && old.Version > view.Version {
-			continue
-		}
-
-		newLeaders[id] = view
-	}
-
-	result := make(map[int64]*meta.LeaderView)
-	for _, v := range newLeaders {
-		result[v.ID] = v
-	}
-	return result
+	info.ShardReplicas = shardReplicas
+	return info
 }

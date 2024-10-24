@@ -35,10 +35,17 @@ char*
 SegcoreSetSimdType(const char*);
 
 void
+SegcoreEnableKnowhereScoreConsistency();
+
+void
 SegcoreSetKnowhereBuildThreadPoolNum(const uint32_t num_threads);
 
 void
 SegcoreSetKnowhereSearchThreadPoolNum(const uint32_t num_threads);
+
+void
+SegcoreSetKnowhereGpuMemoryPoolSize(const uint32_t init_size,
+                                    const uint32_t max_size);
 
 void
 SegcoreCloseGlog();

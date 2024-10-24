@@ -95,7 +95,7 @@ class TestDeleteParams(TestcaseBase):
         self.connection_wrap.remove_connection(ct.default_alias)
         res_list, _ = self.connection_wrap.list_connections()
         assert ct.default_alias not in res_list
-        error = {ct.err_code: 0, ct.err_msg: "should create connect first"}
+        error = {ct.err_code: 1, ct.err_msg: "should create connect first"}
         collection_w.delete(expr=tmp_expr, check_task=CheckTasks.err_res, check_items=error)
 
     # Not Milvus Exception
@@ -108,7 +108,7 @@ class TestDeleteParams(TestcaseBase):
         """
         # init collection with tmp_nb default data
         collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True)[0]
-        error = {ct.err_code: 0, ct.err_msg: "expr cannot be None"}
+        error = {ct.err_code: 1, ct.err_msg: "expr cannot be None"}
         collection_w.delete(expr=None, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -121,7 +121,7 @@ class TestDeleteParams(TestcaseBase):
         """
         # init collection with tmp_nb default data
         collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True)[0]
-        error = {ct.err_code: 0, ct.err_msg: f"expr value {expr} is illegal"}
+        error = {ct.err_code: 1, ct.err_msg: f"expr value {expr} is illegal"}
         collection_w.delete(expr, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -134,8 +134,8 @@ class TestDeleteParams(TestcaseBase):
         """
         # init collection with tmp_nb default data
         collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True)[0]
-        error = {ct.err_code: 1,
-                 ct.err_msg: f"failed to create expr plan, expr = {expr}"}
+        error = {ct.err_code: 1100,
+                 ct.err_msg: f"failed to create delete plan: cannot parse expression: {expr}"}
         collection_w.delete(expr, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -194,8 +194,9 @@ class TestDeleteParams(TestcaseBase):
         collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True,
                                                     is_all_data_type=True, is_index=True)[0]
         expr = f"{ct.default_float_vec_field_name} in [[0.1]]"
-        error = {ct.err_code: 1,
-                 ct.err_msg: f"failed to create expr plan, expr = {expr}"}
+        error = {ct.err_code: 1100,
+                 ct.err_msg: f"failed to create delete plan: cannot parse expression: {expr}, "
+                             f"error: value '[0.1]' in list cannot be casted to FloatVector: invalid parameter"}
 
         collection_w.delete(expr, check_task=CheckTasks.err_res, check_items=error)
 
@@ -240,7 +241,7 @@ class TestDeleteParams(TestcaseBase):
         expr = f'{ct.default_int64_field_name} in {[0.0, 1.0]}'
 
         # Bad exception message
-        error = {ct.err_code: 1, ct.err_msg: "failed to create expr plan,"}
+        error = {ct.err_code: 1100, ct.err_msg: "failed to create delete plan: cannot parse expression"}
         collection_w.delete(expr=expr, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -255,7 +256,7 @@ class TestDeleteParams(TestcaseBase):
         expr = f'{ct.default_int64_field_name} in {[0, 1.0]}'
 
         # Bad exception message
-        error = {ct.err_code: 1, ct.err_msg: "failed to create expr plan"}
+        error = {ct.err_code: 1100, ct.err_msg: "failed to create delete plan: cannot parse expression"}
         collection_w.delete(expr=expr, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L0)
@@ -1835,8 +1836,9 @@ class TestDeleteString(TestcaseBase):
         collection_w = \
             self.init_collection_general(prefix, nb=tmp_nb, insert_data=True, primary_field=ct.default_string_field_name)[0]
         collection_w.load()
-        error = {ct.err_code: 0,
-                 ct.err_msg: f"failed to create expr plan, expr = {default_invalid_string_exp}"}
+        error = {ct.err_code: 1100,
+                 ct.err_msg: f"failed to create delete plan: cannot parse expression: {default_invalid_string_exp}, "
+                             f"error: comparisons between VarChar and Int64 are not supported: invalid parameter"}
         collection_w.delete(expr=default_invalid_string_exp,
                             check_task=CheckTasks.err_res, check_items=error)
 
@@ -2079,6 +2081,7 @@ class TestDeleteComplexExpr(TestcaseBase):
         """
         # init collection with nb default data
         collection_w = self.init_collection_general(prefix, False)[0]
+        collection_w.release()
 
         # delete
         error = {ct.err_code: 101, ct.err_msg: "collection not loaded"}
@@ -2199,7 +2202,7 @@ class TestDeleteComplexExpr(TestcaseBase):
         collection_w.load()
 
         # delete with expressions
-        error = {ct.err_code: 1, ct.err_msg: f"failed to create expr plan, expr = {expressions}"}
+        error = {ct.err_code: 1100, ct.err_msg: f"failed to create delete plan: cannot parse expression: {expressions}"}
         collection_w.delete(expressions, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -2333,3 +2336,84 @@ class TestDeleteComplexExpr(TestcaseBase):
                            check_task=CheckTasks.check_query_results,
                            check_items={'count(*)': nb - len(filter_ids)})
 
+
+class TestCollectionSearchNoneAndDefaultData(TestcaseBase):
+    """
+    Test case of delete interface with None data
+    """
+
+    @pytest.fixture(scope="function", params=[0, 0.5, 1])
+    def null_data_percent(self, request):
+        yield request.param
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_delete_search_with_none_data(self, null_data_percent):
+        """
+        target: test delete and search when there is None data
+        method: search entities after it was deleted
+        expected: deleted entity is not in the search result
+        """
+        # init collection with nb default data
+        collection_w, _, _, ids = self.init_collection_general(prefix, insert_data=True,
+                                                               nullable_fields={ct.default_float_field_name: null_data_percent},
+                                                               default_value_fields = {ct.default_string_field_name: "data"})[0:4]
+        entity, _ = collection_w.query(tmp_expr, output_fields=["*"])
+        search_res, _ = collection_w.search([entity[0][ct.default_float_vec_field_name]],
+                                            ct.default_float_vec_field_name,
+                                            ct.default_search_params, ct.default_limit)
+        # assert search results contains entity
+        assert 0 in search_res[0].ids
+
+        expr = f'{ct.default_int64_field_name} in {ids[:ct.default_nb // 2]}'
+        collection_w.delete(expr)
+        search_res_2, _ = collection_w.search([entity[0][ct.default_float_vec_field_name]],
+                                              ct.default_float_vec_field_name,
+                                              ct.default_search_params, ct.default_limit)
+        # assert search result is not equal to entity
+        log.debug(f"Second search result ids: {search_res_2[0].ids}")
+        inter = set(ids[:ct.default_nb // 2]
+                    ).intersection(set(search_res_2[0].ids))
+        # Using bounded staleness, we could still search the "deleted" entities,
+        # since the search requests arrived query nodes earlier than query nodes consume the delete requests.
+        assert len(inter) == 0
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_delete_entities_repeatedly_with_string_none_data(self, null_data_percent):
+        """
+        target: test delete entities twice with string expr
+        method: delete with same expr twice
+        expected: No exception for second deletion
+        """
+        # init collection with nb default data
+        collection_w = \
+            self.init_collection_general(prefix, nb=tmp_nb, insert_data=True, primary_field=ct.default_string_field_name,
+                                         nullable_fields={ct.default_float_field_name: null_data_percent},
+                                         default_value_fields={ct.default_int64_field_name: 100})[0]
+
+        # assert delete successfully and no exception
+        collection_w.delete(expr=default_string_expr)
+        collection_w.num_entities
+        collection_w.query(default_string_expr,
+                           check_task=CheckTasks.check_query_empty)
+        collection_w.delete(expr=default_string_expr)
+
+    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.skip(reason="waiting for the expr code part to be merged")
+    def test_delete_entities_repeatedly_with_expr_on_none_fields(self, null_data_percent):
+        """
+        target: test delete entities twice with string expr
+        method: delete with same expr twice
+        expected: No exception for second deletion
+        """
+        # init collection with nb default data
+        collection_w = \
+            self.init_collection_general(prefix, nb=tmp_nb, insert_data=True, primary_field=ct.default_string_field_name,
+                                         nullable_fields={ct.default_float_field_name: null_data_percent},
+                                         default_value_fields={ct.default_int64_field_name: 100})[0]
+
+        # assert delete successfully and no exception
+        collection_w.delete(expr=default_string_expr)
+        collection_w.num_entities
+        collection_w.query(default_string_expr,
+                           check_task=CheckTasks.check_query_empty)
+        collection_w.delete(expr=default_string_expr)

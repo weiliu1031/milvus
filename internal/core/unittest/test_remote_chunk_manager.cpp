@@ -41,6 +41,7 @@ get_default_remote_storage_config() {
     storage_config.storage_type = "remote";
     storage_config.cloud_provider = "";
     storage_config.useSSL = false;
+    storage_config.sslCACert = "";
     storage_config.useIAM = false;
     return storage_config;
 }
@@ -86,6 +87,12 @@ TEST_F(RemoteChunkManagerTest, BasicFunctions) {
     configs_.cloud_provider = "azure";
     the_chunk_manager_ = CreateChunkManager(configs_);
     EXPECT_TRUE(the_chunk_manager_->GetName() == "AzureChunkManager");
+#endif
+
+#ifdef ENABLE_GCP_NATIVE
+    configs_.cloud_provider = "gcpnative";
+    the_chunk_manager_ = CreateChunkManager(configs_);
+    EXPECT_TRUE(the_chunk_manager_->GetName() == "GcpNativeChunkManager");
 #endif
 
     configs_.cloud_provider = "";

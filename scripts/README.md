@@ -4,7 +4,7 @@
 
 ```
 OS: Ubuntu 20.04
-go：1.20
+go：1.21
 cmake: >=3.18
 gcc： 7.5
 ```
@@ -22,6 +22,14 @@ $ go get github.com/golang/protobuf/protoc-gen-go@v1.3.2
 ```
 
 Install OpenBlas library
+
+install using apt
+
+```shell
+sudo apt install -y libopenblas-dev
+```
+
+or build from source code
 
 ```shell
 $ wget https://github.com/xianyi/OpenBLAS/archive/v0.3.9.tar.gz && \
@@ -59,6 +67,7 @@ $ sudo curl -L "https://github.com/docker/compose/releases/download/1.27.4/docke
 $ sudo chmod +x /usr/local/bin/docker-compose
 $ sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
 $ docker-compose --version
+$ docker compose --version
 ```
 
 ## Start service
@@ -68,6 +77,7 @@ Start third-party service:
 ```shell
 $ cd [milvus project path]/deployments/docker/cluster
 $ docker-compose up -d
+$ docker compose up -d
 ```
 
 Start milvus cluster:

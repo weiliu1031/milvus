@@ -14,7 +14,7 @@ pipeline {
 
     options {
         timestamps()
-        timeout(time: 70, unit: 'MINUTES')
+        timeout(time: 140, unit: 'MINUTES')
         // parallelsAlwaysFailFast()
         disableConcurrentBuilds()
     }
@@ -34,7 +34,13 @@ pipeline {
                 container('main') {
                     script {
                         sh './build/set_docker_mirror.sh'
-                        sh "./build/builder_gpu.sh /bin/bash -c \"make gpu-install\""
+                        sh """
+                        # disable dirty tag
+                        sed -i. 's/--dirty="-dev"//g' Makefile
+                        export IS_NETWORK_MODE_HOST="true"
+                        export OS_NAME=ubuntu22.04
+                        ./build/builder_gpu.sh /bin/bash -c \"make gpu-install\"
+                        """
 
                         def date = sh(returnStdout: true, script: 'date +%Y%m%d').trim()
                         def gitShortCommit = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
@@ -45,6 +51,8 @@ pipeline {
                                 export MILVUS_IMAGE_REPO="${env.TARGET_REPO}/milvus"
                                 export MILVUS_HARBOR_IMAGE_REPO="${env.HARBOR_REPO}/milvus/milvus"
                                 export MILVUS_IMAGE_TAG="${env.BRANCH_NAME}-${date}-${gitShortCommit}-gpu"
+                                export DOCKER_BUILDKIT=1
+                                export OS_NAME=ubuntu22.04
                                 build/build_image_gpu.sh
                                 docker push \${MILVUS_IMAGE_REPO}:\${MILVUS_IMAGE_TAG}
                                 docker tag \${MILVUS_IMAGE_REPO}:\${MILVUS_IMAGE_TAG} \${MILVUS_IMAGE_REPO}:${env.BRANCH_NAME}-latest-gpu

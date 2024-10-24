@@ -24,16 +24,16 @@ VecIndexCreator::VecIndexCreator(
     DataType data_type,
     Config& config,
     const storage::FileManagerContext& file_manager_context)
-    : VecIndexCreator(data_type, "", config, file_manager_context, nullptr) {
+    : VecIndexCreator(data_type, "", 0, config, file_manager_context) {
 }
 
 VecIndexCreator::VecIndexCreator(
     DataType data_type,
     const std::string& field_name,
+    const int64_t dim,
     Config& config,
-    const storage::FileManagerContext& file_manager_context,
-    std::shared_ptr<milvus_storage::Space> space)
-    : config_(config), data_type_(data_type), space_(std::move(space)) {
+    const storage::FileManagerContext& file_manager_context)
+    : config_(config), data_type_(data_type) {
     index::CreateIndexInfo index_info;
     index_info.field_type = data_type_;
     index_info.index_type = index::GetIndexTypeFromConfig(config_);
@@ -41,9 +41,10 @@ VecIndexCreator::VecIndexCreator(
     index_info.field_name = field_name;
     index_info.index_engine_version =
         index::GetIndexEngineVersionFromConfig(config_);
+    index_info.dim = dim;
 
     index_ = index::IndexFactory::GetInstance().CreateIndex(
-        index_info, file_manager_context, space_);
+        index_info, file_manager_context);
     AssertInfo(index_ != nullptr,
                "[VecIndexCreator]Index is null after create index");
 }
@@ -63,11 +64,6 @@ VecIndexCreator::Build() {
     index_->Build(config_);
 }
 
-void
-VecIndexCreator::BuildV2() {
-    index_->BuildV2(config_);
-}
-
 milvus::BinarySet
 VecIndexCreator::Serialize() {
     return index_->Serialize(config_);
@@ -83,17 +79,14 @@ VecIndexCreator::Query(const milvus::DatasetPtr& dataset,
                        const SearchInfo& search_info,
                        const BitsetView& bitset) {
     auto vector_index = dynamic_cast<index::VectorIndex*>(index_.get());
-    return vector_index->Query(dataset, search_info, bitset);
+    auto search_result = std::make_unique<SearchResult>();
+    vector_index->Query(dataset, search_info, bitset, *search_result);
+    return search_result;
 }
 
 BinarySet
 VecIndexCreator::Upload() {
     return index_->Upload();
-}
-
-BinarySet
-VecIndexCreator::UploadV2() {
-    return index_->UploadV2();
 }
 
 void

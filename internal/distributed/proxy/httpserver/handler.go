@@ -1,22 +1,18 @@
 package httpserver
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
 )
 
-type RestRequestInterceptor func(ctx context.Context, ginCtx *gin.Context, req any, handler func(reqCtx context.Context, req any) (any, error)) (any, error)
-
 // Handlers handles http requests
 type Handlers struct {
-	proxy        types.ProxyComponent
-	interceptors []RestRequestInterceptor
+	proxy types.ProxyComponent
 }
 
 // NewHandlers creates a new Handlers

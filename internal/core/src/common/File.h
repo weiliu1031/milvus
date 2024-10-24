@@ -13,6 +13,7 @@
 
 #include <string>
 #include "common/EasyAssert.h"
+#include "common/Types.h"
 #include "fmt/core.h"
 #include <fcntl.h>
 #include <unistd.h>
@@ -38,7 +39,7 @@ class File {
                    "failed to create mmap file {}: {}",
                    filepath,
                    strerror(errno));
-        return File(fd);
+        return File(fd, std::string(filepath));
     }
 
     int
@@ -46,9 +47,25 @@ class File {
         return fd_;
     }
 
+    std::string
+    Path() const {
+        return filepath_;
+    }
+
     ssize_t
     Write(const void* buf, size_t size) {
         return write(fd_, buf, size);
+    }
+
+    template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+    ssize_t
+    WriteInt(T value) {
+        return write(fd_, &value, sizeof(value));
+    }
+
+    offset_t
+    Seek(offset_t offset, int whence) {
+        return lseek(fd_, offset, whence);
     }
 
     void
@@ -58,8 +75,10 @@ class File {
     }
 
  private:
-    explicit File(int fd) : fd_(fd) {
+    explicit File(int fd, const std::string& filepath)
+        : fd_(fd), filepath_(filepath) {
     }
     int fd_{-1};
+    std::string filepath_;
 };
 }  // namespace milvus

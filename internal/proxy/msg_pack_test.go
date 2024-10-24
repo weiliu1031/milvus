@@ -20,23 +20,26 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/allocator"
+	"github.com/milvus-io/milvus/internal/mocks"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/testutils"
 )
 
 func TestRepackInsertData(t *testing.T) {
 	nb := 10
-	hash := generateHashKeys(nb)
+	hash := testutils.GenerateHashKeys(nb)
 	prefix := "TestRepackInsertData"
 	dbName := ""
 	collectionName := prefix + funcutil.GenRandomStr()
@@ -90,7 +93,7 @@ func TestRepackInsertData(t *testing.T) {
 		BaseMsg: msgstream.BaseMsg{
 			HashValues: hash,
 		},
-		InsertRequest: msgpb.InsertRequest{
+		InsertRequest: &msgpb.InsertRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:  commonpb.MsgType_Insert,
 				MsgID:    0,
@@ -143,7 +146,7 @@ func TestRepackInsertData(t *testing.T) {
 
 func TestRepackInsertDataWithPartitionKey(t *testing.T) {
 	nb := 10
-	hash := generateHashKeys(nb)
+	hash := testutils.GenerateHashKeys(nb)
 	prefix := "TestRepackInsertData"
 	collectionName := prefix + funcutil.GenRandomStr()
 
@@ -152,8 +155,10 @@ func TestRepackInsertDataWithPartitionKey(t *testing.T) {
 
 	rc := NewRootCoordMock()
 	defer rc.Close()
+	qc := &mocks.MockQueryCoordClient{}
+	qc.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{}, nil).Maybe()
 
-	err := InitMetaCache(ctx, rc, nil, nil)
+	err := InitMetaCache(ctx, rc, qc, nil)
 	assert.NoError(t, err)
 
 	idAllocator, err := allocator.NewIDAllocator(ctx, rc, paramtable.GetNodeID())
@@ -200,7 +205,7 @@ func TestRepackInsertDataWithPartitionKey(t *testing.T) {
 		BaseMsg: msgstream.BaseMsg{
 			HashValues: hash,
 		},
-		InsertRequest: msgpb.InsertRequest{
+		InsertRequest: &msgpb.InsertRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:  commonpb.MsgType_Insert,
 				MsgID:    0,

@@ -25,12 +25,13 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/testutils"
 )
 
 const (
@@ -75,9 +76,11 @@ func (s *MiniClusterSuite) waitForLoadInternal(ctx context.Context, dbName, coll
 	}
 }
 
-func waitingForLoad(ctx context.Context, cluster *MiniCluster, collection string) {
+func (s *MiniClusterSuite) WaitForLoadRefresh(ctx context.Context, dbName, collection string) {
+	cluster := s.Cluster
 	getLoadingProgress := func() *milvuspb.GetLoadingProgressResponse {
 		loadProgress, err := cluster.Proxy.GetLoadingProgress(ctx, &milvuspb.GetLoadingProgressRequest{
+			DbName:         dbName,
 			CollectionName: collection,
 		})
 		if err != nil {
@@ -85,10 +88,11 @@ func waitingForLoad(ctx context.Context, cluster *MiniCluster, collection string
 		}
 		return loadProgress
 	}
-	for getLoadingProgress().GetProgress() != 100 {
+	for getLoadingProgress().GetRefreshProgress() != 100 {
 		select {
 		case <-ctx.Done():
-			panic("load timeout")
+			s.FailNow("failed to wait for load (refresh)")
+			return
 		default:
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -148,6 +152,67 @@ func ConstructSearchRequest(
 		},
 		TravelTimestamp:    0,
 		GuaranteeTimestamp: 0,
+		Nq:                 int64(nq),
+	}
+}
+
+func ConstructSearchRequestWithConsistencyLevel(
+	dbName, collectionName string,
+	expr string,
+	vecField string,
+	vectorType schemapb.DataType,
+	outputFields []string,
+	metricType string,
+	params map[string]any,
+	nq, dim int, topk, roundDecimal int,
+	useDefaultConsistency bool,
+	consistencyLevel commonpb.ConsistencyLevel,
+) *milvuspb.SearchRequest {
+	b, err := json.Marshal(params)
+	if err != nil {
+		panic(err)
+	}
+	plg := constructPlaceholderGroup(nq, dim, vectorType)
+	plgBs, err := proto.Marshal(plg)
+	if err != nil {
+		panic(err)
+	}
+
+	return &milvuspb.SearchRequest{
+		Base:             nil,
+		DbName:           dbName,
+		CollectionName:   collectionName,
+		PartitionNames:   nil,
+		Dsl:              expr,
+		PlaceholderGroup: plgBs,
+		DslType:          commonpb.DslType_BoolExprV1,
+		OutputFields:     outputFields,
+		SearchParams: []*commonpb.KeyValuePair{
+			{
+				Key:   common.MetricTypeKey,
+				Value: metricType,
+			},
+			{
+				Key:   SearchParamsKey,
+				Value: string(b),
+			},
+			{
+				Key:   AnnsFieldKey,
+				Value: vecField,
+			},
+			{
+				Key:   common.TopKKey,
+				Value: strconv.Itoa(topk),
+			},
+			{
+				Key:   RoundDecimalKey,
+				Value: strconv.Itoa(roundDecimal),
+			},
+		},
+		TravelTimestamp:       0,
+		GuaranteeTimestamp:    0,
+		UseDefaultConsistency: useDefaultConsistency,
+		ConsistencyLevel:      consistencyLevel,
 	}
 }
 
@@ -183,15 +248,24 @@ func constructPlaceholderGroup(nq, dim int, vectorType schemapb.DataType) *commo
 		}
 	case schemapb.DataType_Float16Vector:
 		placeholderType = commonpb.PlaceholderType_Float16Vector
+		data := testutils.GenerateFloat16Vectors(nq, dim)
 		for i := 0; i < nq; i++ {
-			total := dim * 2
-			ret := make([]byte, total)
-			_, err := rand.Read(ret)
-			if err != nil {
-				panic(err)
-			}
-			values = append(values, ret)
+			rowBytes := dim * 2
+			values = append(values, data[rowBytes*i:rowBytes*(i+1)])
 		}
+	case schemapb.DataType_BFloat16Vector:
+		placeholderType = commonpb.PlaceholderType_BFloat16Vector
+		data := testutils.GenerateBFloat16Vectors(nq, dim)
+		for i := 0; i < nq; i++ {
+			rowBytes := dim * 2
+			values = append(values, data[rowBytes*i:rowBytes*(i+1)])
+		}
+	case schemapb.DataType_SparseFloatVector:
+		// for sparse, all query rows are encoded in a single byte array
+		values = make([][]byte, 0, 1)
+		placeholderType = commonpb.PlaceholderType_SparseFloatVector
+		sparseVecs := GenerateSparseFloatArray(nq)
+		values = append(values, sparseVecs.Contents...)
 	default:
 		panic("invalid vector data type")
 	}

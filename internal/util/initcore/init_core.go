@@ -17,7 +17,7 @@
 package initcore
 
 /*
-#cgo pkg-config: milvus_common milvus_storage milvus_segcore
+#cgo pkg-config: milvus_core
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -29,6 +29,8 @@ import "C"
 
 import (
 	"fmt"
+	"path"
+	"time"
 	"unsafe"
 
 	"github.com/cockroachdb/errors"
@@ -45,14 +47,83 @@ func InitLocalChunkManager(path string) {
 }
 
 func InitTraceConfig(params *paramtable.ComponentParam) {
+	sampleFraction := C.float(params.TraceCfg.SampleFraction.GetAsFloat())
+	nodeID := C.int(paramtable.GetNodeID())
+	exporter := C.CString(params.TraceCfg.Exporter.GetValue())
+	jaegerURL := C.CString(params.TraceCfg.JaegerURL.GetValue())
+	otlpMethod := C.CString(params.TraceCfg.OtlpMethod.GetValue())
+	endpoint := C.CString(params.TraceCfg.OtlpEndpoint.GetValue())
+	otlpSecure := params.TraceCfg.OtlpSecure.GetAsBool()
+	defer C.free(unsafe.Pointer(exporter))
+	defer C.free(unsafe.Pointer(jaegerURL))
+	defer C.free(unsafe.Pointer(endpoint))
+	defer C.free(unsafe.Pointer(otlpMethod))
+
 	config := C.CTraceConfig{
-		exporter:       C.CString(params.TraceCfg.Exporter.GetValue()),
-		sampleFraction: C.int(params.TraceCfg.SampleFraction.GetAsInt()),
-		jaegerURL:      C.CString(params.TraceCfg.JaegerURL.GetValue()),
-		otlpEndpoint:   C.CString(params.TraceCfg.OtlpEndpoint.GetValue()),
-		nodeID:         C.int(paramtable.GetNodeID()),
+		exporter:       exporter,
+		sampleFraction: sampleFraction,
+		jaegerURL:      jaegerURL,
+		otlpEndpoint:   endpoint,
+		otlpMethod:     otlpMethod,
+		oltpSecure:     (C.bool)(otlpSecure),
+		nodeID:         nodeID,
 	}
-	C.InitTrace(&config)
+	// oltp grpc may hangs forever, add timeout logic at go side
+	timeout := params.TraceCfg.InitTimeoutSeconds.GetAsDuration(time.Second)
+	callWithTimeout(func() {
+		C.InitTrace(&config)
+	}, func() {
+		panic("init segcore tracing timeout, See issue #33483")
+	}, timeout)
+}
+
+func ResetTraceConfig(params *paramtable.ComponentParam) {
+	sampleFraction := C.float(params.TraceCfg.SampleFraction.GetAsFloat())
+	nodeID := C.int(paramtable.GetNodeID())
+	exporter := C.CString(params.TraceCfg.Exporter.GetValue())
+	jaegerURL := C.CString(params.TraceCfg.JaegerURL.GetValue())
+	endpoint := C.CString(params.TraceCfg.OtlpEndpoint.GetValue())
+	otlpMethod := C.CString(params.TraceCfg.OtlpMethod.GetValue())
+	otlpSecure := params.TraceCfg.OtlpSecure.GetAsBool()
+	defer C.free(unsafe.Pointer(exporter))
+	defer C.free(unsafe.Pointer(jaegerURL))
+	defer C.free(unsafe.Pointer(endpoint))
+	defer C.free(unsafe.Pointer(otlpMethod))
+
+	config := C.CTraceConfig{
+		exporter:       exporter,
+		sampleFraction: sampleFraction,
+		jaegerURL:      jaegerURL,
+		otlpEndpoint:   endpoint,
+		otlpMethod:     otlpMethod,
+		oltpSecure:     (C.bool)(otlpSecure),
+		nodeID:         nodeID,
+	}
+
+	// oltp grpc may hangs forever, add timeout logic at go side
+	timeout := params.TraceCfg.InitTimeoutSeconds.GetAsDuration(time.Second)
+	callWithTimeout(func() {
+		C.SetTrace(&config)
+	}, func() {
+		panic("set segcore tracing timeout, See issue #33483")
+	}, timeout)
+}
+
+func callWithTimeout(fn func(), timeoutHandler func(), timeout time.Duration) {
+	if timeout > 0 {
+		ch := make(chan struct{})
+		go func() {
+			defer close(ch)
+			fn()
+		}()
+		select {
+		case <-ch:
+		case <-time.After(timeout):
+			timeoutHandler()
+		}
+	} else {
+		fn()
+	}
 }
 
 func InitRemoteChunkManager(params *paramtable.ComponentParam) error {
@@ -66,6 +137,8 @@ func InitRemoteChunkManager(params *paramtable.ComponentParam) error {
 	cCloudProvider := C.CString(params.MinioCfg.CloudProvider.GetValue())
 	cLogLevel := C.CString(params.MinioCfg.LogLevel.GetValue())
 	cRegion := C.CString(params.MinioCfg.Region.GetValue())
+	cSslCACert := C.CString(params.MinioCfg.SslCACert.GetValue())
+	cGcpCredentialJSON := C.CString(params.MinioCfg.GcpCredentialJSON.GetValue())
 	defer C.free(unsafe.Pointer(cAddress))
 	defer C.free(unsafe.Pointer(cBucketName))
 	defer C.free(unsafe.Pointer(cAccessKey))
@@ -76,34 +149,50 @@ func InitRemoteChunkManager(params *paramtable.ComponentParam) error {
 	defer C.free(unsafe.Pointer(cLogLevel))
 	defer C.free(unsafe.Pointer(cRegion))
 	defer C.free(unsafe.Pointer(cCloudProvider))
+	defer C.free(unsafe.Pointer(cSslCACert))
+	defer C.free(unsafe.Pointer(cGcpCredentialJSON))
 	storageConfig := C.CStorageConfig{
-		address:          cAddress,
-		bucket_name:      cBucketName,
-		access_key_id:    cAccessKey,
-		access_key_value: cAccessValue,
-		root_path:        cRootPath,
-		storage_type:     cStorageType,
-		iam_endpoint:     cIamEndPoint,
-		cloud_provider:   cCloudProvider,
-		useSSL:           C.bool(params.MinioCfg.UseSSL.GetAsBool()),
-		useIAM:           C.bool(params.MinioCfg.UseIAM.GetAsBool()),
-		log_level:        cLogLevel,
-		region:           cRegion,
-		useVirtualHost:   C.bool(params.MinioCfg.UseVirtualHost.GetAsBool()),
-		requestTimeoutMs: C.int64_t(params.MinioCfg.RequestTimeoutMs.GetAsInt64()),
+		address:             cAddress,
+		bucket_name:         cBucketName,
+		access_key_id:       cAccessKey,
+		access_key_value:    cAccessValue,
+		root_path:           cRootPath,
+		storage_type:        cStorageType,
+		iam_endpoint:        cIamEndPoint,
+		cloud_provider:      cCloudProvider,
+		useSSL:              C.bool(params.MinioCfg.UseSSL.GetAsBool()),
+		sslCACert:           cSslCACert,
+		useIAM:              C.bool(params.MinioCfg.UseIAM.GetAsBool()),
+		log_level:           cLogLevel,
+		region:              cRegion,
+		useVirtualHost:      C.bool(params.MinioCfg.UseVirtualHost.GetAsBool()),
+		requestTimeoutMs:    C.int64_t(params.MinioCfg.RequestTimeoutMs.GetAsInt64()),
+		gcp_credential_json: cGcpCredentialJSON,
 	}
 
 	status := C.InitRemoteChunkManagerSingleton(storageConfig)
 	return HandleCStatus(&status, "InitRemoteChunkManagerSingleton failed")
 }
 
-func InitChunkCache(mmapDirPath string, readAheadPolicy string) error {
-	cMmapDirPath := C.CString(mmapDirPath)
-	defer C.free(unsafe.Pointer(cMmapDirPath))
-	cReadAheadPolicy := C.CString(readAheadPolicy)
-	defer C.free(unsafe.Pointer(cReadAheadPolicy))
-	status := C.InitChunkCacheSingleton(cMmapDirPath, cReadAheadPolicy)
-	return HandleCStatus(&status, "InitChunkCacheSingleton failed")
+func InitMmapManager(params *paramtable.ComponentParam) error {
+	mmapDirPath := params.QueryNodeCfg.MmapDirPath.GetValue()
+	cMmapChunkManagerDir := C.CString(path.Join(mmapDirPath, "/mmap_chunk_manager/"))
+	cCacheReadAheadPolicy := C.CString(params.QueryNodeCfg.ReadAheadPolicy.GetValue())
+	defer C.free(unsafe.Pointer(cMmapChunkManagerDir))
+	defer C.free(unsafe.Pointer(cCacheReadAheadPolicy))
+	diskCapacity := params.QueryNodeCfg.DiskCapacityLimit.GetAsUint64()
+	diskLimit := uint64(float64(params.QueryNodeCfg.MaxMmapDiskPercentageForMmapManager.GetAsUint64()*diskCapacity) * 0.01)
+	mmapFileSize := params.QueryNodeCfg.FixedFileSizeForMmapManager.GetAsFloat() * 1024 * 1024
+	mmapConfig := C.CMmapConfig{
+		cache_read_ahead_policy:  cCacheReadAheadPolicy,
+		mmap_path:                cMmapChunkManagerDir,
+		disk_limit:               C.uint64_t(diskLimit),
+		fix_file_size:            C.uint64_t(mmapFileSize),
+		growing_enable_mmap:      C.bool(params.QueryNodeCfg.GrowingMmapEnabled.GetAsBool()),
+		scalar_index_enable_mmap: C.bool(params.QueryNodeCfg.MmapScalarIndex.GetAsBool()),
+	}
+	status := C.InitMmapManager(mmapConfig)
+	return HandleCStatus(&status, "InitMmapManager failed")
 }
 
 func CleanRemoteChunkManager() {

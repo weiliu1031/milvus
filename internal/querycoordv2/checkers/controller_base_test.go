@@ -21,7 +21,6 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
@@ -29,6 +28,8 @@ import (
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
+	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -76,32 +77,33 @@ func (suite *ControllerBaseTestSuite) SetupTest() {
 
 	suite.balancer = balance.NewMockBalancer(suite.T())
 	suite.scheduler = task.NewMockScheduler(suite.T())
-	suite.controller = NewCheckerController(suite.meta, suite.dist, suite.targetManager, suite.balancer, suite.nodeMgr, suite.scheduler, suite.broker)
+
+	suite.controller = NewCheckerController(suite.meta, suite.dist, suite.targetManager, suite.nodeMgr, suite.scheduler, suite.broker, func() balance.Balance { return suite.balancer })
 }
 
 func (s *ControllerBaseTestSuite) TestActivation() {
-	active, err := s.controller.IsActive(segmentChecker)
+	active, err := s.controller.IsActive(utils.SegmentChecker)
 	s.NoError(err)
 	s.True(active)
-	err = s.controller.Deactivate(segmentChecker)
+	err = s.controller.Deactivate(utils.SegmentChecker)
 	s.NoError(err)
-	active, err = s.controller.IsActive(segmentChecker)
+	active, err = s.controller.IsActive(utils.SegmentChecker)
 	s.NoError(err)
 	s.False(active)
-	err = s.controller.Activate(segmentChecker)
+	err = s.controller.Activate(utils.SegmentChecker)
 	s.NoError(err)
-	active, err = s.controller.IsActive(segmentChecker)
+	active, err = s.controller.IsActive(utils.SegmentChecker)
 	s.NoError(err)
 	s.True(active)
 
 	invalidTyp := -1
-	_, err = s.controller.IsActive(CheckerType(invalidTyp))
+	_, err = s.controller.IsActive(utils.CheckerType(invalidTyp))
 	s.Equal(errTypeNotFound, err)
 }
 
 func (s *ControllerBaseTestSuite) TestListCheckers() {
 	checkers := s.controller.Checkers()
-	s.Equal(4, len(checkers))
+	s.Equal(5, len(checkers))
 }
 
 func TestControllerBaseTestSuite(t *testing.T) {

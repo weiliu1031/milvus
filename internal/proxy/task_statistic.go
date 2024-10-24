@@ -6,9 +6,9 @@ import (
 	"strconv"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -34,6 +34,7 @@ const (
 type getStatisticsTask struct {
 	request *milvuspb.GetStatisticsRequest
 	result  *milvuspb.GetStatisticsResponse
+	baseTask
 	Condition
 	collectionName string
 	partitionNames []string
@@ -93,6 +94,9 @@ func (g *getStatisticsTask) OnEnqueue() error {
 	g.GetStatisticsRequest = &internalpb.GetStatisticsRequest{
 		Base: commonpbutil.NewMsgBase(),
 	}
+
+	g.Base.MsgType = commonpb.MsgType_GetPartitionStatistics
+	g.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }
 
@@ -105,10 +109,6 @@ func (g *getStatisticsTask) PreExecute(ctx context.Context) error {
 
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetStatistics-PreExecute")
 	defer sp.End()
-
-	// TODO: Maybe we should create a new MsgType: GetStatistics?
-	g.Base.MsgType = commonpb.MsgType_GetPartitionStatistics
-	g.Base.SourceID = paramtable.GetNodeID()
 
 	collID, err := globalMetaCache.GetCollectionID(ctx, g.request.GetDbName(), g.collectionName)
 	if err != nil { // err is not nil if collection not exists
@@ -273,19 +273,19 @@ func (g *getStatisticsTask) getStatisticsFromQueryNode(ctx context.Context) erro
 	return nil
 }
 
-func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64, qn types.QueryNodeClient, channelIDs ...string) error {
+func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64, qn types.QueryNodeClient, channel string) error {
 	nodeReq := proto.Clone(g.GetStatisticsRequest).(*internalpb.GetStatisticsRequest)
 	nodeReq.Base.TargetID = nodeID
 	req := &querypb.GetStatisticsRequest{
 		Req:         nodeReq,
-		DmlChannels: channelIDs,
+		DmlChannels: []string{channel},
 		Scope:       querypb.DataScope_All,
 	}
 	result, err := qn.GetStatistics(ctx, req)
 	if err != nil {
 		log.Warn("QueryNode statistic return error",
 			zap.Int64("nodeID", nodeID),
-			zap.Strings("channels", channelIDs),
+			zap.String("channel", channel),
 			zap.Error(err))
 		globalMetaCache.DeprecateShardCache(g.request.GetDbName(), g.collectionName)
 		return err
@@ -293,7 +293,7 @@ func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64
 	if result.GetStatus().GetErrorCode() == commonpb.ErrorCode_NotShardLeader {
 		log.Warn("QueryNode is not shardLeader",
 			zap.Int64("nodeID", nodeID),
-			zap.Strings("channels", channelIDs))
+			zap.String("channel", channel))
 		globalMetaCache.DeprecateShardCache(g.request.GetDbName(), g.collectionName)
 		return errInvalidShardLeaders
 	}
@@ -301,7 +301,6 @@ func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64
 		log.Warn("QueryNode statistic result error",
 			zap.Int64("nodeID", nodeID),
 			zap.String("reason", result.GetStatus().GetReason()))
-		globalMetaCache.DeprecateShardCache(g.request.GetDbName(), g.collectionName)
 		return errors.Wrapf(merr.Error(result.GetStatus()), "fail to get statistic on QueryNode ID=%d", nodeID)
 	}
 	g.resultBuf.Insert(result)
@@ -319,6 +318,10 @@ func checkFullLoaded(ctx context.Context, qc types.QueryCoordClient, dbName stri
 	info, err := globalMetaCache.GetCollectionInfo(ctx, dbName, collectionName, collectionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetCollectionInfo failed, dbName = %s, collectionName = %s,collectionID = %d, err = %s", dbName, collectionName, collectionID, err)
+	}
+	partitionInfos, err := globalMetaCache.GetPartitions(ctx, dbName, collectionName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("GetPartitions failed, dbName = %s, collectionName = %s,collectionID = %d, err = %s", dbName, collectionName, collectionID, err)
 	}
 
 	// If request to search partitions
@@ -372,11 +375,12 @@ func checkFullLoaded(ctx context.Context, qc types.QueryCoordClient, dbName stri
 		}
 	}
 
-	for _, partInfo := range info.partInfo {
-		if _, ok := loadedMap[partInfo.partitionID]; !ok {
-			unloadPartitionIDs = append(unloadPartitionIDs, partInfo.partitionID)
+	for _, partitionID := range partitionInfos {
+		if _, ok := loadedMap[partitionID]; !ok {
+			unloadPartitionIDs = append(unloadPartitionIDs, partitionID)
 		}
 	}
+
 	return loadedPartitionIDs, unloadPartitionIDs, nil
 }
 
@@ -585,6 +589,7 @@ func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValueP
 // old version of get statistics
 // please remove it after getStatisticsTask below is stable
 type getCollectionStatisticsTask struct {
+	baseTask
 	Condition
 	*milvuspb.GetCollectionStatisticsRequest
 	ctx       context.Context
@@ -628,12 +633,12 @@ func (g *getCollectionStatisticsTask) SetTs(ts Timestamp) {
 
 func (g *getCollectionStatisticsTask) OnEnqueue() error {
 	g.Base = commonpbutil.NewMsgBase()
+	g.Base.MsgType = commonpb.MsgType_GetCollectionStatistics
+	g.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }
 
 func (g *getCollectionStatisticsTask) PreExecute(ctx context.Context) error {
-	g.Base.MsgType = commonpb.MsgType_GetCollectionStatistics
-	g.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }
 
@@ -652,11 +657,8 @@ func (g *getCollectionStatisticsTask) Execute(ctx context.Context) error {
 	}
 
 	result, err := g.dataCoord.GetCollectionStatistics(ctx, req)
-	if err != nil {
+	if err = merr.CheckRPCCall(result, err); err != nil {
 		return err
-	}
-	if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-		return merr.Error(result.GetStatus())
 	}
 	g.result = &milvuspb.GetCollectionStatisticsResponse{
 		Status: merr.Success(),
@@ -670,6 +672,7 @@ func (g *getCollectionStatisticsTask) PostExecute(ctx context.Context) error {
 }
 
 type getPartitionStatisticsTask struct {
+	baseTask
 	Condition
 	*milvuspb.GetPartitionStatisticsRequest
 	ctx       context.Context
@@ -713,12 +716,12 @@ func (g *getPartitionStatisticsTask) SetTs(ts Timestamp) {
 
 func (g *getPartitionStatisticsTask) OnEnqueue() error {
 	g.Base = commonpbutil.NewMsgBase()
+	g.Base.MsgType = commonpb.MsgType_GetPartitionStatistics
+	g.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }
 
 func (g *getPartitionStatisticsTask) PreExecute(ctx context.Context) error {
-	g.Base.MsgType = commonpb.MsgType_GetPartitionStatistics
-	g.Base.SourceID = paramtable.GetNodeID()
 	return nil
 }
 

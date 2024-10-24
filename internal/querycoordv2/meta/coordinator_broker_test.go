@@ -18,6 +18,7 @@ package meta
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/errors"
@@ -32,6 +33,8 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -270,7 +273,7 @@ func (s *CoordinatorBrokerDataCoordSuite) TestDescribeIndex() {
 					return &indexpb.IndexInfo{IndexID: id}
 				}),
 			}, nil)
-		infos, err := s.broker.DescribeIndex(ctx, collectionID)
+		infos, err := s.broker.describeIndex(ctx, collectionID)
 		s.NoError(err)
 		s.ElementsMatch(indexIDs, lo.Map(infos, func(info *indexpb.IndexInfo, _ int) int64 { return info.GetIndexID() }))
 		s.resetMock()
@@ -280,7 +283,7 @@ func (s *CoordinatorBrokerDataCoordSuite) TestDescribeIndex() {
 		s.datacoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).
 			Return(nil, errors.New("mock"))
 
-		_, err := s.broker.DescribeIndex(ctx, collectionID)
+		_, err := s.broker.describeIndex(ctx, collectionID)
 		s.Error(err)
 		s.resetMock()
 	})
@@ -291,9 +294,86 @@ func (s *CoordinatorBrokerDataCoordSuite) TestDescribeIndex() {
 				Status: merr.Status(errors.New("mocked")),
 			}, nil)
 
-		_, err := s.broker.DescribeIndex(ctx, collectionID)
+		_, err := s.broker.describeIndex(ctx, collectionID)
 		s.Error(err)
 		s.resetMock()
+	})
+
+	s.Run("datacoord_return_unimplemented", func() {
+		// mock old version datacoord return unimplemented
+		s.datacoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).
+			Return(nil, merr.ErrServiceUnimplemented).Times(1)
+
+		// mock retry on new version datacoord return success
+		indexIDs := []int64{1, 2}
+		s.datacoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).
+			Return(&indexpb.DescribeIndexResponse{
+				Status: merr.Status(nil),
+				IndexInfos: lo.Map(indexIDs, func(id int64, _ int) *indexpb.IndexInfo {
+					return &indexpb.IndexInfo{IndexID: id}
+				}),
+			}, nil)
+
+		_, err := s.broker.describeIndex(ctx, collectionID)
+		s.NoError(err)
+		s.resetMock()
+	})
+}
+
+func (s *CoordinatorBrokerDataCoordSuite) TestListIndexes() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	collectionID := int64(100)
+
+	s.Run("normal_case", func() {
+		indexIDs := []int64{1, 2}
+		s.datacoord.EXPECT().ListIndexes(mock.Anything, mock.Anything).
+			Return(&indexpb.ListIndexesResponse{
+				Status: merr.Status(nil),
+				IndexInfos: lo.Map(indexIDs, func(id int64, _ int) *indexpb.IndexInfo {
+					return &indexpb.IndexInfo{IndexID: id}
+				}),
+			}, nil).Once()
+		infos, err := s.broker.ListIndexes(ctx, collectionID)
+		s.NoError(err)
+		s.ElementsMatch(indexIDs, lo.Map(infos, func(info *indexpb.IndexInfo, _ int) int64 { return info.GetIndexID() }))
+	})
+
+	s.Run("datacoord_return_error", func() {
+		s.datacoord.EXPECT().ListIndexes(mock.Anything, mock.Anything).
+			Return(nil, errors.New("mocked")).Once()
+
+		_, err := s.broker.ListIndexes(ctx, collectionID)
+		s.Error(err)
+	})
+
+	s.Run("datacoord_return_failure_status", func() {
+		s.datacoord.EXPECT().ListIndexes(mock.Anything, mock.Anything).
+			Return(&indexpb.ListIndexesResponse{
+				Status: merr.Status(errors.New("mocked")),
+			}, nil).Once()
+
+		_, err := s.broker.ListIndexes(ctx, collectionID)
+		s.Error(err)
+	})
+
+	s.Run("datacoord_return_unimplemented", func() {
+		// mock old version datacoord return unimplemented
+		s.datacoord.EXPECT().ListIndexes(mock.Anything, mock.Anything).
+			Return(nil, merr.ErrServiceUnimplemented).Once()
+
+		// mock retry on old version datacoord descibe index
+		indexIDs := []int64{1, 2}
+		s.datacoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).
+			Return(&indexpb.DescribeIndexResponse{
+				Status: merr.Status(nil),
+				IndexInfos: lo.Map(indexIDs, func(id int64, _ int) *indexpb.IndexInfo {
+					return &indexpb.IndexInfo{IndexID: id}
+				}),
+			}, nil).Once()
+
+		_, err := s.broker.ListIndexes(ctx, collectionID)
+		s.NoError(err)
 	})
 }
 
@@ -312,9 +392,9 @@ func (s *CoordinatorBrokerDataCoordSuite) TestSegmentInfo() {
 				}),
 			}, nil)
 
-		resp, err := s.broker.GetSegmentInfo(ctx, segmentIDs...)
+		infos, err := s.broker.GetSegmentInfo(ctx, segmentIDs...)
 		s.NoError(err)
-		s.ElementsMatch(segmentIDs, lo.Map(resp.GetInfos(), func(info *datapb.SegmentInfo, _ int) int64 {
+		s.ElementsMatch(segmentIDs, lo.Map(infos, func(info *datapb.SegmentInfo, _ int) int64 {
 			return info.GetID()
 		}))
 		s.resetMock()
@@ -384,6 +464,115 @@ func (s *CoordinatorBrokerDataCoordSuite) TestGetIndexInfo() {
 
 		_, err := s.broker.GetIndexInfo(ctx, collectionID, segmentID)
 		s.Error(err)
+		s.resetMock()
+	})
+
+	s.Run("datacoord_return_unimplemented", func() {
+		// mock old version datacoord return unimplemented
+		s.datacoord.EXPECT().GetIndexInfos(mock.Anything, mock.Anything).
+			Return(nil, merr.ErrServiceUnimplemented).Times(1)
+
+		// mock retry on new version datacoord return success
+		indexIDs := []int64{1, 2, 3}
+		s.datacoord.EXPECT().GetIndexInfos(mock.Anything, mock.Anything).
+			Return(&indexpb.GetIndexInfoResponse{
+				Status: merr.Status(nil),
+				SegmentInfo: map[int64]*indexpb.SegmentInfo{
+					segmentID: {
+						SegmentID: segmentID,
+						IndexInfos: lo.Map(indexIDs, func(id int64, _ int) *indexpb.IndexFilePathInfo {
+							return &indexpb.IndexFilePathInfo{IndexID: id}
+						}),
+					},
+				},
+			}, nil)
+
+		_, err := s.broker.GetIndexInfo(ctx, collectionID, segmentID)
+		s.NoError(err)
+		s.resetMock()
+	})
+}
+
+func (s *CoordinatorBrokerRootCoordSuite) TestDescribeDatabase() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Run("normal_case", func() {
+		s.rootcoord.EXPECT().DescribeDatabase(mock.Anything, mock.Anything).
+			Return(&rootcoordpb.DescribeDatabaseResponse{
+				Status: merr.Success(),
+			}, nil)
+		_, err := s.broker.DescribeDatabase(ctx, "fake_db1")
+		s.NoError(err)
+		s.resetMock()
+	})
+
+	s.Run("rootcoord_return_error", func() {
+		s.rootcoord.EXPECT().DescribeDatabase(mock.Anything, mock.Anything).Return(nil, errors.New("fake error"))
+		_, err := s.broker.DescribeDatabase(ctx, "fake_db1")
+		s.Error(err)
+		s.resetMock()
+	})
+
+	s.Run("rootcoord_return_failure_status", func() {
+		s.rootcoord.EXPECT().DescribeDatabase(mock.Anything, mock.Anything).
+			Return(&rootcoordpb.DescribeDatabaseResponse{
+				Status: merr.Status(errors.New("fake error")),
+			}, nil)
+		_, err := s.broker.DescribeDatabase(ctx, "fake_db1")
+		s.Error(err)
+		s.resetMock()
+	})
+
+	s.Run("rootcoord_return_unimplemented", func() {
+		s.rootcoord.EXPECT().DescribeDatabase(mock.Anything, mock.Anything).Return(nil, merr.ErrServiceUnimplemented)
+		_, err := s.broker.DescribeDatabase(ctx, "fake_db1")
+		s.Error(err)
+		s.resetMock()
+	})
+}
+
+func (s *CoordinatorBrokerRootCoordSuite) TestGetCollectionLoadInfo() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Run("normal_case", func() {
+		s.rootcoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
+			DbName: "fake_db1",
+		}, nil)
+		s.rootcoord.EXPECT().DescribeDatabase(mock.Anything, mock.Anything).
+			Return(&rootcoordpb.DescribeDatabaseResponse{
+				Status: merr.Success(),
+				Properties: []*commonpb.KeyValuePair{
+					{
+						Key:   common.DatabaseReplicaNumber,
+						Value: "3",
+					},
+					{
+						Key:   common.DatabaseResourceGroups,
+						Value: strings.Join([]string{"rg1", "rg2"}, ","),
+					},
+				},
+			}, nil)
+		rgs, replicas, err := s.broker.GetCollectionLoadInfo(ctx, 1)
+		s.NoError(err)
+		s.Equal(int64(3), replicas)
+		s.Contains(rgs, "rg1")
+		s.Contains(rgs, "rg2")
+		s.resetMock()
+	})
+
+	s.Run("props not set", func() {
+		s.rootcoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
+			DbName: "fake_db1",
+		}, nil)
+		s.rootcoord.EXPECT().DescribeDatabase(mock.Anything, mock.Anything).
+			Return(&rootcoordpb.DescribeDatabaseResponse{
+				Status:     merr.Success(),
+				Properties: []*commonpb.KeyValuePair{},
+			}, nil)
+		_, _, err := s.broker.GetCollectionLoadInfo(ctx, 1)
+		s.NoError(err)
 		s.resetMock()
 	})
 }

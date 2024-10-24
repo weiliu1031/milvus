@@ -31,7 +31,7 @@ function milvus_ci_release_name(){
     elif [[ "${MILVUS_SERVER_TYPE:-}" == "distributed-kafka" ]]; then
         # Distributed kafka mode
        name+="dk"
-    elif [[ "${MILVUS_SERVER_TYPE:-}" == "standalone-kafka" ]]; then
+    elif [[ "${MILVUS_SERVER_TYPE:-}" == "standalone-kafka-mmap" ]]; then
         # Standalone kafka mode
         name+="sk"
     elif [[ "${MILVUS_SERVER_TYPE:-}" == "distributed" ]]; then
@@ -40,6 +40,9 @@ function milvus_ci_release_name(){
     elif [[ "${MILVUS_SERVER_TYPE:-}" == "standalone-authentication" ]]; then
         # Standalone authentication mode
        name+="a"
+    elif [[ "${MILVUS_SERVER_TYPE:-}" == "standalone-one-pod" ]]; then
+        # Standalone mode with one pod
+       name+="sop"
     else
        # Standalone mode
         name+="s"

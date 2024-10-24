@@ -11,13 +11,24 @@
 
 package indexparamcheck
 
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/milvus-io/milvus/pkg/common"
+)
+
 // IndexType string.
 type IndexType = string
 
 // IndexType definitions
 const (
+	// vector index
+	IndexGpuBF           IndexType = "GPU_BRUTE_FORCE"
 	IndexRaftIvfFlat     IndexType = "GPU_IVF_FLAT"
 	IndexRaftIvfPQ       IndexType = "GPU_IVF_PQ"
+	IndexRaftCagra       IndexType = "GPU_CAGRA"
+	IndexRaftBruteForce  IndexType = "GPU_BRUTE_FORCE"
 	IndexFaissIDMap      IndexType = "FLAT" // no index is built.
 	IndexFaissIvfFlat    IndexType = "IVF_FLAT"
 	IndexFaissIvfPQ      IndexType = "IVF_PQ"
@@ -27,4 +38,99 @@ const (
 	IndexFaissBinIvfFlat IndexType = "BIN_IVF_FLAT"
 	IndexHNSW            IndexType = "HNSW"
 	IndexDISKANN         IndexType = "DISKANN"
+	IndexSparseInverted  IndexType = "SPARSE_INVERTED_INDEX"
+	IndexSparseWand      IndexType = "SPARSE_WAND"
+	// For temporary use, will be removed in the future.
+	// 1. All Index related param check will be moved to Knowhere recently.
+	// 2. FAISS_HNSW_xxx will be rename to HNSW_xxx after QA test. We keep the original name for comparison purpose.
+	// TODO: @liliu-z @foxspy
+	IndexFaissHNSW    IndexType = "FAISS_HNSW_FLAT"
+	IndexFaissHNSWPQ  IndexType = "FAISS_HNSW_PQ"
+	IndexFaissHNSWSQ  IndexType = "FAISS_HNSW_SQ"
+	IndexFaissHNSWPRQ IndexType = "FAISS_HNSW_PRQ"
+
+	// scalar index
+	IndexSTLSORT  IndexType = "STL_SORT"
+	IndexTRIE     IndexType = "TRIE"
+	IndexTrie     IndexType = "Trie"
+	IndexBitmap   IndexType = "BITMAP"
+	IndexHybrid   IndexType = "HYBRID" // BITMAP + INVERTED
+	IndexINVERTED IndexType = "INVERTED"
+
+	AutoIndex IndexType = "AUTOINDEX"
 )
+
+func IsScalarIndexType(indexType IndexType) bool {
+	return indexType == IndexSTLSORT || indexType == IndexTRIE || indexType == IndexTrie ||
+		indexType == IndexBitmap || indexType == IndexHybrid || indexType == IndexINVERTED
+}
+
+func IsGpuIndex(indexType IndexType) bool {
+	return indexType == IndexGpuBF ||
+		indexType == IndexRaftIvfFlat ||
+		indexType == IndexRaftIvfPQ ||
+		indexType == IndexRaftCagra
+}
+
+// IsVectorMmapIndex check if the vector index can be mmaped
+func IsVectorMmapIndex(indexType IndexType) bool {
+	return indexType == IndexFaissIDMap ||
+		indexType == IndexFaissIvfFlat ||
+		indexType == IndexFaissIvfPQ ||
+		indexType == IndexFaissIvfSQ8 ||
+		indexType == IndexFaissBinIDMap ||
+		indexType == IndexFaissBinIvfFlat ||
+		indexType == IndexHNSW ||
+		indexType == IndexFaissHNSW ||
+		indexType == IndexFaissHNSWPQ ||
+		indexType == IndexFaissHNSWSQ ||
+		indexType == IndexFaissHNSWPRQ ||
+		indexType == IndexScaNN ||
+		indexType == IndexSparseInverted ||
+		indexType == IndexSparseWand
+}
+
+func IsOffsetCacheSupported(indexType IndexType) bool {
+	return indexType == IndexBitmap
+}
+
+func IsDiskIndex(indexType IndexType) bool {
+	return indexType == IndexDISKANN
+}
+
+func IsScalarMmapIndex(indexType IndexType) bool {
+	return indexType == IndexINVERTED ||
+		indexType == IndexBitmap ||
+		indexType == IndexHybrid
+}
+
+func ValidateMmapIndexParams(indexType IndexType, indexParams map[string]string) error {
+	mmapEnable, ok := indexParams[common.MmapEnabledKey]
+	if !ok {
+		return nil
+	}
+	enable, err := strconv.ParseBool(mmapEnable)
+	if err != nil {
+		return fmt.Errorf("invalid %s value: %s, expected: true, false", common.MmapEnabledKey, mmapEnable)
+	}
+	mmapSupport := indexType == AutoIndex || IsVectorMmapIndex(indexType) || IsScalarMmapIndex(indexType)
+	if enable && !mmapSupport {
+		return fmt.Errorf("index type %s does not support mmap", indexType)
+	}
+	return nil
+}
+
+func ValidateOffsetCacheIndexParams(indexType IndexType, indexParams map[string]string) error {
+	offsetCacheEnable, ok := indexParams[common.IndexOffsetCacheEnabledKey]
+	if !ok {
+		return nil
+	}
+	enable, err := strconv.ParseBool(offsetCacheEnable)
+	if err != nil {
+		return fmt.Errorf("invalid %s value: %s, expected: true, false", common.IndexOffsetCacheEnabledKey, offsetCacheEnable)
+	}
+	if enable && !IsOffsetCacheSupported(indexType) {
+		return fmt.Errorf("only bitmap index support %s now", common.IndexOffsetCacheEnabledKey)
+	}
+	return nil
+}

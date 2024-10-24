@@ -117,9 +117,15 @@ func Test_translatePatternMatch(t *testing.T) {
 		},
 		{
 			args:        args{pattern: "prefix%suffix"},
-			wantOp:      planpb.OpType_Invalid,
-			wantOperand: "",
-			wantErr:     true,
+			wantOp:      planpb.OpType_Match,
+			wantOperand: "prefix%suffix",
+			wantErr:     false,
+		},
+		{
+			args:        args{pattern: "_0"},
+			wantOp:      planpb.OpType_Match,
+			wantOperand: "_0",
+			wantErr:     false,
 		},
 	}
 	for _, tt := range tests {

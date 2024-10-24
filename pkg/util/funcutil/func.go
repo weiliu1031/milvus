@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -62,14 +64,31 @@ func GetIP(ip string) string {
 func GetLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
 	if err == nil {
-		for _, addr := range addrs {
-			ipaddr, ok := addr.(*net.IPNet)
-			if ok && ipaddr.IP.IsGlobalUnicast() && ipaddr.IP.To4() != nil {
-				return ipaddr.IP.String()
-			}
+		ip := GetValidLocalIP(addrs)
+		if len(ip) != 0 {
+			return ip
 		}
 	}
 	return "127.0.0.1"
+}
+
+// GetValidLocalIP return the first valid local ip address
+func GetValidLocalIP(addrs []net.Addr) string {
+	// Search for valid ipv4 addresses
+	for _, addr := range addrs {
+		ipaddr, ok := addr.(*net.IPNet)
+		if ok && ipaddr.IP.IsGlobalUnicast() && ipaddr.IP.To4() != nil {
+			return ipaddr.IP.String()
+		}
+	}
+	// Search for valid ipv6 addresses
+	for _, addr := range addrs {
+		ipaddr, ok := addr.(*net.IPNet)
+		if ok && ipaddr.IP.IsGlobalUnicast() && ipaddr.IP.To16() != nil && ipaddr.IP.To4() == nil {
+			return "[" + ipaddr.IP.String() + "]"
+		}
+	}
+	return ""
 }
 
 // JSONToMap parse the jsonic index parameters to map
@@ -87,8 +106,39 @@ func JSONToMap(mStr string) (map[string]string, error) {
 	return ret, nil
 }
 
-func MapToJSON(m map[string]string) []byte {
+func MapToJSON(m map[string]string) (string, error) {
 	// error won't happen here.
+	bs, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	return string(bs), nil
+}
+
+func JSONToRoleDetails(mStr string) (map[string](map[string]([](map[string]string))), error) {
+	buffer := make(map[string](map[string]([](map[string]string))), 0)
+	err := json.Unmarshal([]byte(mStr), &buffer)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal `builtinRoles.Roles` failed, %w", err)
+	}
+	ret := make(map[string](map[string]([](map[string]string))), 0)
+	for role, privilegesJSON := range buffer {
+		ret[role] = make(map[string]([](map[string]string)), 0)
+		privilegesArray := make([]map[string]string, 0)
+		for _, privileges := range privilegesJSON[util.RoleConfigPrivileges] {
+			privilegesArray = append(privilegesArray, map[string]string{
+				util.RoleConfigObjectType: privileges[util.RoleConfigObjectType],
+				util.RoleConfigObjectName: privileges[util.RoleConfigObjectName],
+				util.RoleConfigPrivilege:  privileges[util.RoleConfigPrivilege],
+				util.RoleConfigDBName:     privileges[util.RoleConfigDBName],
+			})
+		}
+		ret[role]["privileges"] = privilegesArray
+	}
+	return ret, nil
+}
+
+func RoleDetailsToJSON(m map[string](map[string]([](map[string]string)))) []byte {
 	bs, _ := json.Marshal(m)
 	return bs
 }
@@ -117,11 +167,10 @@ func CheckCtxValid(ctx context.Context) bool {
 func GetVecFieldIDs(schema *schemapb.CollectionSchema) []int64 {
 	var vecFieldIDs []int64
 	for _, field := range schema.Fields {
-		if field.DataType == schemapb.DataType_BinaryVector || field.DataType == schemapb.DataType_FloatVector || field.DataType == schemapb.DataType_Float16Vector {
+		if typeutil.IsVectorType(field.DataType) {
 			vecFieldIDs = append(vecFieldIDs, field.FieldID)
 		}
 	}
-
 	return vecFieldIDs
 }
 
@@ -181,13 +230,29 @@ func GetAvailablePort() int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
+// IsPhysicalChannel checks if the channel is a physical channel
+func IsPhysicalChannel(channel string) bool {
+	i := strings.LastIndex(channel, "_")
+	if i == -1 {
+		return true
+	}
+	return !strings.Contains(channel[i+1:], "v")
+}
+
 // ToPhysicalChannel get physical channel name from virtual channel name
 func ToPhysicalChannel(vchannel string) string {
+	if IsPhysicalChannel(vchannel) {
+		return vchannel
+	}
 	index := strings.LastIndex(vchannel, "_")
 	if index < 0 {
 		return vchannel
 	}
 	return vchannel[:index]
+}
+
+func GetVirtualChannel(pchannel string, collectionID int64, idx int) string {
+	return fmt.Sprintf("%s_%dv%d", pchannel, collectionID, idx)
 }
 
 // ConvertChannelName assembles channel name according to parameters.
@@ -199,6 +264,18 @@ func ConvertChannelName(chanName string, tokenFrom string, tokenTo string) (stri
 		return "", fmt.Errorf("cannot find token '%s' in '%s'", tokenFrom, chanName)
 	}
 	return strings.Replace(chanName, tokenFrom, tokenTo, 1), nil
+}
+
+func GetCollectionIDFromVChannel(vChannelName string) int64 {
+	re := regexp.MustCompile(`.*_(\d+)v\d+`)
+	matches := re.FindStringSubmatch(vChannelName)
+	if len(matches) > 1 {
+		number, err := strconv.ParseInt(matches[1], 0, 64)
+		if err == nil {
+			return number
+		}
+	}
+	return -1
 }
 
 func getNumRowsOfScalarField(datas interface{}) uint64 {
@@ -237,11 +314,81 @@ func GetNumRowsOfFloat16VectorField(f16Datas []byte, dim int64) (uint64, error) 
 	}
 	l := len(f16Datas)
 	if int64(l)%dim != 0 {
-		return 0, fmt.Errorf("the length(%d) of float data should divide the dim(%d)", l, dim)
+		return 0, fmt.Errorf("the length(%d) of float16 data should divide the dim(%d)", l, dim)
 	}
 	return uint64((int64(l)) / dim / 2), nil
 }
 
+func GetNumRowsOfBFloat16VectorField(bf16Datas []byte, dim int64) (uint64, error) {
+	if dim <= 0 {
+		return 0, fmt.Errorf("dim(%d) should be greater than 0", dim)
+	}
+	l := len(bf16Datas)
+	if int64(l)%dim != 0 {
+		return 0, fmt.Errorf("the length(%d) of bfloat data should divide the dim(%d)", l, dim)
+	}
+	return uint64((int64(l)) / dim / 2), nil
+}
+
+// GetNumRowOfFieldDataWithSchema returns num of rows with schema specification.
+func GetNumRowOfFieldDataWithSchema(fieldData *schemapb.FieldData, helper *typeutil.SchemaHelper) (uint64, error) {
+	var fieldNumRows uint64
+	var err error
+	fieldSchema, err := helper.GetFieldFromName(fieldData.GetFieldName())
+	if err != nil {
+		return 0, err
+	}
+	switch fieldSchema.GetDataType() {
+	case schemapb.DataType_Bool:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetBoolData().GetData())
+	case schemapb.DataType_Int8, schemapb.DataType_Int16, schemapb.DataType_Int32:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetIntData().GetData())
+	case schemapb.DataType_Int64:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetLongData().GetData())
+	case schemapb.DataType_Float:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetFloatData().GetData())
+	case schemapb.DataType_Double:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetDoubleData().GetData())
+	case schemapb.DataType_String, schemapb.DataType_VarChar:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetStringData().GetData())
+	case schemapb.DataType_Array:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetArrayData().GetData())
+	case schemapb.DataType_JSON:
+		fieldNumRows = getNumRowsOfScalarField(fieldData.GetScalars().GetJsonData().GetData())
+	case schemapb.DataType_FloatVector:
+		dim := fieldData.GetVectors().GetDim()
+		fieldNumRows, err = GetNumRowsOfFloatVectorField(fieldData.GetVectors().GetFloatVector().GetData(), dim)
+		if err != nil {
+			return 0, err
+		}
+	case schemapb.DataType_BinaryVector:
+		dim := fieldData.GetVectors().GetDim()
+		fieldNumRows, err = GetNumRowsOfBinaryVectorField(fieldData.GetVectors().GetBinaryVector(), dim)
+		if err != nil {
+			return 0, err
+		}
+	case schemapb.DataType_Float16Vector:
+		dim := fieldData.GetVectors().GetDim()
+		fieldNumRows, err = GetNumRowsOfFloat16VectorField(fieldData.GetVectors().GetFloat16Vector(), dim)
+		if err != nil {
+			return 0, err
+		}
+	case schemapb.DataType_BFloat16Vector:
+		dim := fieldData.GetVectors().GetDim()
+		fieldNumRows, err = GetNumRowsOfBFloat16VectorField(fieldData.GetVectors().GetBfloat16Vector(), dim)
+		if err != nil {
+			return 0, err
+		}
+	case schemapb.DataType_SparseFloatVector:
+		fieldNumRows = uint64(len(fieldData.GetVectors().GetSparseFloatVector().GetContents()))
+	default:
+		return 0, fmt.Errorf("%s is not supported now", fieldSchema.GetDataType())
+	}
+
+	return fieldNumRows, nil
+}
+
+// GetNumRowOfFieldData returns num of rows from the field data type
 func GetNumRowOfFieldData(fieldData *schemapb.FieldData) (uint64, error) {
 	var fieldNumRows uint64
 	var err error
@@ -289,6 +436,14 @@ func GetNumRowOfFieldData(fieldData *schemapb.FieldData) (uint64, error) {
 			if err != nil {
 				return 0, err
 			}
+		case *schemapb.VectorField_Bfloat16Vector:
+			dim := vectorField.GetDim()
+			fieldNumRows, err = GetNumRowsOfBFloat16VectorField(vectorField.GetBfloat16Vector(), dim)
+			if err != nil {
+				return 0, err
+			}
+		case *schemapb.VectorField_SparseFloatVector:
+			fieldNumRows = uint64(len(vectorField.GetSparseFloatVector().GetContents()))
 		default:
 			return 0, fmt.Errorf("%s is not supported now", vectorFieldType)
 		}

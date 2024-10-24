@@ -64,16 +64,16 @@ class ApiCollectionWrapper:
         return self.collection.num_entities
 
     @property
+    def num_shards(self):
+        return self.collection.num_shards
+
+    @property
     def num_entities_without_flush(self):
         return self.collection.num_entities
 
     @property
     def primary_field(self):
         return self.collection.primary_field
-
-    @property
-    def shards_num(self):
-        return self.collection.shards_num
 
     @property
     def aliases(self):
@@ -177,6 +177,22 @@ class ApiCollectionWrapper:
         return res, check_result
 
     @trace()
+    def hybrid_search(self, reqs, rerank, limit, partition_names=None,
+                      output_fields=None, timeout=None, round_decimal=-1,
+                      check_task=None, check_items=None, **kwargs):
+        timeout = TIMEOUT if timeout is None else timeout
+
+        func_name = sys._getframe().f_code.co_name
+        res, check = api_request([self.collection.hybrid_search, reqs, rerank, limit, partition_names,
+                                  output_fields, timeout, round_decimal], **kwargs)
+        check_result = ResponseChecker(res, func_name, check_task, check_items, check,
+                                       reqs=reqs, rerank=rerank, limit=limit,
+                                       partition_names=partition_names,
+                                       output_fields=output_fields,
+                                       timeout=timeout, **kwargs).run()
+        return res, check_result
+
+    @trace()
     def search_iterator(self, data, anns_field, param, batch_size, limit=-1, expr=None,
                         partition_names=None, output_fields=None, timeout=None, round_decimal=-1,
                         check_task=None, check_items=None, **kwargs):
@@ -195,7 +211,6 @@ class ApiCollectionWrapper:
     @trace()
     def query(self, expr, output_fields=None, partition_names=None, timeout=None, check_task=None, check_items=None,
               **kwargs):
-        # time.sleep(5)
         timeout = TIMEOUT if timeout is None else timeout
 
         func_name = sys._getframe().f_code.co_name
@@ -209,7 +224,6 @@ class ApiCollectionWrapper:
     @trace()
     def query_iterator(self, batch_size=1000, limit=-1, expr=None, output_fields=None, partition_names=None, timeout=None,
                        check_task=None, check_items=None, **kwargs):
-        # time.sleep(5)
         timeout = TIMEOUT if timeout is None else timeout
 
         func_name = sys._getframe().f_code.co_name
@@ -265,10 +279,13 @@ class ApiCollectionWrapper:
         return self.collection.indexes
 
     @trace()
-    def index(self, check_task=None, check_items=None):
+    def index(self, check_task=None, check_items=None, **kwargs):
         func_name = sys._getframe().f_code.co_name
-        res, check = api_request([self.collection.index])
-        check_result = ResponseChecker(res, func_name, check_task, check_items, check).run()
+        if "index_name" in kwargs:
+            index_name = kwargs.get('index_name')
+            kwargs.update({"index_name": index_name})
+        res, check = api_request([self.collection.index], **kwargs)
+        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
         return res, check_result
 
     @trace()
@@ -306,36 +323,6 @@ class ApiCollectionWrapper:
         return res, check_result
 
     @trace()
-    def create_alias(self, alias_name, check_task=None, check_items=None, **kwargs):
-        timeout = kwargs.get("timeout", TIMEOUT)
-        kwargs.update({"timeout": timeout})
-
-        func_name = sys._getframe().f_code.co_name
-        res, check = api_request([self.collection.create_alias, alias_name], **kwargs)
-        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
-        return res, check_result
-
-    @trace()
-    def drop_alias(self, alias_name, check_task=None, check_items=None, **kwargs):
-        timeout = kwargs.get("timeout", TIMEOUT)
-        kwargs.update({"timeout": timeout})
-
-        func_name = sys._getframe().f_code.co_name
-        res, check = api_request([self.collection.drop_alias, alias_name], **kwargs)
-        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
-        return res, check_result
-
-    @trace()
-    def alter_alias(self, alias_name, check_task=None, check_items=None, **kwargs):
-        timeout = kwargs.get("timeout", TIMEOUT)
-        kwargs.update({"timeout": timeout})
-
-        func_name = sys._getframe().f_code.co_name
-        res, check = api_request([self.collection.alter_alias, alias_name], **kwargs)
-        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
-        return res, check_result
-
-    @trace()
     def delete(self, expr, partition_name=None, timeout=None, check_task=None, check_items=None, **kwargs):
         timeout = TIMEOUT if timeout is None else timeout
         func_name = sys._getframe().f_code.co_name
@@ -352,10 +339,10 @@ class ApiCollectionWrapper:
         return res, check_result
 
     @trace()
-    def compact(self, timeout=None, check_task=None, check_items=None, **kwargs):
+    def compact(self, is_clustering=False, timeout=None, check_task=None, check_items=None, **kwargs):
         timeout = TIMEOUT if timeout is None else timeout
         func_name = sys._getframe().f_code.co_name
-        res, check = api_request([self.collection.compact, timeout], **kwargs)
+        res, check = api_request([self.collection.compact, is_clustering, timeout], **kwargs)
         check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
         return res, check_result
 
@@ -397,4 +384,18 @@ class ApiCollectionWrapper:
         check_result = ResponseChecker(res, func_name, check_task, check_items, check).run()
         return res, check_result
 
+    @trace()
+    def alter_index(self, index_name, extra_params={}, timeout=None,  check_task=None, check_items=None, **kwargs):
+        timeout = TIMEOUT if timeout is None else timeout
+        func_name = sys._getframe().f_code.co_name
+        res, check = api_request([self.collection.alter_index, index_name, extra_params, timeout], **kwargs)
+        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
+        return res, check_result
 
+    @trace()
+    def set_properties(self, extra_params={}, timeout=None,  check_task=None, check_items=None, **kwargs):
+        timeout = TIMEOUT if timeout is None else timeout
+        func_name = sys._getframe().f_code.co_name
+        res, check = api_request([self.collection.set_properties, extra_params, timeout], **kwargs)
+        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
+        return res, check_result

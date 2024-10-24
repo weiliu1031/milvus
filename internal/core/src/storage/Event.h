@@ -16,14 +16,16 @@
 
 #pragma once
 
+#include <any>
 #include <string>
 #include <memory>
 #include <vector>
 #include <unordered_map>
 
+#include "common/FieldData.h"
 #include "common/Types.h"
+#include "storage/PayloadReader.h"
 #include "storage/Types.h"
-#include "storage/FieldData.h"
 #include "storage/BinlogReader.h"
 
 namespace milvus::storage {
@@ -61,7 +63,7 @@ struct DescriptorEventData {
     DescriptorEventDataFixPart fix_part;
     int32_t extra_length;
     std::vector<uint8_t> extra_bytes;
-    std::unordered_map<std::string, std::string> extras;
+    std::unordered_map<std::string, std::any> extras;
     std::vector<uint8_t> post_header_lengths;
 
     DescriptorEventData() = default;
@@ -75,11 +77,14 @@ struct BaseEventData {
     Timestamp start_timestamp;
     Timestamp end_timestamp;
     FieldDataPtr field_data;
+    std::shared_ptr<PayloadReader> payload_reader;
 
     BaseEventData() = default;
     explicit BaseEventData(BinlogReaderPtr reader,
                            int event_length,
-                           DataType data_type);
+                           DataType data_type,
+                           bool nullable,
+                           bool is_field_data = true);
 
     std::vector<uint8_t>
     Serialize();
@@ -102,7 +107,9 @@ struct BaseEvent {
     int64_t event_offset;
 
     BaseEvent() = default;
-    explicit BaseEvent(BinlogReaderPtr reader, DataType data_type);
+    explicit BaseEvent(BinlogReaderPtr reader,
+                       DataType data_type,
+                       bool nullable);
 
     std::vector<uint8_t>
     Serialize();

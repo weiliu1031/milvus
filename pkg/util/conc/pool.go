@@ -18,12 +18,14 @@ package conc
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 
 	ants "github.com/panjf2000/ants/v2"
 
 	"github.com/milvus-io/milvus/pkg/util/generic"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 // A goroutine pool
@@ -79,9 +81,8 @@ func (pool *Pool[T]) Submit(method func() (T, error)) *Future[T] {
 		res, err := method()
 		if err != nil {
 			future.err = err
-		} else {
-			future.value = res
 		}
+		future.value = res
 	})
 	if err != nil {
 		future.err = err
@@ -108,6 +109,17 @@ func (pool *Pool[T]) Free() int {
 
 func (pool *Pool[T]) Release() {
 	pool.inner.Release()
+}
+
+func (pool *Pool[T]) Resize(size int) error {
+	if pool.opt.preAlloc {
+		return merr.WrapErrServiceInternal("cannot resize pre-alloc pool")
+	}
+	if size <= 0 {
+		return merr.WrapErrParameterInvalid("positive size", strconv.FormatInt(int64(size), 10))
+	}
+	pool.inner.Tune(size)
+	return nil
 }
 
 // WarmupPool do warm up logic for each goroutine in pool

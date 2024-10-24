@@ -3,15 +3,21 @@ package proxy
 import (
 	"context"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 type createDatabaseTask struct {
+	baseTask
 	Condition
 	*milvuspb.CreateDatabaseRequest
 	ctx       context.Context
@@ -69,7 +75,8 @@ func (cdt *createDatabaseTask) PreExecute(ctx context.Context) error {
 func (cdt *createDatabaseTask) Execute(ctx context.Context) error {
 	var err error
 	cdt.result, err = cdt.rootCoord.CreateDatabase(ctx, cdt.CreateDatabaseRequest)
-	if cdt.result != nil && cdt.result.ErrorCode == commonpb.ErrorCode_Success {
+	err = merr.CheckRPCCall(cdt.result, err)
+	if err == nil {
 		SendReplicateMessagePack(ctx, cdt.replicateMsgStream, cdt.CreateDatabaseRequest)
 	}
 	return err
@@ -80,6 +87,7 @@ func (cdt *createDatabaseTask) PostExecute(ctx context.Context) error {
 }
 
 type dropDatabaseTask struct {
+	baseTask
 	Condition
 	*milvuspb.DropDatabaseRequest
 	ctx       context.Context
@@ -138,7 +146,8 @@ func (ddt *dropDatabaseTask) Execute(ctx context.Context) error {
 	var err error
 	ddt.result, err = ddt.rootCoord.DropDatabase(ctx, ddt.DropDatabaseRequest)
 
-	if ddt.result != nil && ddt.result.ErrorCode == commonpb.ErrorCode_Success {
+	err = merr.CheckRPCCall(ddt.result, err)
+	if err == nil {
 		globalMetaCache.RemoveDatabase(ctx, ddt.DbName)
 		SendReplicateMessagePack(ctx, ddt.replicateMsgStream, ddt.DropDatabaseRequest)
 	}
@@ -150,6 +159,7 @@ func (ddt *dropDatabaseTask) PostExecute(ctx context.Context) error {
 }
 
 type listDatabaseTask struct {
+	baseTask
 	Condition
 	*milvuspb.ListDatabasesRequest
 	ctx       context.Context
@@ -202,10 +212,176 @@ func (ldt *listDatabaseTask) PreExecute(ctx context.Context) error {
 
 func (ldt *listDatabaseTask) Execute(ctx context.Context) error {
 	var err error
+	ctx = AppendUserInfoForRPC(ctx)
 	ldt.result, err = ldt.rootCoord.ListDatabases(ctx, ldt.ListDatabasesRequest)
-	return err
+	return merr.CheckRPCCall(ldt.result, err)
 }
 
 func (ldt *listDatabaseTask) PostExecute(ctx context.Context) error {
+	return nil
+}
+
+type alterDatabaseTask struct {
+	baseTask
+	Condition
+	*milvuspb.AlterDatabaseRequest
+	ctx       context.Context
+	rootCoord types.RootCoordClient
+	result    *commonpb.Status
+
+	replicateMsgStream msgstream.MsgStream
+}
+
+func (t *alterDatabaseTask) TraceCtx() context.Context {
+	return t.ctx
+}
+
+func (t *alterDatabaseTask) ID() UniqueID {
+	return t.Base.MsgID
+}
+
+func (t *alterDatabaseTask) SetID(uid UniqueID) {
+	t.Base.MsgID = uid
+}
+
+func (t *alterDatabaseTask) Name() string {
+	return AlterDatabaseTaskName
+}
+
+func (t *alterDatabaseTask) Type() commonpb.MsgType {
+	return t.Base.MsgType
+}
+
+func (t *alterDatabaseTask) BeginTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *alterDatabaseTask) EndTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *alterDatabaseTask) SetTs(ts Timestamp) {
+	t.Base.Timestamp = ts
+}
+
+func (t *alterDatabaseTask) OnEnqueue() error {
+	if t.Base == nil {
+		t.Base = commonpbutil.NewMsgBase()
+	}
+	t.Base.MsgType = commonpb.MsgType_AlterDatabase
+	t.Base.SourceID = paramtable.GetNodeID()
+	return nil
+}
+
+func (t *alterDatabaseTask) PreExecute(ctx context.Context) error {
+	return nil
+}
+
+func (t *alterDatabaseTask) Execute(ctx context.Context) error {
+	var err error
+
+	req := &rootcoordpb.AlterDatabaseRequest{
+		Base:       t.AlterDatabaseRequest.GetBase(),
+		DbName:     t.AlterDatabaseRequest.GetDbName(),
+		DbId:       t.AlterDatabaseRequest.GetDbId(),
+		Properties: t.AlterDatabaseRequest.GetProperties(),
+	}
+
+	ret, err := t.rootCoord.AlterDatabase(ctx, req)
+	err = merr.CheckRPCCall(ret, err)
+	if err != nil {
+		return err
+	}
+
+	SendReplicateMessagePack(ctx, t.replicateMsgStream, t.AlterDatabaseRequest)
+	t.result = ret
+	return nil
+}
+
+func (t *alterDatabaseTask) PostExecute(ctx context.Context) error {
+	return nil
+}
+
+type describeDatabaseTask struct {
+	baseTask
+	Condition
+	*milvuspb.DescribeDatabaseRequest
+	ctx       context.Context
+	rootCoord types.RootCoordClient
+	result    *milvuspb.DescribeDatabaseResponse
+}
+
+func (t *describeDatabaseTask) TraceCtx() context.Context {
+	return t.ctx
+}
+
+func (t *describeDatabaseTask) ID() UniqueID {
+	return t.Base.MsgID
+}
+
+func (t *describeDatabaseTask) SetID(uid UniqueID) {
+	t.Base.MsgID = uid
+}
+
+func (t *describeDatabaseTask) Name() string {
+	return AlterDatabaseTaskName
+}
+
+func (t *describeDatabaseTask) Type() commonpb.MsgType {
+	return t.Base.MsgType
+}
+
+func (t *describeDatabaseTask) BeginTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *describeDatabaseTask) EndTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *describeDatabaseTask) SetTs(ts Timestamp) {
+	t.Base.Timestamp = ts
+}
+
+func (t *describeDatabaseTask) OnEnqueue() error {
+	if t.Base == nil {
+		t.Base = commonpbutil.NewMsgBase()
+	}
+	t.Base.MsgType = commonpb.MsgType_DescribeDatabase
+	t.Base.SourceID = paramtable.GetNodeID()
+	return nil
+}
+
+func (t *describeDatabaseTask) PreExecute(ctx context.Context) error {
+	return nil
+}
+
+func (t *describeDatabaseTask) Execute(ctx context.Context) error {
+	req := &rootcoordpb.DescribeDatabaseRequest{
+		Base:   t.DescribeDatabaseRequest.GetBase(),
+		DbName: t.DescribeDatabaseRequest.GetDbName(),
+	}
+	ret, err := t.rootCoord.DescribeDatabase(ctx, req)
+	if err != nil {
+		log.Warn("DescribeDatabase failed", zap.Error(err))
+		return err
+	}
+
+	if err := merr.CheckRPCCall(ret, err); err != nil {
+		log.Warn("DescribeDatabase failed", zap.Error(err))
+		return err
+	}
+
+	t.result = &milvuspb.DescribeDatabaseResponse{
+		Status:           ret.GetStatus(),
+		DbName:           ret.GetDbName(),
+		DbID:             ret.GetDbID(),
+		CreatedTimestamp: ret.GetCreatedTimestamp(),
+		Properties:       ret.GetProperties(),
+	}
+	return nil
+}
+
+func (t *describeDatabaseTask) PostExecute(ctx context.Context) error {
 	return nil
 }
