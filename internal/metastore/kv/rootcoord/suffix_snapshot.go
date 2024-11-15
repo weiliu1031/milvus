@@ -435,7 +435,11 @@ func (ss *SuffixSnapshot) generateSaveExecute(kvs map[string]string, ts typeutil
 func (ss *SuffixSnapshot) LoadWithPrefix(key string, ts typeutil.Timestamp) ([]string, []string, error) {
 	// ts 0 case shall be treated as fetch latest/current value
 	if ts == 0 || ts == typeutil.MaxTimestamp {
+		start := time.Now()
 		keys, values, err := ss.MetaKv.LoadWithPrefix(key)
+		log.Info("LoadWithPrefix", zap.String("key", key),
+			zap.Int("len", len(keys)),
+			zap.Duration("cost", time.Since(start)))
 		fks := keys[:0]   // make([]string, 0, len(keys))
 		fvs := values[:0] // make([]string, 0, len(values))
 		// hide rootPrefix from return value

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -165,30 +166,44 @@ func (mt *MetaTable) reload() error {
 	dbNames := maps.Keys(mt.dbName2Meta)
 	// create default database.
 	if !funcutil.SliceContain(dbNames, util.DefaultDBName) {
+		start := time.Now()
 		if err := mt.createDefaultDb(); err != nil {
 			return err
 		}
+		log.Info("create default database cost", zap.Duration("duration", time.Since(start)))
 	} else {
+		start := time.Now()
 		mt.names.createDbIfNotExist(util.DefaultDBName)
 		mt.aliases.createDbIfNotExist(util.DefaultDBName)
+		log.Info("add default database cost", zap.Duration("duration", time.Since(start)))
 	}
 
 	// in order to support backward compatibility with meta of the old version, it also
 	// needs to reload collections that have no database
+	start := time.Now()
 	if err := mt.reloadWithNonDatabase(); err != nil {
 		return err
 	}
+	log.Info("recover collections without db cost", zap.Duration("duration", time.Since(start)))
 
 	// recover collections from db namespace
+	start = time.Now()
 	for dbName, db := range mt.dbName2Meta {
 		partitionNum := int64(0)
 		collectionNum := int64(0)
 
+		start := time.Now()
 		mt.names.createDbIfNotExist(dbName)
+		log.Info("create db cost", zap.String("db_name", dbName), zap.Duration("duration", time.Since(start)))
+
+		start = time.Now()
 		collections, err := mt.catalog.ListCollections(mt.ctx, db.ID, typeutil.MaxTimestamp)
 		if err != nil {
 			return err
 		}
+		log.Info("list collection cost", zap.String("db_name", dbName),
+			zap.Int64("collection_num", int64(len(collections))),
+			zap.Duration("duration", time.Since(start)))
 		for _, collection := range collections {
 			mt.collID2Meta[collection.CollectionID] = collection
 			if collection.Available() {
@@ -205,14 +220,23 @@ func (mt *MetaTable) reload() error {
 			zap.Int64("collection_num", collectionNum),
 			zap.Int64("partition_num", partitionNum))
 	}
+	log.Info("recover all collections", zap.Duration("duration", record.ElapseSpan()))
 
 	// recover aliases from db namespace
 	for dbName, db := range mt.dbName2Meta {
+		start := time.Now()
 		mt.aliases.createDbIfNotExist(dbName)
+		log.Info("create db cost", zap.String("db_name", dbName), zap.Duration("duration", time.Since(start)))
+
+		start = time.Now()
 		aliases, err := mt.catalog.ListAliases(mt.ctx, db.ID, typeutil.MaxTimestamp)
 		if err != nil {
 			return err
 		}
+		log.Info("list aliases cost", zap.String("db_name", dbName),
+			zap.Int64("alias_num", int64(len(aliases))),
+			zap.Duration("duration", time.Since(start)),
+		)
 		for _, alias := range aliases {
 			mt.aliases.insert(dbName, alias.Name, alias.CollectionID)
 		}

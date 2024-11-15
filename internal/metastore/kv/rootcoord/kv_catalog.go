@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -668,7 +669,9 @@ func (kc *Catalog) GetCollectionByName(ctx context.Context, dbID int64, collecti
 
 func (kc *Catalog) ListCollections(ctx context.Context, dbID int64, ts typeutil.Timestamp) ([]*model.Collection, error) {
 	prefix := getDatabasePrefix(dbID)
+	start := time.Now()
 	_, vals, err := kc.Snapshot.LoadWithPrefix(prefix, ts)
+	log.Info("snapshot kv load with prefix cost", zap.Int64("db", dbID), zap.Duration("cost", time.Since(start)))
 	if err != nil {
 		log.Error("get collections meta fail",
 			zap.String("prefix", prefix),
@@ -677,6 +680,7 @@ func (kc *Catalog) ListCollections(ctx context.Context, dbID int64, ts typeutil.
 		return nil, err
 	}
 
+	start = time.Now()
 	colls := make([]*model.Collection, 0, len(vals))
 	for _, val := range vals {
 		collMeta := pb.CollectionInfo{}
@@ -685,13 +689,18 @@ func (kc *Catalog) ListCollections(ctx context.Context, dbID int64, ts typeutil.
 			log.Warn("unmarshal collection info failed", zap.Error(err))
 			continue
 		}
+		start := time.Now()
 		kc.fixDefaultDBIDConsistency(ctx, &collMeta, ts)
+		log.Info("fix default dbID consistency cost", zap.Int64("db", dbID), zap.Duration("cost", time.Since(start)))
+		start = time.Now()
 		collection, err := kc.appendPartitionAndFieldsInfo(ctx, &collMeta, ts)
 		if err != nil {
 			return nil, err
 		}
+		log.Info("append partition and fields info cost", zap.Int64("db", dbID), zap.Duration("cost", time.Since(start)))
 		colls = append(colls, collection)
 	}
+	log.Info("list all collection details cost", zap.Int64("db", dbID), zap.Duration("cost", time.Since(start)))
 
 	return colls, nil
 }
