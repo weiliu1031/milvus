@@ -25,9 +25,11 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/atomic"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
@@ -353,6 +355,32 @@ func (task *SegmentTask) String() string {
 	return fmt.Sprintf("%s [segmentID=%d]", task.baseTask.String(), task.segmentID)
 }
 
+func (task *SegmentTask) IsFinished(distMgr *meta.DistributionManager) bool {
+	if task.Status() != TaskStatusStarted {
+		return false
+	}
+
+	// for balance segment task, if the segment not found in delegator, instead of waiting for segment to be synced to delegator,
+	// we will skip the release action, and let the balance task finish. then the old segment will be deduplicated
+	// by segment checker after delegator has been synced
+	if GetTaskType(task) == TaskTypeMove {
+		growAction := task.actions[0].(*SegmentAction)
+		newLeader := distMgr.LeaderViewManager.GetLeaderShardView(growAction.Node(), growAction.Shard())
+		segmentReady := newLeader != nil && newLeader.Segments[growAction.segmentID] != nil && newLeader.Segments[growAction.segmentID].NodeID == growAction.Node()
+		if growAction.IsFinished(distMgr) && !segmentReady {
+			log.Info("segment is not ready in target node, skip release action",
+				zap.Int64("id", task.ID()),
+				zap.String("channelName", growAction.Shard()),
+				zap.Int64("segmentID", growAction.segmentID),
+				zap.Int64("targetNode", growAction.Node()),
+				zap.Error(newLeader.UnServiceableError))
+			task.step = len(task.actions)
+		}
+	}
+
+	return task.Step() >= len(task.Actions())
+}
+
 type ChannelTask struct {
 	*baseTask
 }
@@ -401,6 +429,30 @@ func (task *ChannelTask) Index() string {
 
 func (task *ChannelTask) String() string {
 	return fmt.Sprintf("%s [channel=%s]", task.baseTask.String(), task.Channel())
+}
+
+func (task *ChannelTask) IsFinished(distMgr *meta.DistributionManager) bool {
+	if task.Status() != TaskStatusStarted {
+		return false
+	}
+
+	// for balance channel task, if the new delegator is not ready, instead of waiting for the new delegator ready,
+	// we will skip the release action, and let the balance task finish. then the old delegator will be deduplicated
+	// by channel checker after new delegator ready
+	if GetTaskType(task) == TaskTypeMove {
+		growAction := task.actions[0].(*ChannelAction)
+		newLeader := distMgr.LeaderViewManager.GetLeaderShardView(growAction.Node(), growAction.Shard())
+		if growAction.IsFinished(distMgr) && newLeader.UnServiceableError != nil {
+			log.Info("new shard leader is not ready in target node, skip release action",
+				zap.Int64("id", task.ID()),
+				zap.String("channelName", growAction.Shard()),
+				zap.Int64("targetNode", growAction.Node()),
+				zap.Error(newLeader.UnServiceableError))
+			task.step = len(task.actions)
+		}
+	}
+
+	return task.Step() >= len(task.Actions())
 }
 
 type LeaderTask struct {

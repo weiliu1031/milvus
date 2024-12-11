@@ -19,12 +19,10 @@ package task
 import (
 	"fmt"
 
-	"github.com/samber/lo"
 	"go.uber.org/atomic"
 
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -54,16 +52,18 @@ type Action interface {
 }
 
 type BaseAction struct {
-	nodeID typeutil.UniqueID
-	typ    ActionType
-	shard  string
+	nodeID      typeutil.UniqueID
+	typ         ActionType
+	shard       string
+	rpcReturned *atomic.Bool
 }
 
 func NewBaseAction(nodeID typeutil.UniqueID, typ ActionType, shard string) *BaseAction {
 	return &BaseAction{
-		nodeID: nodeID,
-		typ:    typ,
-		shard:  shard,
+		nodeID:      nodeID,
+		typ:         typ,
+		shard:       shard,
+		rpcReturned: atomic.NewBool(false),
 	}
 }
 
@@ -83,13 +83,15 @@ func (action *BaseAction) String() string {
 	return fmt.Sprintf(`{[type=%v][node=%d][shard=%v]}`, action.Type(), action.Node(), action.Shard())
 }
 
+func (action *BaseAction) IsFinished(distMgr *meta.DistributionManager) bool {
+	return action.rpcReturned.Load()
+}
+
 type SegmentAction struct {
 	*BaseAction
 
 	segmentID typeutil.UniqueID
 	scope     querypb.DataScope
-
-	rpcReturned atomic.Bool
 }
 
 func NewSegmentAction(nodeID typeutil.UniqueID, typ ActionType, shard string, segmentID typeutil.UniqueID) *SegmentAction {
@@ -99,10 +101,9 @@ func NewSegmentAction(nodeID typeutil.UniqueID, typ ActionType, shard string, se
 func NewSegmentActionWithScope(nodeID typeutil.UniqueID, typ ActionType, shard string, segmentID typeutil.UniqueID, scope querypb.DataScope) *SegmentAction {
 	base := NewBaseAction(nodeID, typ, shard)
 	return &SegmentAction{
-		BaseAction:  base,
-		segmentID:   segmentID,
-		scope:       scope,
-		rpcReturned: *atomic.NewBool(false),
+		BaseAction: base,
+		segmentID:  segmentID,
+		scope:      scope,
 	}
 }
 
@@ -112,52 +113,6 @@ func (action *SegmentAction) SegmentID() typeutil.UniqueID {
 
 func (action *SegmentAction) Scope() querypb.DataScope {
 	return action.scope
-}
-
-func (action *SegmentAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	if action.Type() == ActionTypeGrow {
-		// rpc finished
-		if !action.rpcReturned.Load() {
-			return false
-		}
-
-		// segment found in leader view
-		views := distMgr.LeaderViewManager.GetByFilter(
-			meta.WithChannelName2LeaderView(action.Shard()),
-			meta.WithSegment2LeaderView(action.segmentID, false))
-		if len(views) == 0 {
-			return false
-		}
-
-		// segment found in dist
-		segmentInTargetNode := distMgr.SegmentDistManager.GetByFilter(meta.WithNodeID(action.Node()), meta.WithSegmentID(action.SegmentID()))
-		return len(segmentInTargetNode) > 0
-	} else if action.Type() == ActionTypeReduce {
-		// FIXME: Now shard leader's segment view is a map of segment ID to node ID,
-		// loading segment replaces the node ID with the new one,
-		// which confuses the condition of finishing,
-		// the leader should return a map of segment ID to list of nodes,
-		// now, we just always commit the release task to executor once.
-		// NOTE: DO NOT create a task containing release action and the action is not the last action
-		sealed := distMgr.SegmentDistManager.GetByFilter(meta.WithNodeID(action.Node()))
-		views := distMgr.LeaderViewManager.GetByFilter(meta.WithNodeID2LeaderView(action.Node()))
-		growing := lo.FlatMap(views, func(view *meta.LeaderView, _ int) []int64 {
-			return lo.Keys(view.GrowingSegments)
-		})
-		segments := make([]int64, 0, len(sealed)+len(growing))
-		for _, segment := range sealed {
-			segments = append(segments, segment.GetID())
-		}
-		segments = append(segments, growing...)
-		if !funcutil.SliceContain(segments, action.SegmentID()) {
-			return true
-		}
-		return action.rpcReturned.Load()
-	} else if action.Type() == ActionTypeUpdate {
-		return action.rpcReturned.Load()
-	}
-
-	return true
 }
 
 func (action *SegmentAction) String() string {
@@ -176,16 +131,6 @@ func NewChannelAction(nodeID typeutil.UniqueID, typ ActionType, channelName stri
 
 func (action *ChannelAction) ChannelName() string {
 	return action.shard
-}
-
-func (action *ChannelAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	views := distMgr.LeaderViewManager.GetByFilter(meta.WithChannelName2LeaderView(action.ChannelName()))
-	_, hasNode := lo.Find(views, func(v *meta.LeaderView) bool {
-		return v.ID == action.Node()
-	})
-	isGrow := action.Type() == ActionTypeGrow
-
-	return hasNode == isGrow
 }
 
 type LeaderAction struct {
@@ -244,8 +189,4 @@ func (action *LeaderAction) String() string {
 
 func (action *LeaderAction) GetLeaderID() typeutil.UniqueID {
 	return action.leaderID
-}
-
-func (action *LeaderAction) IsFinished(distMgr *meta.DistributionManager) bool {
-	return action.rpcReturned.Load()
 }
