@@ -1210,6 +1210,7 @@ func (loader *segmentLoader) loadDeltalogs(ctx context.Context, segment Segment,
 					Value:  value,
 					RowNum: bLog.EntriesNum,
 				}
+				log.Info("load delta log success", zap.String("path", bLog.GetLogPath()), zap.Int64("rowNum", bLog.EntriesNum))
 				return blob, nil
 			})
 			futures = append(futures, future)
