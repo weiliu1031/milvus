@@ -260,8 +260,19 @@ func (c *SegmentChecker) getSealedSegmentDiff(
 		_, existOnCurrent := currentTargetMap[segment.GetID()]
 		_, existOnNext := nextTargetMap[segment.GetID()]
 
-		// l0 segment should be release with channel together
 		if !existOnNext && nextTargetExist && !existOnCurrent {
+			log.Info("segment not exist in target, so release it",
+				zap.Int64("collectionID", collectionID),
+				zap.Int64("replicaID", replicaID),
+				zap.Int64("segmentID", segment.GetID()),
+				zap.Int64("nodeID", segment.Node),
+				zap.Bool("existOnCurrent", existOnCurrent),
+				zap.Bool("existOnNext", existOnNext),
+				zap.Bool("nextTargetExist", nextTargetExist),
+				zap.Int64s("currentTargetSegmentIDs", lo.Keys(currentTargetMap)),
+				zap.Int64s("nextTargetSegmentIDs", lo.Keys(nextTargetMap)),
+				zap.Int64("currentTargetVersion", c.targetMgr.GetCollectionTargetVersion(ctx, collectionID, meta.CurrentTarget)),
+			)
 			toRelease = append(toRelease, segment)
 		}
 	}
