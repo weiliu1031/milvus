@@ -963,6 +963,7 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 	result := task.Result()
 	result.GetCostAggregation().ResponseTime = latency.Milliseconds()
 	result.GetCostAggregation().TotalNQ = node.scheduler.GetWaitingTaskTotalNQ()
+
 	return result, nil
 }
 
@@ -1043,6 +1044,7 @@ func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*i
 	}
 	ret.CostAggregation.ResponseTime = tr.ElapseSpan().Milliseconds()
 	ret.CostAggregation.TotalRelatedDataSize = relatedDataSize
+
 	return ret, nil
 }
 
