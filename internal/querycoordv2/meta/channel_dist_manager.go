@@ -20,10 +20,12 @@ import (
 	"sync"
 
 	"github.com/samber/lo"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/coordinator/snmanager"
 	"github.com/milvus-io/milvus/internal/util/metrics"
+	"github.com/milvus-io/milvus/pkg/v2/log"
 	"github.com/milvus-io/milvus/pkg/v2/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v2/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v2/util/metricsinfo"
@@ -359,10 +361,28 @@ func (m *ChannelDistManager) GetShardLeader(channelName string, replica *Replica
 				channelIsStreamingNode := streamingNodes.Contain(channel.Node)
 
 				if channelIsStreamingNode && !candidateIsStreamingNode {
+					log.Info("channel is streaming node but candidate is not",
+						zap.String("channel", channel.GetChannelName()),
+						zap.Int64("channelNode", channel.Node),
+						zap.Int64("candidateNode", candidates.Node),
+						zap.Bool("candidatesServiceable", candidatesServiceable),
+						zap.Bool("channelServiceable", channelServiceable),
+						zap.Bool("candidateIsStreamingNode", candidateIsStreamingNode),
+						zap.Bool("channelIsStreamingNode", channelIsStreamingNode),
+					)
 					// When upgrading from 2.5 to 2.6, the delegator leader may not locate at streaming node.
 					// We always use the streaming node as the delegator leader to avoid the delete data lost when loading segment.
 					candidates = channel
 				} else if !channelIsStreamingNode && candidateIsStreamingNode {
+					log.Info("channel is not streaming node but candidate is",
+						zap.String("channel", channel.GetChannelName()),
+						zap.Int64("channelNode", channel.Node),
+						zap.Int64("candidateNode", candidates.Node),
+						zap.Bool("candidatesServiceable", candidatesServiceable),
+						zap.Bool("channelServiceable", channelServiceable),
+						zap.Bool("candidateIsStreamingNode", candidateIsStreamingNode),
+						zap.Bool("channelIsStreamingNode", channelIsStreamingNode),
+					)
 					// When downgrading from 2.6 to 2.5, the delegator leader may locate at non-streaming node.
 					// We always use the non-streaming node as the delegator leader to avoid the delete data lost when loading segment.
 					continue
