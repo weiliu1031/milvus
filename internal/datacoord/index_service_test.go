@@ -2874,3 +2874,99 @@ func TestJsonIndex(t *testing.T) {
 	resp, err = s.CreateIndex(context.Background(), req)
 	assert.Error(t, merr.CheckRPCCall(resp, err))
 }
+
+func TestServer_CreateIndex_PreserveIndexID(t *testing.T) {
+	t.Run("preserve index ID with negative ID should fail", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID: 1,
+			FieldID:      10,
+			IndexName:    "test_index",
+			IndexParams: []*commonpb.KeyValuePair{
+				{
+					Key:   common.IndexTypeKey,
+					Value: "IVF_FLAT",
+				},
+			},
+			Timestamp:       100,
+			PreserveIndexId: true,
+			IndexId:         -1, // Invalid ID
+		}
+
+		// Create a minimal server with allocator
+		s := &Server{
+			allocator: newMockAllocator(t),
+		}
+		s.stateCode.Store(commonpb.StateCode_Healthy)
+
+		// Test that negative ID is rejected
+		resp, _ := s.CreateIndex(context.Background(), req)
+		assert.NotNil(t, resp)
+		assert.NotEqual(t, int32(0), resp.GetErrorCode())
+		assert.Contains(t, resp.GetReason(), "index_id must be positive")
+	})
+
+	t.Run("preserve index ID with zero ID should fail", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID: 1,
+			FieldID:      10,
+			IndexName:    "test_index",
+			IndexParams: []*commonpb.KeyValuePair{
+				{
+					Key:   common.IndexTypeKey,
+					Value: "IVF_FLAT",
+				},
+			},
+			Timestamp:       100,
+			PreserveIndexId: true,
+			IndexId:         0, // Invalid ID
+		}
+
+		// Create a minimal server with allocator
+		s := &Server{
+			allocator: newMockAllocator(t),
+		}
+		s.stateCode.Store(commonpb.StateCode_Healthy)
+
+		// Test that zero ID is rejected
+		resp, _ := s.CreateIndex(context.Background(), req)
+		assert.NotNil(t, resp)
+		assert.NotEqual(t, int32(0), resp.GetErrorCode())
+		assert.Contains(t, resp.GetReason(), "index_id must be positive")
+	})
+
+	t.Run("preserve index ID with positive ID should be accepted", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID: 1,
+			FieldID:      10,
+			IndexName:    "test_index",
+			IndexParams: []*commonpb.KeyValuePair{
+				{
+					Key:   common.IndexTypeKey,
+					Value: "IVF_FLAT",
+				},
+			},
+			Timestamp:       100,
+			PreserveIndexId: true,
+			IndexId:         12345, // Valid ID
+		}
+
+		mockAllocator := newMockAllocator(t)
+		// Allocator should NOT be called when preserve is true
+		// (no expectation set means test will fail if it's called)
+
+		s := &Server{
+			allocator: mockAllocator,
+		}
+		s.stateCode.Store(commonpb.StateCode_Healthy)
+
+		// This test only validates ID validation logic
+		// Full integration would require proper setup of catalog, meta, etc.
+		resp, _ := s.CreateIndex(context.Background(), req)
+		// At this point the request should pass ID validation
+		// (it may fail later due to missing catalog/meta setup, which is expected)
+		if resp != nil {
+			// If it failed, it should NOT be because of ID validation
+			assert.NotContains(t, resp.GetReason(), "index_id must be positive")
+		}
+	})
+}

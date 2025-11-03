@@ -1524,23 +1524,14 @@ func TestGetDataVChanPositions(t *testing.T) {
 func TestGetSnapshotTs(t *testing.T) {
 	// Create a minimal server handler without full server initialization
 	handler := &ServerHandler{
-		s: &Server{
-			channelManager: &ChannelManagerImpl{},
-		},
+		s: &Server{},
 	}
 
-	// Mock channel manager
-	mockChannels := []RWChannel{
-		&channelMeta{Name: "ch1", CollectionID: 100},
-		&channelMeta{Name: "ch2", CollectionID: 100},
-	}
-
-	// Setup mocks
-	mock1 := mockey.Mock((*ChannelManagerImpl).GetChannelsByCollectionID).To(func(cm *ChannelManagerImpl, collectionID int64) []RWChannel {
-		if collectionID == 100 {
-			return mockChannels
-		}
-		return nil
+	mock1 := mockey.Mock((*Server).getChannelsByCollectionID).To(func(s *Server, ctx context.Context, collectionID int64) ([]RWChannel, error) {
+		return []RWChannel{
+			&channelMeta{Name: "ch1", CollectionID: 100},
+			&channelMeta{Name: "ch2", CollectionID: 100},
+		}, nil
 	}).Build()
 	defer mock1.UnPatch()
 
@@ -1653,8 +1644,8 @@ func TestGenSnapshot(t *testing.T) {
 	}).Build()
 	defer mock7.UnPatch()
 
-	// Test GenSanpshot
-	snapshotData, err := handler.GenSanpshot(context.Background(), 200)
+	// Test GenSnapshot
+	snapshotData, err := handler.GenSnapshot(context.Background(), 200)
 	assert.NoError(t, err)
 	assert.NotNil(t, snapshotData)
 	assert.Equal(t, int64(200), snapshotData.SnapshotInfo.CollectionId)

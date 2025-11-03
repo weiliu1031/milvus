@@ -19,19 +19,24 @@ package datacoord
 import (
 	"context"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/samber/lo"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/metastore/model"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v2/common"
 	"github.com/milvus-io/milvus/pkg/v2/log"
 	"github.com/milvus-io/milvus/pkg/v2/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v2/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v2/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/v2/util/merr"
 	"github.com/milvus-io/milvus/pkg/v2/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v2/util/retry"
 	"github.com/milvus-io/milvus/pkg/v2/util/tsoutil"
@@ -49,7 +54,8 @@ type Handler interface {
 	GetCollection(ctx context.Context, collectionID UniqueID) (*collectionInfo, error)
 	GetCurrentSegmentsView(ctx context.Context, channel RWChannel, partitionIDs ...UniqueID) *SegmentsView
 	ListLoadedSegments(ctx context.Context) ([]int64, error)
-	GenSanpshot(ctx context.Context, collectionID UniqueID) (*SnapshotData, error)
+	GenSnapshot(ctx context.Context, collectionID UniqueID) (*SnapshotData, error)
+	GetDeltaLogFromCompactTo(ctx context.Context, segmentID UniqueID) ([]*datapb.FieldBinlog, error)
 }
 
 type SegmentsView struct {
@@ -150,7 +156,6 @@ func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs .
 	validSegmentInfos := make(map[int64]*SegmentInfo)
 	indexedSegments := FilterInIndexedSegments(context.Background(), h, h.s.meta, false, segments...)
 	indexed := typeutil.NewUniqueSet(lo.Map(indexedSegments, func(segment *SegmentInfo, _ int) int64 { return segment.GetID() })...)
-
 	for _, s := range segments {
 		if filterWithPartition && !validPartitionsMap[s.GetPartitionID()] {
 			continue
@@ -602,7 +607,10 @@ func (h *ServerHandler) ListLoadedSegments(ctx context.Context) ([]int64, error)
 // GetSnapshotTs use the smallest channel checkpoint ts as snapshot ts
 // Note: if channel has tt lag, the snapshot ts also has tt lag
 func (h *ServerHandler) GetSnapshotTs(ctx context.Context, collectionID UniqueID, partitionIDs ...UniqueID) (uint64, error) {
-	channels := h.s.channelManager.GetChannelsByCollectionID(collectionID)
+	channels, err := h.s.getChannelsByCollectionID(ctx, collectionID)
+	if err != nil {
+		return 0, err
+	}
 	minTs := uint64(math.MaxUint64)
 	for _, channel := range channels {
 		seekPosition := h.GetChannelSeekPosition(channel, partitionIDs...)
@@ -614,16 +622,36 @@ func (h *ServerHandler) GetSnapshotTs(ctx context.Context, collectionID UniqueID
 }
 
 // todo: how to avoid schema change and index change during generate snapshot?
-func (h *ServerHandler) GenSanpshot(ctx context.Context, collectionID UniqueID) (*SnapshotData, error) {
+func (h *ServerHandler) GenSnapshot(ctx context.Context, collectionID UniqueID) (*SnapshotData, error) {
 	// get coll info
 	resp, err := h.s.broker.DescribeCollectionInternal(ctx, collectionID)
 	if err != nil {
 		return nil, err
 	}
-
-	partitionIDs, err := h.s.broker.ShowPartitionsInternal(ctx, collectionID)
+	showPartitionResp, err := h.s.broker.ShowPartitions(ctx, collectionID)
 	if err != nil {
 		return nil, err
+	}
+	partitionIDs := showPartitionResp.GetPartitionIDs()
+	partitionNames := showPartitionResp.GetPartitionNames()
+
+	hasPartitionKey := typeutil.HasPartitionKey(resp.GetSchema())
+
+	defaultPartitionName := Params.CommonCfg.DefaultPartitionName.GetValue()
+	userCreatedPartitions := make(map[int64]string)
+	if !hasPartitionKey {
+		for idx, partitionID := range partitionIDs {
+			partitionName := partitionNames[idx]
+			if partitionName == defaultPartitionName {
+				continue
+			}
+
+			parts := strings.Split(partitionName, "_")
+			if len(parts) == 2 && parts[0] == defaultPartitionName {
+				continue
+			}
+			userCreatedPartitions[partitionID] = partitionNames[idx]
+		}
 	}
 
 	// generate snapshot ts with current partition ids
@@ -651,15 +679,46 @@ func (h *ServerHandler) GenSanpshot(ctx context.Context, collectionID UniqueID) 
 
 	// get segment info
 	segments := h.s.meta.SelectSegments(ctx, WithCollection(collectionID), SegmentFilterFunc(func(info *SegmentInfo) bool {
-		return info.GetStartPosition().GetTimestamp() < snapshotTs && info.GetState() != commonpb.SegmentState_Dropped
+		segmentHasData := len(info.GetBinlogs()) > 0 || len(info.GetDeltalogs()) > 0
+		return segmentHasData && info.GetStartPosition().GetTimestamp() < snapshotTs && info.GetState() != commonpb.SegmentState_Dropped && !info.GetIsImporting()
 	}))
 
-	segmentInfos := lo.Map(segments, func(segment *SegmentInfo, _ int) *datapb.SegmentDescription {
-		segID := segment.GetID()
-		info := h.s.meta.GetSegment(ctx, segID)
-		if info == nil {
-			return nil
+	if len(segments) == 0 {
+		log.Info("no segments found for collection when generating snapshot",
+			zap.Int64("collectionID", collectionID),
+			zap.Uint64("snapshotTs", snapshotTs))
+		return nil, merr.WrapErrParameterInvalidMsg("no segments found for collection when generating snapshot", "collectionID", collectionID)
+	}
+
+	segmentInfos := lo.Map(segments, func(segment *SegmentInfo, _ int) *datapb.SegmentInfo {
+		return proto.Clone(segment.SegmentInfo).(*datapb.SegmentInfo)
+	})
+
+	err = binlog.DecompressMultiBinLogs(segmentInfos)
+	if err != nil {
+		log.Error("decompress segment binlogs failed when generating snapshot",
+			zap.Int64("collectionID", collectionID),
+			zap.Uint64("snapshotTs", snapshotTs),
+			zap.Error(err))
+		return nil, err
+	}
+
+	// get delta logs from compactTo segments
+	lo.ForEach(segmentInfos, func(segInfo *datapb.SegmentInfo, _ int) {
+		deltalogs, err := h.GetDeltaLogFromCompactTo(ctx, segInfo.GetID())
+		if err != nil {
+			log.Error("get delta logs from compactTo failed when generating snapshot",
+				zap.Int64("collectionID", collectionID),
+				zap.Uint64("snapshotTs", snapshotTs),
+				zap.Int64("segmentID", segInfo.GetID()),
+				zap.Error(err))
+			return
 		}
+		segInfo.Deltalogs = append(segInfo.GetDeltalogs(), deltalogs...)
+	})
+
+	segDescList := lo.Map(segmentInfos, func(segInfo *datapb.SegmentInfo, _ int) *datapb.SegmentDescription {
+		segID := segInfo.GetID()
 		segIdxes := h.s.meta.indexMeta.getSegmentIndexes(collectionID, segID)
 		indexesFiles := make([]*indexpb.IndexFilePathInfo, 0)
 		for _, segIdx := range segIdxes {
@@ -689,12 +748,22 @@ func (h *ServerHandler) GenSanpshot(ctx context.Context, collectionID UniqueID) 
 			}
 		}
 		return &datapb.SegmentDescription{
-			SegmentId:     segment.GetID(),
-			SegmentLevel:  int64(segment.GetLevel()),
-			PartitionId:   segment.GetPartitionID(),
-			BinlogFiles:   info.GetBinlogs(),
-			DeltalogFiles: info.GetDeltalogs(),
-			IndexFiles:    indexesFiles,
+			SegmentId:         segInfo.GetID(),
+			SegmentLevel:      segInfo.GetLevel(),
+			PartitionId:       segInfo.GetPartitionID(),
+			ChannelName:       segInfo.GetInsertChannel(),
+			NumOfRows:         segInfo.GetNumOfRows(),
+			StartPosition:     segInfo.GetStartPosition(),
+			DmlPosition:       segInfo.GetDmlPosition(),
+			StorageVersion:    segInfo.GetStorageVersion(),
+			IsSorted:          segInfo.GetIsSorted(),
+			Binlogs:           segInfo.GetBinlogs(),
+			Deltalogs:         segInfo.GetDeltalogs(),
+			Statslogs:         segInfo.GetStatslogs(),
+			Bm25Statslogs:     segInfo.GetBm25Statslogs(),
+			IndexFiles:        indexesFiles,
+			JsonKeyIndexFiles: segInfo.GetJsonKeyStats(),
+			TextIndexFiles:    segInfo.GetTextStatsLogs(),
 		}
 	})
 
@@ -705,13 +774,43 @@ func (h *ServerHandler) GenSanpshot(ctx context.Context, collectionID UniqueID) 
 			CreateTs:     int64(snapshotTs),
 		},
 		Collection: &datapb.CollectionDescription{
-			Schema:           resp.GetSchema(),
-			NumShards:        int64(resp.GetShardsNum()),
-			NumPartitions:    int64(resp.GetNumPartitions()),
-			ConsistencyLevel: resp.GetConsistencyLevel(),
-			Properties:       resp.GetProperties(),
+			Schema:                resp.GetSchema(),
+			NumShards:             int64(resp.GetShardsNum()),
+			NumPartitions:         int64(resp.GetNumPartitions()),
+			ConsistencyLevel:      resp.GetConsistencyLevel(),
+			Properties:            resp.GetProperties(),
+			UserCreatedPartitions: userCreatedPartitions,
 		},
 		Indexes:  indexInfos,
-		Segments: segmentInfos,
+		Segments: segDescList,
 	}, nil
+}
+
+func (h *ServerHandler) GetDeltaLogFromCompactTo(ctx context.Context, segmentID UniqueID) ([]*datapb.FieldBinlog, error) {
+	var getChildrenDelta func(id UniqueID) ([]*datapb.FieldBinlog, error)
+	getChildrenDelta = func(id UniqueID) ([]*datapb.FieldBinlog, error) {
+		children, ok := h.s.meta.GetCompactionTo(id)
+		// double-check the segment, maybe the segment is being dropped concurrently.
+		if !ok {
+			log.Warn("failed to get segment, this may have been cleaned", zap.Int64("segmentID", id))
+			err := merr.WrapErrSegmentNotFound(id)
+			return nil, err
+		}
+		allDeltaLogs := make([]*datapb.FieldBinlog, 0)
+		for _, child := range children {
+			clonedChild := child.Clone()
+			// child segment should decompress binlog path
+			binlog.DecompressBinLog(storage.DeleteBinlog, clonedChild.GetCollectionID(), clonedChild.GetPartitionID(), clonedChild.GetID(), clonedChild.GetDeltalogs())
+			allDeltaLogs = append(allDeltaLogs, clonedChild.GetDeltalogs()...)
+			allChildrenDeltas, err := getChildrenDelta(child.GetID())
+			if err != nil {
+				return nil, err
+			}
+			allDeltaLogs = append(allDeltaLogs, allChildrenDeltas...)
+		}
+
+		return allDeltaLogs, nil
+	}
+
+	return getChildrenDelta(segmentID)
 }

@@ -10,14 +10,14 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v2/log"
+	"github.com/milvus-io/milvus/pkg/v2/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v2/util/typeutil"
 )
 
 type SnapshotDataInfo struct {
-	CollectionID int64
+	snapshotInfo *datapb.SnapshotInfo
 	SegmentIDs   typeutil.UniqueSet
 	IndexIDs     typeutil.UniqueSet
-	SnapshotData *SnapshotData
 }
 
 type snapshotMeta struct {
@@ -57,6 +57,11 @@ func (sm *snapshotMeta) reload(ctx context.Context) error {
 
 	for _, snapshot := range snapshots {
 		// Note: we don't need to read segment info from s3, anyone need to read segment info, they can read snapshot from s3.
+		log.Info("reload snapshot from catalog",
+			zap.String("name", snapshot.GetName()),
+			zap.Int64("id", snapshot.GetId()),
+			zap.String("s3_location", snapshot.GetS3Location()))
+
 		snapshotData, err := sm.reader.ReadSnapshot(ctx, snapshot.GetCollectionId(), snapshot.GetId(), true)
 		if err != nil {
 			log.Error("failed to read snapshot from s3", zap.Error(err))
@@ -73,8 +78,7 @@ func (sm *snapshotMeta) reload(ctx context.Context) error {
 		}
 
 		sm.snapshotID2DataInfo.Insert(snapshot.GetId(), &SnapshotDataInfo{
-			SnapshotData: snapshotData,
-			CollectionID: snapshot.GetCollectionId(),
+			snapshotInfo: snapshot,
 			SegmentIDs:   typeutil.NewUniqueSet(segmentIDs...),
 			IndexIDs:     typeutil.NewUniqueSet(indexIDs...),
 		})
@@ -90,6 +94,7 @@ func (sm *snapshotMeta) SaveSnapshot(ctx context.Context, snapshot *SnapshotData
 		log.Error("failed to save snapshot to s3", zap.Error(err))
 		return err
 	}
+	snapshot.SnapshotInfo.S3Location = metadataFilePath
 
 	segmentIDs := make([]int64, 0)
 	indexIDs := make([]int64, 0)
@@ -101,15 +106,11 @@ func (sm *snapshotMeta) SaveSnapshot(ctx context.Context, snapshot *SnapshotData
 	}
 
 	sm.snapshotID2DataInfo.Insert(snapshot.SnapshotInfo.GetId(), &SnapshotDataInfo{
-		CollectionID: snapshot.SnapshotInfo.GetCollectionId(),
-		SnapshotData: snapshot,
+		snapshotInfo: snapshot.SnapshotInfo,
 		SegmentIDs:   typeutil.NewUniqueSet(segmentIDs...),
 		IndexIDs:     typeutil.NewUniqueSet(indexIDs...),
 	})
 
-	// Note: we don't need to maintain segment info in memory
-	snapshot.Segments = nil
-	snapshot.SnapshotInfo.S3Location = metadataFilePath
 	return sm.catalog.SaveSnapshot(ctx, snapshot.SnapshotInfo)
 }
 
@@ -121,14 +122,14 @@ func (sm *snapshotMeta) DropSnapshot(ctx context.Context, snapshotName string) e
 		return err
 	}
 
-	sm.snapshotID2DataInfo.Remove(snapshot.SnapshotInfo.GetId())
-	err = sm.catalog.DropSnapshot(ctx, snapshot.SnapshotInfo.GetCollectionId(), snapshot.SnapshotInfo.GetId())
+	sm.snapshotID2DataInfo.Remove(snapshot.GetId())
+	err = sm.catalog.DropSnapshot(ctx, snapshot.GetCollectionId(), snapshot.GetId())
 	if err != nil {
 		log.Error("failed to drop snapshot from catalog", zap.Error(err))
 		return err
 	}
 
-	err = sm.writer.Drop(ctx, snapshot.SnapshotInfo.GetCollectionId(), snapshot.SnapshotInfo.GetId())
+	err = sm.writer.Drop(ctx, snapshot.GetCollectionId(), snapshot.GetId())
 	if err != nil {
 		log.Error("failed to drop snapshot from s3", zap.Error(err))
 		return err
@@ -140,7 +141,7 @@ func (sm *snapshotMeta) DropSnapshot(ctx context.Context, snapshotName string) e
 func (sm *snapshotMeta) ListSnapshots(ctx context.Context, collectionID int64, partitionID int64) ([]string, error) {
 	ret := make([]string, 0)
 	sm.snapshotID2DataInfo.Range(func(key UniqueID, value *SnapshotDataInfo) bool {
-		snapshotInfo := value.SnapshotData.SnapshotInfo
+		snapshotInfo := value.snapshotInfo
 		collectionMatch := snapshotInfo.GetCollectionId() == collectionID || collectionID <= 0
 		partitionMatch := partitionID <= 0 || slices.Contains(snapshotInfo.GetPartitionIds(), partitionID)
 		if collectionMatch && partitionMatch {
@@ -152,7 +153,7 @@ func (sm *snapshotMeta) ListSnapshots(ctx context.Context, collectionID int64, p
 	return ret, nil
 }
 
-func (sm *snapshotMeta) GetSnapshot(ctx context.Context, snapshotName string) (*SnapshotData, error) {
+func (sm *snapshotMeta) GetSnapshot(ctx context.Context, snapshotName string) (*datapb.SnapshotInfo, error) {
 	snapshot, err := sm.getSnapshotByName(ctx, snapshotName)
 	if err != nil {
 		return nil, err
@@ -160,11 +161,38 @@ func (sm *snapshotMeta) GetSnapshot(ctx context.Context, snapshotName string) (*
 	return snapshot, nil
 }
 
-func (sm *snapshotMeta) getSnapshotByName(ctx context.Context, snapshotName string) (*SnapshotData, error) {
-	var ret *SnapshotData
+// ReadSnapshotData reads the complete snapshot data including segments from S3
+func (sm *snapshotMeta) ReadSnapshotData(ctx context.Context, snapshotName string) (*SnapshotData, error) {
+	log := log.Ctx(ctx).With(zap.String("snapshotName", snapshotName))
+
+	// Get snapshot info from memory first
+	snapshotInfo, err := sm.getSnapshotByName(ctx, snapshotName)
+	if err != nil {
+		log.Error("failed to get snapshot by name", zap.Error(err))
+		return nil, err
+	}
+
+	log.Info("got snapshot from memory before ReadSnapshot",
+		zap.String("name", snapshotInfo.GetName()),
+		zap.Int64("id", snapshotInfo.GetId()),
+		zap.String("s3_location_from_memory", snapshotInfo.GetS3Location()))
+
+	// Read complete snapshot data from S3
+	snapshotData, err := sm.reader.ReadSnapshot(ctx, snapshotInfo.GetCollectionId(), snapshotInfo.GetId(), true)
+	if err != nil {
+		log.Error("failed to read snapshot data from S3", zap.Error(err))
+		return nil, err
+	}
+	snapshotData.SnapshotInfo.S3Location = snapshotInfo.S3Location
+
+	return snapshotData, nil
+}
+
+func (sm *snapshotMeta) getSnapshotByName(ctx context.Context, snapshotName string) (*datapb.SnapshotInfo, error) {
+	var ret *datapb.SnapshotInfo
 	sm.snapshotID2DataInfo.Range(func(key UniqueID, value *SnapshotDataInfo) bool {
-		if value.SnapshotData.SnapshotInfo.GetName() == snapshotName {
-			ret = value.SnapshotData
+		if value.snapshotInfo.GetName() == snapshotName {
+			ret = value.snapshotInfo
 			return false
 		}
 		return true
@@ -179,7 +207,7 @@ func (sm *snapshotMeta) getSnapshotByName(ctx context.Context, snapshotName stri
 func (sm *snapshotMeta) GetSnapshotBySegment(ctx context.Context, collectionID, segmentID UniqueID) []UniqueID {
 	snapshotIDs := make([]UniqueID, 0)
 	sm.snapshotID2DataInfo.Range(func(key UniqueID, value *SnapshotDataInfo) bool {
-		if value.CollectionID == collectionID && value.SegmentIDs.Contain(segmentID) {
+		if value.snapshotInfo.GetCollectionId() == collectionID && value.SegmentIDs.Contain(segmentID) {
 			snapshotIDs = append(snapshotIDs, key)
 		}
 		return true
@@ -190,7 +218,7 @@ func (sm *snapshotMeta) GetSnapshotBySegment(ctx context.Context, collectionID, 
 func (sm *snapshotMeta) GetSnapshotByIndex(ctx context.Context, collectionID, indexID UniqueID) []UniqueID {
 	snapshotIDs := make([]UniqueID, 0)
 	sm.snapshotID2DataInfo.Range(func(key UniqueID, value *SnapshotDataInfo) bool {
-		if value.CollectionID == collectionID && value.IndexIDs.Contain(indexID) {
+		if value.snapshotInfo.GetCollectionId() == collectionID && value.IndexIDs.Contain(indexID) {
 			snapshotIDs = append(snapshotIDs, key)
 		}
 		return true

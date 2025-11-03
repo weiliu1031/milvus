@@ -241,6 +241,7 @@ func (t *createCollectionTask) validateSchema(ctx context.Context, schema *schem
 
 func (t *createCollectionTask) assignFieldAndFunctionID(schema *schemapb.CollectionSchema) error {
 	name2id := map[string]int64{}
+
 	idx := 0
 	for _, field := range schema.GetFields() {
 		field.FieldID = int64(idx + StartOfUserFieldID)
@@ -377,16 +378,56 @@ func (t *createCollectionTask) prepareSchema(ctx context.Context) error {
 	if err := proto.Unmarshal(t.Req.GetSchema(), &schema); err != nil {
 		return err
 	}
+
+	// if schema comes from restore snapshot
+	preservedDynamicFieldID := int64(-1)
+	preservedNamespaceFieldID := int64(-1)
+	if t.Req.GetPreserveFieldId() {
+		log.Ctx(ctx).Info("preserve field IDs from schema during create collection", zap.String("collection", t.Req.CollectionName))
+		fields := make([]*schemapb.FieldSchema, 0)
+		// filter out system fields
+		for _, field := range schema.Fields {
+			if field.GetName() == MetaFieldName {
+				preservedDynamicFieldID = field.GetFieldID()
+				continue
+			}
+			if field.GetName() == NamespaceFieldName {
+				preservedNamespaceFieldID = field.GetFieldID()
+				continue
+			}
+			if field.GetName() == TimeStampFieldName || field.GetName() == RowIDFieldName {
+				continue
+			}
+			fields = append(fields, field)
+		}
+		schema.Fields = fields
+	}
+
 	if err := t.validateSchema(ctx, &schema); err != nil {
 		return err
 	}
+
 	t.appendDynamicField(ctx, &schema)
 	if err := t.handleNamespaceField(ctx, &schema); err != nil {
 		return err
 	}
 
-	if err := t.assignFieldAndFunctionID(&schema); err != nil {
-		return err
+	if t.Req.GetPreserveFieldId() {
+		// cause dynamic field is system field without internal id allocation
+		// we need to restore its field id here
+		for _, field := range schema.Fields {
+			if field.GetName() == MetaFieldName {
+				field.FieldID = preservedDynamicFieldID
+			}
+
+			if field.GetName() == NamespaceFieldName {
+				field.FieldID = preservedNamespaceFieldID
+			}
+		}
+	} else {
+		if err := t.assignFieldAndFunctionID(&schema); err != nil {
+			return err
+		}
 	}
 
 	// Set properties for persistent

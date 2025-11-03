@@ -87,6 +87,9 @@ const (
 	ImportStageBuildIndex   = "build_index"
 	ImportStageWaitL0Import = "wait_l0_import"
 
+	CopyStagePending = "copy_pending"
+	CopyStageCopying = "copy_copying"
+
 	compactionTypeLabelName  = "compaction_type"
 	isVectorFieldLabelName   = "is_vector_field"
 	segmentPruneLabelName    = "segment_prune_label"

@@ -4454,6 +4454,7 @@ type dataCoordConfig struct {
 	ImportPreAllocIDExpansionFactor ParamItem `refreshable:"true"`
 	ImportFileNumPerSlot            ParamItem `refreshable:"true"`
 	ImportMemoryLimitPerSlot        ParamItem `refreshable:"true"`
+	MaxSegmentsPerCopyTask          ParamItem `refreshable:"true"`
 
 	GracefulStopTimeout ParamItem `refreshable:"true"`
 
@@ -5414,6 +5415,16 @@ if param targetVecIndexVersion is not set, the default value is -1, which means 
 		},
 	}
 	p.ImportMemoryLimitPerSlot.Init(base.mgr)
+
+	p.MaxSegmentsPerCopyTask = ParamItem{
+		Key:          "dataCoord.import.maxSegmentsPerCopyTask",
+		Version:      "2.5.0",
+		Doc:          "Maximum number of segments that can be grouped into a single copy task during snapshot restore.",
+		DefaultValue: "100",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.MaxSegmentsPerCopyTask.Init(base.mgr)
 
 	p.GracefulStopTimeout = ParamItem{
 		Key:          "dataCoord.gracefulStopTimeout",

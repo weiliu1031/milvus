@@ -559,14 +559,17 @@ func TestRestoreSnapshotTask_Execute_Success(t *testing.T) {
 	defer mockGetPartitions.UnPatch()
 
 	// Mock restore snapshot
-	mockRestoreSnapshot := mockey.Mock((*MixCoordMock).RestoreSnapshot).Return(merr.Success(), nil).Build()
+	mockRestoreSnapshot := mockey.Mock((*MixCoordMock).RestoreSnapshot).Return(&datapb.RestoreSnapshotResponse{
+		Status: merr.Success(),
+		JobId:  1,
+	}, nil).Build()
 	defer mockRestoreSnapshot.UnPatch()
 
 	err := task.Execute(context.Background())
 
 	assert.NoError(t, err)
 	assert.NotNil(t, task.result)
-	assert.True(t, merr.Ok(task.result))
+	assert.True(t, merr.Ok(task.result.GetStatus()))
 }
 
 func TestRestoreSnapshotTask_Execute_DescribeSnapshotError(t *testing.T) {
@@ -587,7 +590,7 @@ func TestRestoreSnapshotTask_Execute_DescribeSnapshotError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.NotNil(t, task.result)
-	assert.False(t, merr.Ok(task.result))
+	assert.False(t, merr.Ok(task.result.GetStatus()))
 	assert.Contains(t, err.Error(), "describe snapshot failed")
 }
 
@@ -620,7 +623,7 @@ func TestRestoreSnapshotTask_Execute_SchemaMarshalError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.NotNil(t, task.result)
-	assert.False(t, merr.Ok(task.result))
+	assert.False(t, merr.Ok(task.result.GetStatus()))
 	assert.Contains(t, err.Error(), "marshal failed")
 }
 
@@ -657,7 +660,7 @@ func TestRestoreSnapshotTask_Execute_CreateCollectionError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.NotNil(t, task.result)
-	assert.False(t, merr.Ok(task.result))
+	assert.False(t, merr.Ok(task.result.GetStatus()))
 	assert.Contains(t, err.Error(), "create collection failed")
 }
 

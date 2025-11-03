@@ -199,11 +199,28 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		}
 	}
 
-	allocateIndexID, err := s.allocator.AllocID(ctx)
-	if err != nil {
-		log.Warn("failed to alloc indexID", zap.Error(err))
-		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-		return merr.Status(err), nil
+	// Allocate or use provided index ID
+	var allocateIndexID int64
+	if req.GetPreserveIndexId() {
+		// For snapshot restore: use provided index ID instead of allocating a new one
+		allocateIndexID = req.GetIndexId()
+		if allocateIndexID <= 0 {
+			log.Warn("invalid index ID provided for preserve",
+				zap.Int64("indexID", allocateIndexID))
+			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+			return merr.Status(merr.WrapErrParameterInvalidMsg("index_id must be positive when preserve_index_id is true")), nil
+		}
+		log.Info("using preserved index ID for snapshot restore",
+			zap.Int64("indexID", allocateIndexID))
+	} else {
+		// Normal path: allocate new index ID
+		var err error
+		allocateIndexID, err = s.allocator.AllocID(ctx)
+		if err != nil {
+			log.Warn("failed to alloc indexID", zap.Error(err))
+			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+			return merr.Status(err), nil
+		}
 	}
 
 	// Get flushed segments and create index

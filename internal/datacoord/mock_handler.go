@@ -115,12 +115,12 @@ func (_c *NMockHandler_FinishDropChannel_Call) RunAndReturn(run func(string, int
 	return _c
 }
 
-// GenSanpshot provides a mock function with given fields: ctx, collectionID
-func (_m *NMockHandler) GenSanpshot(ctx context.Context, collectionID int64) (*SnapshotData, error) {
+// GenSnapshot provides a mock function with given fields: ctx, collectionID
+func (_m *NMockHandler) GenSnapshot(ctx context.Context, collectionID int64) (*SnapshotData, error) {
 	ret := _m.Called(ctx, collectionID)
 
 	if len(ret) == 0 {
-		panic("no return value specified for GenSanpshot")
+		panic("no return value specified for GenSnapshot")
 	}
 
 	var r0 *SnapshotData
@@ -145,31 +145,31 @@ func (_m *NMockHandler) GenSanpshot(ctx context.Context, collectionID int64) (*S
 	return r0, r1
 }
 
-// NMockHandler_GenSanpshot_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GenSanpshot'
-type NMockHandler_GenSanpshot_Call struct {
+// NMockHandler_GenSnapshot_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GenSnapshot'
+type NMockHandler_GenSnapshot_Call struct {
 	*mock.Call
 }
 
-// GenSanpshot is a helper method to define mock.On call
+// GenSnapshot is a helper method to define mock.On call
 //   - ctx context.Context
 //   - collectionID int64
-func (_e *NMockHandler_Expecter) GenSanpshot(ctx interface{}, collectionID interface{}) *NMockHandler_GenSanpshot_Call {
-	return &NMockHandler_GenSanpshot_Call{Call: _e.mock.On("GenSanpshot", ctx, collectionID)}
+func (_e *NMockHandler_Expecter) GenSnapshot(ctx interface{}, collectionID interface{}) *NMockHandler_GenSnapshot_Call {
+	return &NMockHandler_GenSnapshot_Call{Call: _e.mock.On("GenSnapshot", ctx, collectionID)}
 }
 
-func (_c *NMockHandler_GenSanpshot_Call) Run(run func(ctx context.Context, collectionID int64)) *NMockHandler_GenSanpshot_Call {
+func (_c *NMockHandler_GenSnapshot_Call) Run(run func(ctx context.Context, collectionID int64)) *NMockHandler_GenSnapshot_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		run(args[0].(context.Context), args[1].(int64))
 	})
 	return _c
 }
 
-func (_c *NMockHandler_GenSanpshot_Call) Return(_a0 *SnapshotData, _a1 error) *NMockHandler_GenSanpshot_Call {
+func (_c *NMockHandler_GenSnapshot_Call) Return(_a0 *SnapshotData, _a1 error) *NMockHandler_GenSnapshot_Call {
 	_c.Call.Return(_a0, _a1)
 	return _c
 }
 
-func (_c *NMockHandler_GenSanpshot_Call) RunAndReturn(run func(context.Context, int64) (*SnapshotData, error)) *NMockHandler_GenSanpshot_Call {
+func (_c *NMockHandler_GenSnapshot_Call) RunAndReturn(run func(context.Context, int64) (*SnapshotData, error)) *NMockHandler_GenSnapshot_Call {
 	_c.Call.Return(run)
 	return _c
 }

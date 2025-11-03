@@ -211,6 +211,7 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 		resourceMeta:       make(map[string]*model.FileResource),
 		snapshotMeta:       spm,
 	}
+
 	err = mt.reloadFromKV(ctx, broker)
 	if err != nil {
 		return nil, err

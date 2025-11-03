@@ -947,7 +947,15 @@ func (s *mockMixCoord) DescribeSnapshot(ctx context.Context, req *datapb.Describ
 	panic("implement me")
 }
 
-func (s *mockMixCoord) RestoreSnapshot(ctx context.Context, req *datapb.RestoreSnapshotRequest) (*commonpb.Status, error) {
+func (s *mockMixCoord) RestoreSnapshot(ctx context.Context, req *datapb.RestoreSnapshotRequest) (*datapb.RestoreSnapshotResponse, error) {
+	panic("implement me")
+}
+
+func (s *mockMixCoord) GetRestoreSnapshotState(ctx context.Context, req *datapb.GetRestoreSnapshotStateRequest) (*datapb.GetRestoreSnapshotStateResponse, error) {
+	panic("implement me")
+}
+
+func (s *mockMixCoord) ListRestoreSnapshotJobs(ctx context.Context, req *datapb.ListRestoreSnapshotJobsRequest) (*datapb.ListRestoreSnapshotJobsResponse, error) {
 	panic("implement me")
 }
 
@@ -997,7 +1005,7 @@ func (h *mockHandler) ListLoadedSegments(ctx context.Context) ([]int64, error) {
 	return nil, nil
 }
 
-func (h *mockHandler) GenSanpshot(ctx context.Context, collectionID UniqueID) (*SnapshotData, error) {
+func (h *mockHandler) GenSnapshot(ctx context.Context, collectionID UniqueID) (*SnapshotData, error) {
 	return &SnapshotData{
 		SnapshotInfo: &datapb.SnapshotInfo{
 			Name:         "test_snapshot",
