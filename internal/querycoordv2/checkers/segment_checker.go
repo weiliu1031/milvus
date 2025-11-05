@@ -436,7 +436,16 @@ func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []
 				SegmentInfo: s,
 			}
 		})
-		shardPlans := c.getBalancerFunc().AssignSegment(ctx, replica.GetCollectionID(), segmentInfos, rwNodes, true)
+
+		var shardPlans []balance.SegmentAssignPlan
+		// Use recovery-friendly assignment strategy if enabled
+		if Params.QueryCoordCfg.EnableRecoveryFriendlyAssign.GetAsBool() && !isLevel0 {
+			shardPlans = c.assignSegmentsForRecovery(ctx, replica, segmentInfos, rwNodes)
+		} else {
+			// Use balance-first strategy (original behavior)
+			shardPlans = c.getBalancerFunc().AssignSegment(ctx, replica.GetCollectionID(), segmentInfos, rwNodes, true)
+		}
+
 		for i := range shardPlans {
 			shardPlans[i].Replica = replica
 		}
@@ -444,6 +453,95 @@ func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []
 	}
 
 	return balance.CreateSegmentTasksFromPlans(ctx, c.ID(), Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond), plans)
+}
+
+// assignSegmentsForRecovery implements a recovery-friendly segment assignment strategy.
+// It prioritizes recovery speed over load balance by:
+// 1. Assigning segments back to their historical nodes if available (利用可能的缓存)
+// 2. Using round-robin distribution for maximum parallelism when historical nodes unavailable
+// This strategy is optimized for node failure recovery scenarios where we want to restore
+// service as quickly as possible, leaving fine-grained balancing to the balance_checker.
+func (c *SegmentChecker) assignSegmentsForRecovery(ctx context.Context, replica *meta.Replica, segments []*meta.Segment, nodes []int64) []balance.SegmentAssignPlan {
+	if len(segments) == 0 || len(nodes) == 0 {
+		return nil
+	}
+
+	// Filter to only include healthy normal nodes
+	healthyNodes := lo.Filter(nodes, func(nodeID int64, _ int) bool {
+		info := c.nodeMgr.Get(nodeID)
+		return info != nil && info.GetState() == session.NodeStateNormal
+	})
+
+	if len(healthyNodes) == 0 {
+		log.Warn("no healthy nodes available for segment assignment",
+			zap.Int64("collectionID", replica.GetCollectionID()),
+			zap.Int64("replicaID", replica.GetID()),
+			zap.Int("segmentCount", len(segments)))
+		return nil
+	}
+
+	// Build a set of healthy nodes for quick lookup
+	healthyNodeSet := make(map[int64]bool)
+	for _, nodeID := range healthyNodes {
+		healthyNodeSet[nodeID] = true
+	}
+
+	// Get historical distribution for this replica
+	// This helps us identify where segments were previously loaded
+	historicalDist := c.dist.SegmentDistManager.GetByFilter(
+		meta.WithCollectionID(replica.GetCollectionID()),
+		meta.WithReplica(replica))
+
+	// Build segment ID -> historical node mapping
+	segmentHistoricalNode := make(map[int64]int64)
+	for _, seg := range historicalDist {
+		// Keep the most recent location (last one wins)
+		segmentHistoricalNode[seg.GetID()] = seg.Node
+	}
+
+	plans := make([]balance.SegmentAssignPlan, 0, len(segments))
+	roundRobinIndex := 0
+
+	for _, segment := range segments {
+		var targetNode int64
+
+		// Strategy 1: Try to assign back to historical node if it's healthy
+		if historicalNode, exists := segmentHistoricalNode[segment.GetID()]; exists {
+			if healthyNodeSet[historicalNode] {
+				targetNode = historicalNode
+				log.Debug("assigning segment back to historical node for fast recovery",
+					zap.Int64("segmentID", segment.GetID()),
+					zap.Int64("nodeID", targetNode),
+					zap.Int64("collectionID", replica.GetCollectionID()))
+			}
+		}
+
+		// Strategy 2: If no historical node or it's unavailable, use round-robin for parallelism
+		if targetNode == 0 {
+			targetNode = healthyNodes[roundRobinIndex%len(healthyNodes)]
+			roundRobinIndex++
+			log.Debug("assigning segment using round-robin for parallel recovery",
+				zap.Int64("segmentID", segment.GetID()),
+				zap.Int64("nodeID", targetNode),
+				zap.Int64("collectionID", replica.GetCollectionID()))
+		}
+
+		plan := balance.SegmentAssignPlan{
+			Segment: segment,
+			From:    -1,
+			To:      targetNode,
+		}
+		plans = append(plans, plan)
+	}
+
+	log.Info("generated recovery-friendly segment assignment plans",
+		zap.Int64("collectionID", replica.GetCollectionID()),
+		zap.Int64("replicaID", replica.GetID()),
+		zap.Int("segmentCount", len(segments)),
+		zap.Int("planCount", len(plans)),
+		zap.Int("healthyNodeCount", len(healthyNodes)))
+
+	return plans
 }
 
 func (c *SegmentChecker) createSegmentReduceTasks(ctx context.Context, segments []*meta.Segment, replica *meta.Replica, scope querypb.DataScope) []task.Task {

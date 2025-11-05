@@ -1845,6 +1845,7 @@ type queryCoordConfig struct {
 	GracefulStopTimeout            ParamItem `refreshable:"true"`
 	EnableStoppingBalance          ParamItem `refreshable:"true"`
 	ChannelExclusiveNodeFactor     ParamItem `refreshable:"true"`
+	EnableRecoveryFriendlyAssign   ParamItem `refreshable:"true"`
 
 	CollectionObserverInterval         ParamItem `refreshable:"false"`
 	CheckExecutedFlagInterval          ParamItem `refreshable:"false"`
@@ -2373,6 +2374,15 @@ If this parameter is set false, Milvus simply searches the growing segments with
 		Export:       true,
 	}
 	p.ChannelExclusiveNodeFactor.Init(base.mgr)
+
+	p.EnableRecoveryFriendlyAssign = ParamItem{
+		Key:          "queryCoord.enableRecoveryFriendlyAssign",
+		Version:      "2.5.0",
+		DefaultValue: "true",
+		Doc:          "Enable recovery-friendly segment assignment strategy. When true, segment_checker prioritizes restoring segments to their original nodes (if available) or uses round-robin for maximum parallelism during node failure recovery. When false, uses balance-first assignment strategy.",
+		Export:       true,
+	}
+	p.EnableRecoveryFriendlyAssign.Init(base.mgr)
 
 	p.CollectionObserverInterval = ParamItem{
 		Key:          "queryCoord.collectionObserverInterval",
