@@ -65,7 +65,12 @@ func NewSegmentChecker(
 		targetMgr:         targetMgr,
 		nodeMgr:           nodeMgr,
 		getBalancerFunc:   getBalancerFunc,
-		assignPolicy:      NewDefaultAssignPolicy(),
+		assignPolicy: NewDefaultAssignPolicy(
+			dist,
+			getBalancerFunc,
+			utils.SegmentChecker,
+			Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond),
+		),
 	}
 }
 
@@ -406,42 +411,7 @@ func (c *SegmentChecker) filterSegmentInUse(ctx context.Context, replica *meta.R
 }
 
 func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []*datapb.SegmentInfo, replica *meta.Replica) []task.Task {
-	if len(segments) == 0 {
-		return nil
-	}
-
-	isLevel0 := segments[0].GetLevel() == datapb.SegmentLevel_L0
-	shardSegments := lo.GroupBy(segments, func(s *datapb.SegmentInfo) string {
-		return s.GetInsertChannel()
-	})
-
-	plans := make([]balance.SegmentAssignPlan, 0)
-	for shard, segments := range shardSegments {
-		// if channel is not subscribed yet, skip load segments
-		leader := c.dist.LeaderViewManager.GetLatestShardLeaderByFilter(meta.WithReplica2LeaderView(replica), meta.WithChannelName2LeaderView(shard))
-		if leader == nil {
-			continue
-		}
-
-		// Use AssignPolicy to get assignable nodes
-		rwNodes := c.assignPolicy.GetAssignableNodesForSegment(replica, shard, isLevel0, leader.ID)
-		if len(rwNodes) == 0 {
-			continue
-		}
-
-		segmentInfos := lo.Map(segments, func(s *datapb.SegmentInfo, _ int) *meta.Segment {
-			return &meta.Segment{
-				SegmentInfo: s,
-			}
-		})
-		shardPlans := c.getBalancerFunc().AssignSegment(ctx, replica.GetCollectionID(), segmentInfos, rwNodes, true)
-		for i := range shardPlans {
-			shardPlans[i].Replica = replica
-		}
-		plans = append(plans, shardPlans...)
-	}
-
-	return balance.CreateSegmentTasksFromPlans(ctx, c.ID(), Params.QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond), plans)
+	return c.assignPolicy.AssignSegment(ctx, segments, replica)
 }
 
 func (c *SegmentChecker) createSegmentReduceTasks(ctx context.Context, segments []*meta.Segment, replica *meta.Replica, scope querypb.DataScope) []task.Task {

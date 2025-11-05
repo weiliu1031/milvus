@@ -59,7 +59,12 @@ func NewChannelChecker(
 		targetMgr:         targetMgr,
 		nodeMgr:           nodeMgr,
 		getBalancerFunc:   getBalancerFunc,
-		assignPolicy:      NewDefaultAssignPolicy(),
+		assignPolicy: NewDefaultAssignPolicy(
+			dist,
+			getBalancerFunc,
+			utils.ChannelChecker,
+			Params.QueryCoordCfg.ChannelTaskTimeout.GetAsDuration(time.Millisecond),
+		),
 	}
 }
 
@@ -227,22 +232,7 @@ func (c *ChannelChecker) findRepeatedChannels(ctx context.Context, replicaID int
 }
 
 func (c *ChannelChecker) createChannelLoadTask(ctx context.Context, channels []*meta.DmChannel, replica *meta.Replica) []task.Task {
-	plans := make([]balance.ChannelAssignPlan, 0)
-	for _, ch := range channels {
-		// Use AssignPolicy to get assignable nodes
-		rwNodes := c.assignPolicy.GetAssignableNodesForChannel(replica, ch.GetChannelName())
-		if len(rwNodes) == 0 {
-			continue
-		}
-		plan := c.getBalancerFunc().AssignChannel(ctx, replica.GetCollectionID(), []*meta.DmChannel{ch}, rwNodes, true)
-		plans = append(plans, plan...)
-	}
-
-	for i := range plans {
-		plans[i].Replica = replica
-	}
-
-	return balance.CreateChannelTasksFromPlans(ctx, c.ID(), Params.QueryCoordCfg.ChannelTaskTimeout.GetAsDuration(time.Millisecond), plans)
+	return c.assignPolicy.AssignChannel(ctx, channels, replica)
 }
 
 func (c *ChannelChecker) createChannelReduceTasks(ctx context.Context, channels []*meta.DmChannel, replica *meta.Replica) []task.Task {
