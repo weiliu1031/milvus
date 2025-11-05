@@ -48,6 +48,7 @@ type SegmentChecker struct {
 	targetMgr       meta.TargetManagerInterface
 	nodeMgr         *session.NodeManager
 	getBalancerFunc GetBalancerFunc
+	assignPolicy    AssignPolicy
 }
 
 func NewSegmentChecker(
@@ -64,6 +65,7 @@ func NewSegmentChecker(
 		targetMgr:         targetMgr,
 		nodeMgr:           nodeMgr,
 		getBalancerFunc:   getBalancerFunc,
+		assignPolicy:      NewDefaultAssignPolicy(),
 	}
 }
 
@@ -421,14 +423,10 @@ func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []
 			continue
 		}
 
-		rwNodes := replica.GetChannelRWNodes(shard)
+		// Use AssignPolicy to get assignable nodes
+		rwNodes := c.assignPolicy.GetAssignableNodesForSegment(replica, shard, isLevel0, leader.ID)
 		if len(rwNodes) == 0 {
-			rwNodes = replica.GetRWNodes()
-		}
-
-		// L0 segment can only be assign to shard leader's node
-		if isLevel0 {
-			rwNodes = []int64{leader.ID}
+			continue
 		}
 
 		segmentInfos := lo.Map(segments, func(s *datapb.SegmentInfo, _ int) *meta.Segment {

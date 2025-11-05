@@ -35,7 +35,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-// TODO(sunby): have too much similar codes with SegmentChecker
 type ChannelChecker struct {
 	*checkerActivation
 	meta            *meta.Meta
@@ -43,6 +42,7 @@ type ChannelChecker struct {
 	targetMgr       meta.TargetManagerInterface
 	nodeMgr         *session.NodeManager
 	getBalancerFunc GetBalancerFunc
+	assignPolicy    AssignPolicy
 }
 
 func NewChannelChecker(
@@ -59,6 +59,7 @@ func NewChannelChecker(
 		targetMgr:         targetMgr,
 		nodeMgr:           nodeMgr,
 		getBalancerFunc:   getBalancerFunc,
+		assignPolicy:      NewDefaultAssignPolicy(),
 	}
 }
 
@@ -228,9 +229,10 @@ func (c *ChannelChecker) findRepeatedChannels(ctx context.Context, replicaID int
 func (c *ChannelChecker) createChannelLoadTask(ctx context.Context, channels []*meta.DmChannel, replica *meta.Replica) []task.Task {
 	plans := make([]balance.ChannelAssignPlan, 0)
 	for _, ch := range channels {
-		rwNodes := replica.GetChannelRWNodes(ch.GetChannelName())
+		// Use AssignPolicy to get assignable nodes
+		rwNodes := c.assignPolicy.GetAssignableNodesForChannel(replica, ch.GetChannelName())
 		if len(rwNodes) == 0 {
-			rwNodes = replica.GetRWNodes()
+			continue
 		}
 		plan := c.getBalancerFunc().AssignChannel(ctx, replica.GetCollectionID(), []*meta.DmChannel{ch}, rwNodes, true)
 		plans = append(plans, plan...)
