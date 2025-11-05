@@ -456,11 +456,17 @@ func (c *SegmentChecker) createSegmentLoadTasks(ctx context.Context, segments []
 }
 
 // assignSegmentsForRecovery implements a recovery-friendly segment assignment strategy.
-// It prioritizes recovery speed over load balance by:
-// 1. Assigning segments back to their historical nodes if available (利用可能的缓存)
-// 2. Using round-robin distribution for maximum parallelism when historical nodes unavailable
-// This strategy is optimized for node failure recovery scenarios where we want to restore
-// service as quickly as possible, leaving fine-grained balancing to the balance_checker.
+// It prioritizes recovery speed over load balance by using round-robin distribution to
+// maximize parallelism across all healthy nodes during node failure recovery scenarios.
+//
+// Unlike balance-first strategies that try to equalize scores/load, this approach:
+// 1. Distributes segments evenly across all available healthy nodes (round-robin)
+// 2. Maximizes parallel loading capacity by utilizing all nodes simultaneously
+// 3. Enables faster service recovery, with fine-grained balancing deferred to balance_checker
+//
+// This is optimal for scenarios like:
+// - Node restarts/failures where many segments need to be loaded quickly
+// - Avoiding concentration of load on already-busy nodes during recovery
 func (c *SegmentChecker) assignSegmentsForRecovery(ctx context.Context, replica *meta.Replica, segments []*meta.Segment, nodes []int64) []balance.SegmentAssignPlan {
 	if len(segments) == 0 || len(nodes) == 0 {
 		return nil
@@ -480,51 +486,19 @@ func (c *SegmentChecker) assignSegmentsForRecovery(ctx context.Context, replica 
 		return nil
 	}
 
-	// Build a set of healthy nodes for quick lookup
-	healthyNodeSet := make(map[int64]bool)
-	for _, nodeID := range healthyNodes {
-		healthyNodeSet[nodeID] = true
-	}
-
-	// Get historical distribution for this replica
-	// This helps us identify where segments were previously loaded
-	historicalDist := c.dist.SegmentDistManager.GetByFilter(
-		meta.WithCollectionID(replica.GetCollectionID()),
-		meta.WithReplica(replica))
-
-	// Build segment ID -> historical node mapping
-	segmentHistoricalNode := make(map[int64]int64)
-	for _, seg := range historicalDist {
-		// Keep the most recent location (last one wins)
-		segmentHistoricalNode[seg.GetID()] = seg.Node
-	}
+	// Sort segments by row count (descending) for better load distribution
+	// Larger segments are assigned first to avoid one node getting many large segments at the end
+	sortedSegments := make([]*meta.Segment, len(segments))
+	copy(sortedSegments, segments)
+	sort.Slice(sortedSegments, func(i, j int) bool {
+		return sortedSegments[i].GetNumOfRows() > sortedSegments[j].GetNumOfRows()
+	})
 
 	plans := make([]balance.SegmentAssignPlan, 0, len(segments))
-	roundRobinIndex := 0
 
-	for _, segment := range segments {
-		var targetNode int64
-
-		// Strategy 1: Try to assign back to historical node if it's healthy
-		if historicalNode, exists := segmentHistoricalNode[segment.GetID()]; exists {
-			if healthyNodeSet[historicalNode] {
-				targetNode = historicalNode
-				log.Debug("assigning segment back to historical node for fast recovery",
-					zap.Int64("segmentID", segment.GetID()),
-					zap.Int64("nodeID", targetNode),
-					zap.Int64("collectionID", replica.GetCollectionID()))
-			}
-		}
-
-		// Strategy 2: If no historical node or it's unavailable, use round-robin for parallelism
-		if targetNode == 0 {
-			targetNode = healthyNodes[roundRobinIndex%len(healthyNodes)]
-			roundRobinIndex++
-			log.Debug("assigning segment using round-robin for parallel recovery",
-				zap.Int64("segmentID", segment.GetID()),
-				zap.Int64("nodeID", targetNode),
-				zap.Int64("collectionID", replica.GetCollectionID()))
-		}
+	// Use round-robin distribution for maximum parallelism
+	for i, segment := range sortedSegments {
+		targetNode := healthyNodes[i%len(healthyNodes)]
 
 		plan := balance.SegmentAssignPlan{
 			Segment: segment,
