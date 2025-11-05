@@ -1014,6 +1014,10 @@ func (h *mockHandler) GenSnapshot(ctx context.Context, collectionID UniqueID) (*
 	}, nil
 }
 
+func (h *mockHandler) GetDeltaLogFromCompactTo(ctx context.Context, segmentID UniqueID) ([]*datapb.FieldBinlog, error) {
+	return nil, nil
+}
+
 func newMockHandlerWithMeta(meta *meta) *mockHandler {
 	return &mockHandler{
 		meta: meta,

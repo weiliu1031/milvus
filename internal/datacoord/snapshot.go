@@ -46,31 +46,13 @@ const (
 
 	// SnapshotManifestsSubPath is the subdirectory for manifest files
 	SnapshotManifestsSubPath = "manifests"
-
-	// SnapshotVersionHintFile is the filename for version hint file
-	SnapshotVersionHintFile = "version-hint.txt"
-
-	// ManifestListSchemaStr is the Avro schema string for ManifestListEntry
-	ManifestListSchemaStr = `{
-		"type": "array", "items": {
-			"type": "record",
-			"name": "ManifestListEntry",
-			"fields": [
-				{"name": "manifest_path", "type": "string"},
-				{"name": "manifest_length", "type": "long"}
-			]
-		}
-	}`
 )
 
 var (
 	// Cached Avro schemas for better performance
-	manifestSchemaOnce     sync.Once
-	manifestSchema         avro.Schema
-	manifestSchemaErr      error
-	manifestListSchemaOnce sync.Once
-	manifestListSchema     avro.Schema
-	manifestListSchemaErr  error
+	manifestSchemaOnce sync.Once
+	manifestSchema     avro.Schema
+	manifestSchemaErr  error
 )
 
 // getManifestSchema returns the cached manifest schema
@@ -79,14 +61,6 @@ func getManifestSchema() (avro.Schema, error) {
 		manifestSchema, manifestSchemaErr = avro.Parse(getProperAvroSchema())
 	})
 	return manifestSchema, manifestSchemaErr
-}
-
-// getManifestListSchema returns the cached manifest list schema
-func getManifestListSchema() (avro.Schema, error) {
-	manifestListSchemaOnce.Do(func() {
-		manifestListSchema, manifestListSchemaErr = avro.Parse(ManifestListSchemaStr)
-	})
-	return manifestListSchema, manifestListSchemaErr
 }
 
 // --- 1. Go Struct Definitions Based on Protobuf Messages ---
@@ -205,20 +179,12 @@ type AvroJsonKeyIndexEntry struct {
 	Stats   *AvroJsonKeyStats `avro:"stats"`
 }
 
-// ManifestListEntry is a single record written to a Manifest List File.
-// It points to a specific Manifest File.
-type ManifestListEntry struct {
-	ManifestPath   string `avro:"manifest_path"`
-	ManifestLength int64  `avro:"manifest_length"`
-	// More summary information can be added for query pruning, e.g., partition info.
-}
-
 // SnapshotMetadata is the structure that is ultimately written to metadata.json.
 type SnapshotMetadata struct {
 	SnapshotInfo *datapb.SnapshotInfo          `json:"snapshot-info"`
 	Collection   *datapb.CollectionDescription `json:"collection"`
 	Indexes      []*indexpb.IndexInfo          `json:"indexes"`
-	ManifestList string                        `json:"manifest-list"`
+	ManifestList []string                      `json:"manifest-list"`
 }
 
 // --- 3. Core Writer ---
@@ -230,31 +196,24 @@ snapshots/{collection_id}/
 ├── metadata/
 │   ├── 00001-{uuid}.json          # Snapshot version 1 metadata (JSON format)
 │   ├── 00002-{uuid}.json          # Snapshot version 2 metadata (JSON format)
-│   ├── ...
-│   └── version-hint.txt           # Points to the latest metadata file name
+│   └── ...
 │
 └── manifests/
-    ├── snap-{snapshot_id}-list-{uuid}.avro    # Manifest List for snapshot (Avro format)
     ├── data-file-manifest-{uuid}.avro         # Manifest File containing segment details (Avro format)
     └── ...
 
 Example paths:
 - s3://bucket/snapshots/12345/metadata/00001-a1b2c3d4.json
-- s3://bucket/snapshots/12345/metadata/version-hint.txt
-- s3://bucket/snapshots/12345/manifests/snap-1-list-e5f6g7h8.avro
 - s3://bucket/snapshots/12345/manifests/data-file-manifest-i9j0k1l2.avro
 
 File Format Details:
-- metadata/*.json: JSON format containing snapshot metadata, schema, and properties
-- version-hint.txt: Plain text file containing the filename of the latest metadata file
-- manifests/*-list-*.avro: Avro format containing list of manifest files with summary info
+- metadata/*.json: JSON format containing snapshot metadata, collection schema, indexes, and manifest file paths array
 - manifests/data-file-manifest-*.avro: Avro format containing detailed segment information
 
 Access Pattern:
-1. Read version-hint.txt to get the latest metadata filename
-2. Read the metadata JSON file to get snapshot info and manifest list path
-3. Read the manifest list Avro file to get manifest file paths (with pruning)
-4. Read relevant manifest Avro files to get segment file paths
+1. Find the metadata JSON file by snapshot ID (iterate through metadata files)
+2. Read the metadata JSON file to get snapshot info and manifest file paths
+3. Read manifest Avro files to get segment file paths
 */
 
 // SnapshotWriter is responsible for writing snapshots to S3.
@@ -295,35 +254,21 @@ func (w *SnapshotWriter) Save(ctx context.Context, snapshot *SnapshotData) (stri
 	writeUUID := uuid.New().String()
 
 	// Step 1: Write segment information to one or more Manifest files.
-	manifestFilePath, manifestFileLength, err := w.writeManifestFile(ctx, basePath, snapshotID, writeUUID, snapshot.Segments)
+	manifestFilePath, _, err := w.writeManifestFile(ctx, basePath, snapshotID, writeUUID, snapshot.Segments)
 	if err != nil {
 		return "", fmt.Errorf("failed to write manifest file: %w", err)
 	}
 	log.Info("Successfully wrote manifest file",
 		zap.String("manifestFilePath", manifestFilePath))
 
-	// Step 2: Create and write the Manifest List file, pointing to the file(s) created in Step 1.
-	manifestListPath, err := w.writeManifestList(ctx, basePath, snapshotID, writeUUID, manifestFilePath, manifestFileLength)
-	if err != nil {
-		return "", fmt.Errorf("failed to write manifest list: %w", err)
-	}
-	log.Info("Successfully wrote manifest list",
-		zap.String("manifestListPath", manifestListPath))
-
-	// Step 3: Create and write the core metadata.json file.
-	metadataFilePath, metadataFileName, err := w.writeMetadataFile(ctx, basePath, writeUUID, snapshot, manifestListPath)
+	// Step 2: Create and write the core metadata.json file with manifest paths.
+	manifestPaths := []string{manifestFilePath}
+	metadataFilePath, _, err := w.writeMetadataFile(ctx, basePath, writeUUID, snapshot, manifestPaths)
 	if err != nil {
 		return "", fmt.Errorf("failed to write metadata file: %w", err)
 	}
 	log.Info("Successfully wrote metadata file",
 		zap.String("metadataFilePath", metadataFilePath))
-
-	// Step 4: Atomically update the version-hint.txt file to point to the new metadata file.
-	if err := w.updateVersionHint(ctx, basePath, metadataFileName); err != nil {
-		return "", fmt.Errorf("failed to update version hint: %w", err)
-	}
-	log.Info("Successfully updated version hint",
-		zap.String("metadataFileName", metadataFileName))
 
 	return metadataFilePath, nil
 }
@@ -421,38 +366,6 @@ func (w *SnapshotWriter) writeManifestFile(ctx context.Context, basePath string,
 	return manifestFilePath, int64(len(binaryData)), nil
 }
 
-// writeManifestList writes a Manifest List file pointing to the manifest files.
-func (w *SnapshotWriter) writeManifestList(ctx context.Context, basePath string, snapshotID int64, writeUUID, manifestPath string, manifestLength int64) (string, error) {
-	// Create ManifestListEntry
-	entry := ManifestListEntry{
-		ManifestPath:   manifestPath,
-		ManifestLength: manifestLength,
-	}
-
-	// Use the cached Avro schema
-	avroSchema, err := getManifestListSchema()
-	if err != nil {
-		return "", fmt.Errorf("failed to get manifest list schema: %w", err)
-	}
-
-	// Serialize to binary - wrap entry in array
-	binaryData, err := avro.Marshal(avroSchema, []ManifestListEntry{entry})
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize manifest list entry to avro binary: %w", err)
-	}
-
-	// Generate file path
-	manifestListFileName := fmt.Sprintf("snap-%d-list-%s.avro", snapshotID, writeUUID)
-	manifestListPath := path.Join(basePath, SnapshotManifestsSubPath, manifestListFileName)
-
-	// Write to storage
-	if err := w.chunkManager.Write(ctx, manifestListPath, binaryData); err != nil {
-		return "", fmt.Errorf("failed to write manifest list file to storage: %w", err)
-	}
-
-	return manifestListPath, nil
-}
-
 // getNextVersion gets the next version number for a snapshot metadata file.
 func (w *SnapshotWriter) getNextVersion(ctx context.Context, basePath string) (int, error) {
 	metadataDir := path.Join(basePath, SnapshotMetadataSubPath)
@@ -484,13 +397,13 @@ func (w *SnapshotWriter) getNextVersion(ctx context.Context, basePath string) (i
 
 // writeMetadataFile writes the main metadata.json file.
 // Returns the full file path and the file name.
-func (w *SnapshotWriter) writeMetadataFile(ctx context.Context, basePath string, writeUUID string, snapshot *SnapshotData, manifestListPath string) (string, string, error) {
+func (w *SnapshotWriter) writeMetadataFile(ctx context.Context, basePath string, writeUUID string, snapshot *SnapshotData, manifestPaths []string) (string, string, error) {
 	// Create metadata structure - save complete SnapshotInfo and Collection
 	metadata := &SnapshotMetadata{
 		SnapshotInfo: snapshot.SnapshotInfo,
 		Collection:   snapshot.Collection,
 		Indexes:      snapshot.Indexes,
-		ManifestList: manifestListPath,
+		ManifestList: manifestPaths,
 	}
 
 	// Serialize to JSON
@@ -517,26 +430,12 @@ func (w *SnapshotWriter) writeMetadataFile(ctx context.Context, basePath string,
 	return metadataFilePath, metadataFileName, nil
 }
 
-// updateVersionHint atomically updates the version-hint.txt file.
-func (w *SnapshotWriter) updateVersionHint(ctx context.Context, basePath string, metadataFileName string) error {
-	versionHintPath := path.Join(basePath, SnapshotMetadataSubPath, SnapshotVersionHintFile)
-	versionHintData := []byte(metadataFileName)
-
-	if err := w.chunkManager.Write(ctx, versionHintPath, versionHintData); err != nil {
-		return fmt.Errorf("failed to write version hint file: %w", err)
-	}
-
-	return nil
-}
-
 // Drop removes a specific snapshot by collection ID and snapshot ID.
 // This function performs the following steps:
 // 1. Find and read the metadata file for the specified snapshot
-// 2. Read the manifest list to get all manifest files
+// 2. Get all manifest file paths from metadata
 // 3. Remove all manifest files referenced by the snapshot
-// 4. Remove the manifest list file
-// 5. Remove the metadata file
-// 6. Update version-hint.txt if the deleted snapshot was the latest
+// 4. Remove the metadata file
 func (w *SnapshotWriter) Drop(ctx context.Context, collectionID int64, snapshotID int64) error {
 	// Validate input parameters
 	if collectionID <= 0 {
@@ -554,52 +453,28 @@ func (w *SnapshotWriter) Drop(ctx context.Context, collectionID int64, snapshotI
 		return fmt.Errorf("failed to find metadata file for snapshot %d: %w", snapshotID, err)
 	}
 
-	// Step 2: Read metadata file to get manifest list path
+	// Step 2: Read metadata file to get manifest paths
 	metadata, err := w.readMetadataFile(ctx, metadataFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to read metadata file: %w", err)
 	}
 
-	// Step 3: Read manifest list to get all manifest files
-	manifestEntries, err := w.readManifestList(ctx, metadata.ManifestList)
-	if err != nil {
-		return fmt.Errorf("failed to read manifest list: %w", err)
-	}
-
-	// Step 4: Remove all manifest files
-	var manifestPaths []string
-	for _, entry := range manifestEntries {
-		manifestPaths = append(manifestPaths, entry.ManifestPath)
-	}
-
-	if len(manifestPaths) > 0 {
-		if err := w.chunkManager.MultiRemove(ctx, manifestPaths); err != nil {
+	// Step 3: Remove all manifest files
+	if len(metadata.ManifestList) > 0 {
+		if err := w.chunkManager.MultiRemove(ctx, metadata.ManifestList); err != nil {
 			return fmt.Errorf("failed to remove manifest files: %w", err)
 		}
 		log.Info("Successfully removed manifest files",
-			zap.Int("count", len(manifestPaths)),
+			zap.Int("count", len(metadata.ManifestList)),
 			zap.Int64("snapshotID", snapshotID))
 	}
 
-	// Step 5: Remove manifest list file
-	if err := w.chunkManager.Remove(ctx, metadata.ManifestList); err != nil {
-		return fmt.Errorf("failed to remove manifest list file: %w", err)
-	}
-	log.Info("Successfully removed manifest list file",
-		zap.String("manifestListPath", metadata.ManifestList))
-
-	// Step 6: Remove metadata file
+	// Step 4: Remove metadata file
 	if err := w.chunkManager.Remove(ctx, metadataFilePath); err != nil {
 		return fmt.Errorf("failed to remove metadata file: %w", err)
 	}
 	log.Info("Successfully removed metadata file",
 		zap.String("metadataFilePath", metadataFilePath))
-
-	// Step 7: Check if we need to update version-hint.txt
-	// If the deleted snapshot was the latest, we need to find the next latest snapshot
-	if err := w.updateVersionHintAfterDrop(ctx, basePath, snapshotID); err != nil {
-		return fmt.Errorf("failed to update version hint after drop: %w", err)
-	}
 
 	log.Info("Successfully dropped snapshot",
 		zap.Int64("snapshotID", snapshotID),
@@ -661,127 +536,6 @@ func (w *SnapshotWriter) readMetadataFile(ctx context.Context, filePath string) 
 	return &metadata, nil
 }
 
-// readManifestList reads and parses a manifest list Avro file.
-func (w *SnapshotWriter) readManifestList(ctx context.Context, filePath string) ([]ManifestListEntry, error) {
-	// Read file content
-	data, err := w.chunkManager.Read(ctx, filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest list file: %w", err)
-	}
-
-	// Add debug logging
-	log.Ctx(ctx).Info("Reading manifest list file", zap.String("filePath", filePath), zap.Int("dataLength", len(data)))
-
-	// Use the cached Avro schema
-	avroSchema, err := getManifestListSchema()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get manifest list schema: %w", err)
-	}
-
-	// Parse Avro data
-	var entries []ManifestListEntry
-	if err := avro.Unmarshal(avroSchema, data, &entries); err != nil {
-		// Add more detailed error information
-		return nil, fmt.Errorf("failed to decode avro record from %s (data length: %d): %w", filePath, len(data), err)
-	}
-
-	log.Ctx(ctx).Info("Successfully parsed manifest list entries", zap.Int("entryCount", len(entries)), zap.String("filePath", filePath))
-	return entries, nil
-}
-
-// updateVersionHintAfterDrop updates version-hint.txt after dropping a snapshot.
-// If the dropped snapshot was the latest, it finds the next latest snapshot and updates the hint.
-func (w *SnapshotWriter) updateVersionHintAfterDrop(ctx context.Context, basePath string, droppedSnapshotID int64) error {
-	versionHintPath := path.Join(basePath, SnapshotMetadataSubPath, SnapshotVersionHintFile)
-
-	// Read current version hint
-	currentHintData, err := w.chunkManager.Read(ctx, versionHintPath)
-	if err != nil {
-		// If version hint doesn't exist, nothing to update
-		return nil
-	}
-
-	currentMetadataFileName := strings.TrimSpace(string(currentHintData))
-	if currentMetadataFileName == "" {
-		return nil
-	}
-
-	// Read the current metadata file to check if it's the dropped snapshot
-	currentMetadataPath := path.Join(basePath, SnapshotMetadataSubPath, currentMetadataFileName)
-	currentMetadata, err := w.readMetadataFile(ctx, currentMetadataPath)
-	if err != nil {
-		// If we can't read the current metadata, try to find the latest valid one
-		return w.findAndUpdateLatestSnapshot(ctx, basePath)
-	}
-
-	// If the current snapshot is not the dropped one, no need to update
-	if currentMetadata.SnapshotInfo.GetId() != droppedSnapshotID {
-		return nil
-	}
-
-	// The dropped snapshot was the latest, find the next latest
-	return w.findAndUpdateLatestSnapshot(ctx, basePath)
-}
-
-// findAndUpdateLatestSnapshot finds the latest remaining snapshot and updates version-hint.txt.
-func (w *SnapshotWriter) findAndUpdateLatestSnapshot(ctx context.Context, basePath string) error {
-	metadataDir := path.Join(basePath, SnapshotMetadataSubPath)
-
-	// List all metadata files
-	files, _, err := storage.ListAllChunkWithPrefix(ctx, w.chunkManager, metadataDir, false)
-	if err != nil {
-		return fmt.Errorf("failed to list metadata files: %w", err)
-	}
-
-	var latestSnapshot *SnapshotMetadata
-	var latestMetadataFileName string
-
-	// Find the latest snapshot by timestamp
-	for _, file := range files {
-		if !strings.HasSuffix(file, ".json") {
-			continue
-		}
-
-		// Read and parse metadata file
-		metadata, err := w.readMetadataFile(ctx, file)
-		if err != nil {
-			log.Warn("Failed to parse metadata file, skipping",
-				zap.String("file", file),
-				zap.Error(err))
-			continue
-		}
-
-		if latestSnapshot == nil || metadata.SnapshotInfo.GetCreateTs() > latestSnapshot.SnapshotInfo.GetCreateTs() {
-			latestSnapshot = metadata
-			latestMetadataFileName = path.Base(file)
-		}
-	}
-
-	// Update version hint with the latest snapshot
-	if latestSnapshot != nil {
-		versionHintPath := path.Join(basePath, SnapshotMetadataSubPath, SnapshotVersionHintFile)
-		versionHintData := []byte(latestMetadataFileName)
-
-		if err := w.chunkManager.Write(ctx, versionHintPath, versionHintData); err != nil {
-			return fmt.Errorf("failed to update version hint file: %w", err)
-		}
-
-		log.Info("Updated version hint to latest snapshot",
-			zap.String("latestMetadataFileName", latestMetadataFileName),
-			zap.Int64("latestSnapshotID", latestSnapshot.SnapshotInfo.GetId()))
-	} else {
-		// No snapshots left, remove version hint file
-		versionHintPath := path.Join(basePath, SnapshotMetadataSubPath, SnapshotVersionHintFile)
-		if err := w.chunkManager.Remove(ctx, versionHintPath); err != nil {
-			log.Info("Warning: failed to remove version hint file",
-				zap.Error(err))
-		}
-		log.Info("No snapshots remaining, removed version hint file")
-	}
-
-	return nil
-}
-
 // --- 4. Snapshot Reader ---
 
 // SnapshotReader is responsible for reading snapshots from S3.
@@ -797,34 +551,21 @@ func NewSnapshotReader(cm storage.ChunkManager) *SnapshotReader {
 }
 
 // ReadSnapshot reads a complete snapshot by collection ID and snapshot ID.
-// If snapshotID is 0, it will read the latest snapshot.
 func (r *SnapshotReader) ReadSnapshot(ctx context.Context, collectionID int64, snapshotID int64, includeSegments bool) (*SnapshotData, error) {
 	// Validate input parameters
 	if collectionID <= 0 {
 		return nil, fmt.Errorf("invalid collection ID: %d", collectionID)
 	}
-	if snapshotID < 0 {
-		return nil, fmt.Errorf("invalid snapshot ID: %d (must be >= 0)", snapshotID)
+	if snapshotID <= 0 {
+		return nil, fmt.Errorf("invalid snapshot ID: %d (must be > 0)", snapshotID)
 	}
 
 	basePath := path.Join(SnapshotRootPath, strconv.FormatInt(collectionID, 10))
 
-	// Step 1: Get metadata file path
-	var metadataFilePath string
-	var err error
-
-	if snapshotID == 0 {
-		// Read latest snapshot from version-hint.txt
-		metadataFilePath, err = r.getLatestMetadataFile(ctx, basePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get latest metadata file: %w", err)
-		}
-	} else {
-		// Find metadata file for specific snapshot ID
-		metadataFilePath, err = r.findMetadataFileBySnapshotID(ctx, basePath, snapshotID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find metadata file for snapshot %d: %w", snapshotID, err)
-		}
+	// Step 1: Find metadata file for specific snapshot ID
+	metadataFilePath, err := r.findMetadataFileBySnapshotID(ctx, basePath, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find metadata file for snapshot %d: %w", snapshotID, err)
 	}
 
 	// Step 2: Read metadata file
@@ -833,25 +574,19 @@ func (r *SnapshotReader) ReadSnapshot(ctx context.Context, collectionID int64, s
 		return nil, fmt.Errorf("failed to read metadata file: %w", err)
 	}
 
-	// Step 3: Read manifest list
-	manifestEntries, err := r.readManifestList(ctx, metadata.ManifestList)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest list: %w", err)
-	}
-
-	// Step 4: Read all manifest files to get segment information
+	// Step 3: Read all manifest files to get segment information
 	var allSegments []*datapb.SegmentDescription
 	if includeSegments {
-		for _, manifestEntry := range manifestEntries {
-			segments, err := r.readManifestFile(ctx, manifestEntry.ManifestPath)
+		for _, manifestPath := range metadata.ManifestList {
+			segments, err := r.readManifestFile(ctx, manifestPath)
 			if err != nil {
-				return nil, fmt.Errorf("failed to read manifest file %s: %w", manifestEntry.ManifestPath, err)
+				return nil, fmt.Errorf("failed to read manifest file %s: %w", manifestPath, err)
 			}
 			allSegments = append(allSegments, segments...)
 		}
 	}
 
-	// Step 5: Build SnapshotData - use complete SnapshotInfo and Collection from metadata
+	// Step 4: Build SnapshotData - use complete SnapshotInfo and Collection from metadata
 	snapshotData := &SnapshotData{
 		SnapshotInfo: metadata.SnapshotInfo,
 		Collection:   metadata.Collection,
@@ -860,25 +595,6 @@ func (r *SnapshotReader) ReadSnapshot(ctx context.Context, collectionID int64, s
 	}
 
 	return snapshotData, nil
-}
-
-// getLatestMetadataFile reads version-hint.txt to get the latest metadata file path.
-func (r *SnapshotReader) getLatestMetadataFile(ctx context.Context, basePath string) (string, error) {
-	versionHintPath := path.Join(basePath, SnapshotMetadataSubPath, SnapshotVersionHintFile)
-
-	// Read version hint file
-	data, err := r.chunkManager.Read(ctx, versionHintPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read version hint file: %w", err)
-	}
-
-	// Extract metadata filename
-	metadataFileName := strings.TrimSpace(string(data))
-	if metadataFileName == "" {
-		return "", fmt.Errorf("version hint file is empty")
-	}
-
-	return path.Join(basePath, SnapshotMetadataSubPath, metadataFileName), nil
 }
 
 // findMetadataFileBySnapshotID finds metadata file for a specific snapshot ID.
@@ -929,30 +645,6 @@ func (r *SnapshotReader) readMetadataFile(ctx context.Context, filePath string) 
 	}
 
 	return &metadata, nil
-}
-
-// readManifestList reads and parses a manifest list Avro file.
-func (r *SnapshotReader) readManifestList(ctx context.Context, filePath string) ([]ManifestListEntry, error) {
-	// Read file content
-	data, err := r.chunkManager.Read(ctx, filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest list file: %w", err)
-	}
-
-	// Use the cached Avro schema
-	avroSchema, err := getManifestListSchema()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get manifest list schema: %w", err)
-	}
-
-	// Parse Avro data
-	var entries []ManifestListEntry
-	err = avro.Unmarshal(avroSchema, data, &entries)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse avro data: %w", err)
-	}
-
-	return entries, nil
 }
 
 // readManifestFile reads and parses a manifest Avro file.

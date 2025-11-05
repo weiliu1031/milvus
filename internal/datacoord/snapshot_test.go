@@ -228,7 +228,7 @@ func TestSnapshotWriter_Save_RealAvro(t *testing.T) {
 	assert.NotEmpty(t, metadataPath)
 	assert.Contains(t, metadataPath, "snapshots/100/metadata/")
 	assert.Contains(t, metadataPath, ".json")
-	assert.Equal(t, 4, writeCallCount) // manifest, manifest-list, metadata, version-hint
+	assert.Equal(t, 2, writeCallCount) // manifest, metadata
 }
 
 func TestSnapshotWriter_Save_StorageError(t *testing.T) {
@@ -263,7 +263,7 @@ func TestSnapshotWriter_Save_EmptySegments(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, metadataPath)
-	assert.Equal(t, 4, writeCallCount) // Must write 4 files even without segments
+	assert.Equal(t, 2, writeCallCount) // Must write 2 files even without segments
 }
 
 func TestSnapshotWriter_Drop_Success(t *testing.T) {
@@ -283,7 +283,7 @@ func TestSnapshotWriter_Drop_Success(t *testing.T) {
 			},
 		},
 		Indexes:      []*indexpb.IndexInfo{},
-		ManifestList: "manifest-list-path",
+		ManifestList: []string{"manifest1.avro"},
 	}
 	metadataJSON, _ := json.Marshal(metadata)
 
@@ -299,23 +299,12 @@ func TestSnapshotWriter_Drop_Success(t *testing.T) {
 		if filePath == "snapshots/100/metadata/00001-uuid.json" {
 			return metadataJSON, nil
 		}
-
-		if filePath == "manifest-list-path" {
-			// Return valid Avro serialized data for manifest list
-			manifestEntries := []ManifestListEntry{
-				{
-					ManifestPath:   "manifest1.avro",
-					ManifestLength: 1024,
-				},
-			}
-			avroSchema := `{"type":"array","items":{"type":"record","name":"ManifestListEntry","fields":[{"name":"manifest_path","type":"string"},{"name":"manifest_length","type":"long"}]}}`
-			schema, _ := avro.Parse(avroSchema)
-			data, _ := avro.Marshal(schema, manifestEntries)
-			return data, nil
-		}
 		return []byte("mock-data"), nil
 	}).Build()
 	defer mockRead.UnPatch()
+
+	mockMultiRemove := mockey.Mock((*storage.LocalChunkManager).MultiRemove).Return(nil).Build()
+	defer mockMultiRemove.UnPatch()
 
 	mockRemove := mockey.Mock((*storage.LocalChunkManager).Remove).Return(nil).Build()
 	defer mockRemove.UnPatch()
@@ -360,17 +349,9 @@ func TestSnapshotReader_ReadSnapshot_LatestSnapshot_Success(t *testing.T) {
 			},
 		},
 		Indexes:      []*indexpb.IndexInfo{},
-		ManifestList: "manifest-list-path",
+		ManifestList: []string{"manifest1.avro"},
 	}
 	metadataJSON, _ := json.Marshal(metadata)
-
-	// Mock manifest list entries
-	manifestListEntries := []ManifestListEntry{
-		{
-			ManifestPath:   "manifest1.avro",
-			ManifestLength: 1024,
-		},
-	}
 
 	// Generate valid manifest entries with all required fields including new ones
 	manifestEntries := []ManifestEntry{
@@ -396,25 +377,21 @@ func TestSnapshotReader_ReadSnapshot_LatestSnapshot_Success(t *testing.T) {
 		},
 	}
 
-	// Pre-generate valid Avro data for manifest list
-	manifestListSchema := `{"type":"array","items":{"type":"record","name":"ManifestListEntry","fields":[{"name":"manifest_path","type":"string"},{"name":"manifest_length","type":"long"}]}}`
-	listSchema, _ := avro.Parse(manifestListSchema)
-	validManifestListData, _ := avro.Marshal(listSchema, manifestListEntries)
-
 	// Pre-generate valid Avro data for manifest using the real schema
 	manifestSchema, _ := getManifestSchema()
 	validManifestData, _ := avro.Marshal(manifestSchema, manifestEntries)
 
 	// Mock file operations
+	mockList := mockey.Mock(storage.ListAllChunkWithPrefix).Return(
+		[]string{"snapshots/100/metadata/00001-uuid.json"},
+		[]time.Time{},
+		nil,
+	).Build()
+	defer mockList.UnPatch()
+
 	mockRead := mockey.Mock((*storage.LocalChunkManager).Read).To(func(ctx context.Context, filePath string) ([]byte, error) {
-		if filePath == "snapshots/100/metadata/version-hint.txt" {
-			return []byte("00001-uuid.json"), nil
-		}
 		if filePath == "snapshots/100/metadata/00001-uuid.json" {
 			return metadataJSON, nil
-		}
-		if filePath == "manifest-list-path" {
-			return validManifestListData, nil
 		}
 		if filePath == "manifest1.avro" {
 			return validManifestData, nil
@@ -423,7 +400,7 @@ func TestSnapshotReader_ReadSnapshot_LatestSnapshot_Success(t *testing.T) {
 	}).Build()
 	defer mockRead.UnPatch()
 
-	snapshot, err := reader.ReadSnapshot(context.Background(), 100, 0, true)
+	snapshot, err := reader.ReadSnapshot(context.Background(), 100, 1, true)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, snapshot)
@@ -439,13 +416,12 @@ func TestSnapshotReader_ReadSnapshot_SnapshotNotFound(t *testing.T) {
 	cm := &storage.LocalChunkManager{}
 	reader := NewSnapshotReader(cm)
 
-	mockRead := mockey.Mock((*storage.LocalChunkManager).Read).To(func(ctx context.Context, filePath string) ([]byte, error) {
-		if filePath == "snapshots/100/metadata/version-hint.txt" {
-			return []byte("00001-uuid.json"), nil
-		}
-		return nil, errors.New("file not found")
-	}).Build()
-	defer mockRead.UnPatch()
+	mockList := mockey.Mock(storage.ListAllChunkWithPrefix).Return(
+		[]string{},
+		[]time.Time{},
+		nil,
+	).Build()
+	defer mockList.UnPatch()
 
 	_, err := reader.ReadSnapshot(context.Background(), 100, 1, false)
 
@@ -466,7 +442,7 @@ func TestSnapshotReader_ListSnapshots_Success(t *testing.T) {
 		},
 		Collection:   &datapb.CollectionDescription{},
 		Indexes:      []*indexpb.IndexInfo{},
-		ManifestList: "",
+		ManifestList: []string{},
 	}
 	metadata1JSON, _ := json.Marshal(metadata1)
 
@@ -479,7 +455,7 @@ func TestSnapshotReader_ListSnapshots_Success(t *testing.T) {
 		},
 		Collection:   &datapb.CollectionDescription{},
 		Indexes:      []*indexpb.IndexInfo{},
-		ManifestList: "",
+		ManifestList: []string{},
 	}
 	metadata2JSON, _ := json.Marshal(metadata2)
 
@@ -607,23 +583,9 @@ func TestIndexFilePathInfo_RoundtripConversion(t *testing.T) {
 // =========================== Integration Tests ===========================
 
 func TestSnapshotWriter_ManifestList_Roundtrip(t *testing.T) {
-	// Use real ChunkManager
-	tempDir := t.TempDir()
-	cm := storage.NewLocalChunkManager(objectstorage.RootPath(tempDir))
-	writer := NewSnapshotWriter(cm)
-
-	// Write real manifest list
-	manifestPath := "test-manifest.avro"
-	manifestLength := int64(1024)
-	listPath, err := writer.writeManifestList(context.Background(), tempDir, 1, "uuid", manifestPath, manifestLength)
-	assert.NoError(t, err)
-
-	// Read and verify
-	entries, err := writer.readManifestList(context.Background(), listPath)
-	assert.NoError(t, err)
-	assert.Len(t, entries, 1)
-	assert.Equal(t, manifestPath, entries[0].ManifestPath)
-	assert.Equal(t, manifestLength, entries[0].ManifestLength)
+	// This test is no longer relevant since we removed the manifest list layer
+	// Manifest paths are now stored directly in metadata.json
+	t.Skip("Manifest list layer has been removed - manifest paths are now stored directly in metadata.json")
 }
 
 func TestSnapshot_CompleteWorkflow(t *testing.T) {

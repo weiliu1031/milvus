@@ -346,6 +346,65 @@ func (_c *NMockHandler_GetDataVChanPositions_Call) RunAndReturn(run func(RWChann
 	return _c
 }
 
+// GetDeltaLogFromCompactTo provides a mock function with given fields: ctx, segmentID
+func (_m *NMockHandler) GetDeltaLogFromCompactTo(ctx context.Context, segmentID int64) ([]*datapb.FieldBinlog, error) {
+	ret := _m.Called(ctx, segmentID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDeltaLogFromCompactTo")
+	}
+
+	var r0 []*datapb.FieldBinlog
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, int64) ([]*datapb.FieldBinlog, error)); ok {
+		return rf(ctx, segmentID)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, int64) []*datapb.FieldBinlog); ok {
+		r0 = rf(ctx, segmentID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*datapb.FieldBinlog)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = rf(ctx, segmentID)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// NMockHandler_GetDeltaLogFromCompactTo_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDeltaLogFromCompactTo'
+type NMockHandler_GetDeltaLogFromCompactTo_Call struct {
+	*mock.Call
+}
+
+// GetDeltaLogFromCompactTo is a helper method to define mock.On call
+//   - ctx context.Context
+//   - segmentID int64
+func (_e *NMockHandler_Expecter) GetDeltaLogFromCompactTo(ctx interface{}, segmentID interface{}) *NMockHandler_GetDeltaLogFromCompactTo_Call {
+	return &NMockHandler_GetDeltaLogFromCompactTo_Call{Call: _e.mock.On("GetDeltaLogFromCompactTo", ctx, segmentID)}
+}
+
+func (_c *NMockHandler_GetDeltaLogFromCompactTo_Call) Run(run func(ctx context.Context, segmentID int64)) *NMockHandler_GetDeltaLogFromCompactTo_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(int64))
+	})
+	return _c
+}
+
+func (_c *NMockHandler_GetDeltaLogFromCompactTo_Call) Return(_a0 []*datapb.FieldBinlog, _a1 error) *NMockHandler_GetDeltaLogFromCompactTo_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *NMockHandler_GetDeltaLogFromCompactTo_Call) RunAndReturn(run func(context.Context, int64) ([]*datapb.FieldBinlog, error)) *NMockHandler_GetDeltaLogFromCompactTo_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetQueryVChanPositions provides a mock function with given fields: ch, partitionIDs
 func (_m *NMockHandler) GetQueryVChanPositions(ch RWChannel, partitionIDs ...int64) *datapb.VchannelInfo {
 	_va := make([]interface{}, len(partitionIDs))
@@ -472,8 +531,7 @@ func (_c *NMockHandler_ListLoadedSegments_Call) RunAndReturn(run func(context.Co
 func NewNMockHandler(t interface {
 	mock.TestingT
 	Cleanup(func())
-},
-) *NMockHandler {
+}) *NMockHandler {
 	mock := &NMockHandler{}
 	mock.Mock.Test(t)
 
