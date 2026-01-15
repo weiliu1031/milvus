@@ -1167,6 +1167,7 @@ func (sm *snapshotManager) buildRestoreInfo(job CopySegmentJob) *datapb.RestoreS
 		Progress:     sm.calculateProgress(job),
 		Reason:       job.GetReason(),
 		TimeCost:     sm.calculateTimeCost(job),
+		StartTime:    job.GetStartTs() / 1e6, // Convert nanoseconds to milliseconds
 	}
 }
 
