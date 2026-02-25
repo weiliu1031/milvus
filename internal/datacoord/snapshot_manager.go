@@ -593,6 +593,17 @@ func (sm *snapshotManager) RestoreSnapshot(
 	}
 	defer restoreBroadcaster.Close()
 
+	// Validate resources under the snapshot name lock.
+	// The broadcaster holds ExclusiveSnapshotNameResourceKey, so DropSnapshot is blocked.
+	// This catches the case where DropSnapshot deleted the snapshot during Phase 1-4.
+	if err := validateResources(ctx, collectionID, snapshotData); err != nil {
+		log.Error("resource validation failed after acquiring lock, rolling back", zap.Error(err))
+		if rollbackErr := rollback(ctx, targetDbName, targetCollectionName); rollbackErr != nil {
+			log.Error("rollback failed", zap.Error(rollbackErr))
+		}
+		return 0, fmt.Errorf("resource validation failed: %w", err)
+	}
+
 	msg := message.NewRestoreSnapshotMessageBuilderV2().
 		WithHeader(&message.RestoreSnapshotMessageHeader{
 			SnapshotName: snapshotName,

@@ -99,9 +99,16 @@ func (s *Server) startBroadcastForRestoreSnapshot(ctx context.Context, collectio
 }
 
 // validateRestoreSnapshotResources validates that all required resources exist for restore.
-// This includes collection, partitions, and indexes.
+// This includes source snapshot existence, target collection partitions, and indexes.
 func (s *Server) validateRestoreSnapshotResources(ctx context.Context, collectionID int64, snapshotData *SnapshotData) error {
 	log := log.Ctx(ctx).With(zap.Int64("collectionID", collectionID))
+
+	// Validate source snapshot still exists
+	snapshotName := snapshotData.SnapshotInfo.GetName()
+	if _, err := s.snapshotManager.GetSnapshot(ctx, snapshotName); err != nil {
+		return fmt.Errorf("snapshot %s no longer exists: %w", snapshotName, err)
+	}
+	log.Info("snapshot validated", zap.String("snapshotName", snapshotName))
 
 	// Validate partitions exist
 	partitionsResp, err := s.broker.ShowPartitions(ctx, collectionID)
@@ -120,6 +127,24 @@ func (s *Server) validateRestoreSnapshotResources(ctx context.Context, collectio
 		}
 	}
 	log.Info("partitions validated", zap.Int("count", len(existingPartitions)))
+
+	// Validate indexes exist.
+	// Hoist GetIndexesForCollection outside the loop since collectionID is invariant.
+	indexes := s.meta.indexMeta.GetIndexesForCollection(collectionID, "")
+	for _, indexInfo := range snapshotData.Indexes {
+		indexFound := false
+		for _, idx := range indexes {
+			if idx.FieldID == indexInfo.GetFieldID() && idx.IndexName == indexInfo.GetIndexName() {
+				indexFound = true
+				break
+			}
+		}
+		if !indexFound {
+			return fmt.Errorf("index %s for field %d does not exist in collection %d",
+				indexInfo.GetIndexName(), indexInfo.GetFieldID(), collectionID)
+		}
+	}
+	log.Info("indexes validated", zap.Int("count", len(snapshotData.Indexes)))
 
 	return nil
 }
@@ -168,10 +193,9 @@ func (s *Server) startBroadcastRestoreSnapshot(
 	log.Info("partitions validated", zap.Int("count", len(existingPartitions)))
 
 	// ========== Validate Indexes Exist ==========
+	// Hoist GetIndexesForCollection outside the loop since collectionID is invariant.
+	indexes := s.meta.indexMeta.GetIndexesForCollection(collectionID, "")
 	for _, indexInfo := range snapshotData.Indexes {
-		// Check if index exists for this field
-		indexes := s.meta.indexMeta.GetIndexesForCollection(collectionID, "")
-
 		indexFound := false
 		for _, idx := range indexes {
 			if idx.FieldID == indexInfo.GetFieldID() && idx.IndexName == indexInfo.GetIndexName() {
