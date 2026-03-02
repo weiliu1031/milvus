@@ -385,7 +385,7 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(const std::string& manifest_path) {
                                 properties,
                                 cg_index,
                                 field_ids,
-                                /*eager_load=*/true,
+                                /*eager_load=*/false,
                                 /*op_ctx=*/nullptr);
             });
         load_group_futures.emplace_back(std::move(future));
