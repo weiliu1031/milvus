@@ -445,7 +445,8 @@ ChunkedSegmentSealedImpl::SynthesizeExternalSystemFields() {
         timestamps.data(), num_rows, min_slice_length);
     index.set_length_meta(std::move(meta));
     index.build_with(timestamps.data(), num_rows);
-    insert_record_.init_timestamps(timestamps, index);
+    insert_record_.init_timestamps_from_owned(std::move(timestamps),
+                                               std::move(index));
 
     // 4. Row count + readiness
     {
