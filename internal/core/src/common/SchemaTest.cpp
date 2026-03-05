@@ -420,4 +420,3 @@ TEST_F(SchemaTest, WarmupPolicyFallbackToCollectionLevel) {
     EXPECT_TRUE(has_setting2);
     EXPECT_EQ(policy2, "disable");
 }
-
