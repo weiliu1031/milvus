@@ -394,6 +394,11 @@ class Schema {
     const ArrowSchemaPtr
     ConvertToArrowSchema() const;
 
+    // Convert to Loon Arrow schema: same as ConvertToArrowSchema() but
+    // uses field ID strings as column names (Loon storage convention).
+    const ArrowSchemaPtr
+    ConvertToLoonArrowSchema() const;
+
     // Build an Arrow schema suitable for reading data from storage.
     // Normal collections: same as ConvertToArrowSchema().
     // External collections: filtered to external fields only, using
