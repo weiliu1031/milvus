@@ -975,7 +975,7 @@ func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 		}
 
 		binlogs := segment.GetBinlogs()
-		if len(binlogs) == 0 && segment.GetLevel() != datapb.SegmentLevel_L0 {
+		if len(binlogs) == 0 && segment.GetLevel() != datapb.SegmentLevel_L0 && segment.GetManifestPath() == "" {
 			continue
 		}
 		rowCount := segmentutil.CalcRowCountFromBinLog(segment.SegmentInfo)
@@ -989,14 +989,15 @@ func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 		}
 
 		segmentInfos = append(segmentInfos, &datapb.SegmentInfo{
-			ID:            segment.ID,
-			PartitionID:   segment.PartitionID,
-			CollectionID:  segment.CollectionID,
-			InsertChannel: segment.InsertChannel,
-			NumOfRows:     rowCount,
-			Level:         segment.GetLevel(),
-			IsSorted:      segment.GetIsSorted(),
-			ManifestPath:  segment.GetManifestPath(),
+			ID:                  segment.ID,
+			PartitionID:         segment.PartitionID,
+			CollectionID:        segment.CollectionID,
+			InsertChannel:       segment.InsertChannel,
+			NumOfRows:           rowCount,
+			Level:               segment.GetLevel(),
+			IsSorted:            segment.GetIsSorted(),
+			IsSortedByNamespace: segment.GetIsSortedByNamespace(),
+			ManifestPath:        segment.GetManifestPath(),
 		})
 	}
 
