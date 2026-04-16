@@ -95,6 +95,18 @@ func ParseExternalSpec(specStr string) (*ExternalSpec, error) {
 	return &spec, nil
 }
 
+// BuildExtfsOverrides returns the extfs map with the given prefix prepended to each key.
+func (s *ExternalSpec) BuildExtfsOverrides(prefix string) map[string]string {
+	if len(s.Extfs) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(s.Extfs))
+	for k, v := range s.Extfs {
+		m[prefix+k] = v
+	}
+	return m
+}
+
 func sortedKeys(m map[string]bool) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

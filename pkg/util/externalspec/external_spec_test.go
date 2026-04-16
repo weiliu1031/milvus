@@ -81,3 +81,24 @@ func TestParseExternalSpec_BooleanExtfsValidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "true", spec.Extfs["use_iam"])
 }
+
+func TestBuildExtfsOverrides(t *testing.T) {
+	t.Run("empty_extfs_returns_nil", func(t *testing.T) {
+		spec := &ExternalSpec{Format: "parquet"}
+		assert.Nil(t, spec.BuildExtfsOverrides("extfs.42."))
+	})
+
+	t.Run("prepends_prefix_to_every_key", func(t *testing.T) {
+		spec := &ExternalSpec{
+			Format: "parquet",
+			Extfs: map[string]string{
+				"region":  "us-west-2",
+				"use_ssl": "true",
+			},
+		}
+		out := spec.BuildExtfsOverrides("extfs.42.")
+		assert.Equal(t, "us-west-2", out["extfs.42.region"])
+		assert.Equal(t, "true", out["extfs.42.use_ssl"])
+		assert.Len(t, out, 2)
+	})
+}

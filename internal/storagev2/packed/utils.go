@@ -17,9 +17,9 @@ package packed
 import (
 	"context"
 	"fmt"
-	"strings"
+	"sync"
+	"time"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -85,97 +85,256 @@ func SplitFileToFragments(
 	return fragments
 }
 
-// FetchFragmentsFromExternalSource scans the external source and returns fragments.
-// It explores files from the external source and splits large files into multiple fragments.
-//
-// IMPORTANT: The loon_exttable_explore FFI uses a Transaction that writes a manifest file
-// to baseDir. If baseDir == exploreDir, the manifest pollutes the data directory and
-// accumulates stale column groups across calls (Transaction append semantics).
-// To avoid this, we use a unique temporary baseDir for each explore call.
-func FetchFragmentsFromExternalSource(
+// ExternalFetchOptions groups per-collection external table parameters
+// to keep function signatures clean.
+type ExternalFetchOptions struct {
+	CollectionID int64
+	SpecExtfs    map[string]string // extfs overrides from ExternalSpec (already prefix-keyed)
+}
+
+// FetchFragmentsFromExternalSourceWithRange
+// only processes files in the [fileIndexBegin, fileIndexEnd) range from the explore result.
+// If exploreManifestPath is non-empty, reads file list from the manifest instead of re-exploring.
+// This enables parallel refresh by splitting files across multiple tasks.
+func FetchFragmentsFromExternalSourceWithRange(
 	ctx context.Context,
 	format string,
 	columns []string,
 	externalSource string,
 	storageConfig *indexpb.StorageConfig,
+	fileIndexBegin, fileIndexEnd int64,
+	exploreManifestPath string,
+	opts ExternalFetchOptions,
+	fragmentRowLimit ...int64,
 ) ([]Fragment, error) {
 	log := log.Ctx(ctx)
 
-	// Use a unique temp base dir for explore output to prevent:
-	// 1. Manifest files polluting the user's data directory
-	// 2. Transaction accumulating stale column groups across calls
-	exploreBaseDir := fmt.Sprintf("__explore_temp__/%s", uuid.New().String())
-
-	// For lance-table format, BuildLanceBaseUri constructs "scheme://bucket/path" without
-	// root_path (unlike Parquet which uses Arrow S3 FileSystemProxy that prepends root_path).
-	// Prepend root_path so Lance can locate the dataset in the correct bucket prefix.
-	exploreDir := externalSource
-	if format == "lance-table" && storageConfig.GetRootPath() != "" {
-		exploreDir = strings.TrimRight(storageConfig.GetRootPath(), "/") + "/" + externalSource
+	rowLimit := int64(DefaultFragmentRowLimit)
+	if len(fragmentRowLimit) > 0 && fragmentRowLimit[0] > 0 {
+		rowLimit = fragmentRowLimit[0]
 	}
 
-	// Call ExploreFiles to get file list with row counts.
-	// ExploreFiles writes temp manifest files to exploreBaseDir as a side effect of the FFI.
-	// We clean them up immediately after consuming the results.
-	fileInfos, err := ExploreFiles(
-		columns,
-		format,
-		exploreBaseDir,
-		exploreDir,
-		storageConfig,
-	)
-	// Always clean up temp dir, regardless of whether ExploreFiles succeeded or failed.
-	defer CleanupExploreTempDir(exploreBaseDir, storageConfig)
+	var fileInfos []FileInfo
+	var err error
+	extfsPrefix := ExtfsPrefixForCollection(opts.CollectionID)
+	extfsOverrides := BuildExtfsOverrides(externalSource, storageConfig, extfsPrefix, opts.SpecExtfs)
 
+	if exploreManifestPath == "" {
+		return nil, fmt.Errorf("explore manifest path is required")
+	}
+
+	exploreStart := time.Now()
+	fileInfos, err = ReadFileInfosFromManifestPath(exploreManifestPath, storageConfig)
+	exploreDuration := time.Since(exploreStart)
 	if err != nil {
-		return nil, fmt.Errorf("failed to explore files: %w", err)
+		return nil, fmt.Errorf("failed to read explore manifest: %w", err)
 	}
+	log.Info("Read file list from explore manifest",
+		zap.String("manifestPath", exploreManifestPath),
+		zap.Int("totalFileCount", len(fileInfos)),
+		zap.Duration("readDuration", exploreDuration))
+
+	// Slice to assigned range
+	if fileIndexEnd > int64(len(fileInfos)) {
+		fileIndexEnd = int64(len(fileInfos))
+	}
+	if fileIndexBegin >= int64(len(fileInfos)) {
+		return nil, fmt.Errorf("fileIndexBegin %d >= total files %d", fileIndexBegin, len(fileInfos))
+	}
+	fileInfos = fileInfos[fileIndexBegin:fileIndexEnd]
 
 	if len(fileInfos) == 0 {
-		return nil, fmt.Errorf("no files found in external source %q with format %q", externalSource, format)
+		return nil, fmt.Errorf("no files in range [%d, %d)", fileIndexBegin, fileIndexEnd)
 	}
 
-	log.Info("Explored external files",
-		zap.Int("fileCount", len(fileInfos)),
-		zap.String("format", format),
-		zap.String("externalSource", externalSource))
+	// Fetch row counts concurrently (same logic as FetchFragmentsFromExternalSource)
+	getFileInfoStart := time.Now()
+	needInfo := make([]int, 0, len(fileInfos))
+	for i, fi := range fileInfos {
+		if fi.NumRows <= 0 {
+			needInfo = append(needInfo, i)
+		}
+	}
 
-	// Get row count for each file and split large files into fragments.
+	rowCounts := make([]int64, len(fileInfos))
+	for i, fi := range fileInfos {
+		rowCounts[i] = fi.NumRows
+	}
+
+	const getFileInfoWorkers = 16
+	if len(needInfo) > 0 {
+		var firstErr error
+		var errOnce sync.Once
+		tasks := make(chan int, len(needInfo))
+		var wg sync.WaitGroup
+
+		workers := getFileInfoWorkers
+		if workers > len(needInfo) {
+			workers = len(needInfo)
+		}
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for i := range tasks {
+					fetchedInfo, err := GetFileInfo(format, fileInfos[i].FilePath, storageConfig, extfsOverrides)
+					if err != nil {
+						errOnce.Do(func() {
+							firstErr = fmt.Errorf("failed to get file info for %s: %w", fileInfos[i].FilePath, err)
+						})
+						return
+					}
+					rowCounts[i] = fetchedInfo.NumRows
+				}
+			}()
+		}
+		for _, idx := range needInfo {
+			if ctx.Err() != nil || firstErr != nil {
+				break
+			}
+			tasks <- idx
+		}
+		close(tasks)
+		wg.Wait()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if firstErr != nil {
+			return nil, firstErr
+		}
+	}
+
+	getFileInfoDuration := time.Since(getFileInfoStart)
+	log.Info("GetFileInfo phase completed (with range)",
+		zap.Int("filesNeedingInfo", len(needInfo)),
+		zap.Int("totalFiles", len(fileInfos)),
+		zap.Duration("getFileInfoDuration", getFileInfoDuration))
+
 	var fragments []Fragment
 	fragmentIDGenerator := NewFragmentIDGenerator(0)
-
-	for _, fi := range fileInfos {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		numRows := fi.NumRows
-		if numRows <= 0 {
-			// Row count not available from explore (e.g., parquet format).
-			// Fetch it separately via GetFileInfo FFI call.
-			fetchedInfo, err := GetFileInfo(format, fi.FilePath, storageConfig)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get file info for %s: %w", fi.FilePath, err)
-			}
-			numRows = fetchedInfo.NumRows
-		}
-
-		fileFragments := SplitFileToFragments(
-			fi.FilePath,
-			numRows,
-			DefaultFragmentRowLimit,
-			fragmentIDGenerator,
-		)
+	for i, fi := range fileInfos {
+		fileFragments := SplitFileToFragments(fi.FilePath, rowCounts[i], rowLimit, fragmentIDGenerator)
 		fragments = append(fragments, fileFragments...)
 	}
 
 	if len(fragments) == 0 {
-		return nil, fmt.Errorf("no data files found in external source %q", externalSource)
+		return nil, fmt.Errorf("no data files in range [%d, %d)", fileIndexBegin, fileIndexEnd)
 	}
 
-	log.Info("Created fragments from external files",
+	log.Info("Created fragments from file range",
+		zap.Int("totalFragments", len(fragments)),
+		zap.Int("fileCount", len(fileInfos)),
+		zap.Int64("fileIndexBegin", fileIndexBegin),
+		zap.Int64("fileIndexEnd", fileIndexEnd))
+
+	return fragments, nil
+}
+
+// FetchFragmentsFromFileInfos creates fragments from a pre-computed file list.
+// This is the fastest path: DataCoord already explored and split files, so DN
+// only needs to fetch row counts (if missing) and create fragments.
+func FetchFragmentsFromFileInfos(
+	ctx context.Context,
+	format string,
+	columns []string,
+	externalSource string,
+	storageConfig *indexpb.StorageConfig,
+	fileInfos []FileInfo,
+	opts ExternalFetchOptions,
+	fragmentRowLimit ...int64,
+) ([]Fragment, error) {
+	log := log.Ctx(ctx)
+
+	rowLimit := int64(DefaultFragmentRowLimit)
+	if len(fragmentRowLimit) > 0 && fragmentRowLimit[0] > 0 {
+		rowLimit = fragmentRowLimit[0]
+	}
+
+	extfsPrefix := ExtfsPrefixForCollection(opts.CollectionID)
+	extfsOverrides := BuildExtfsOverrides(externalSource, storageConfig, extfsPrefix, opts.SpecExtfs)
+
+	if len(fileInfos) == 0 {
+		return nil, fmt.Errorf("no assigned files")
+	}
+
+	log.Info("FetchFragmentsFromFileInfos: using pre-assigned file list",
+		zap.Int("numFiles", len(fileInfos)))
+
+	// Fetch row counts for files that don't have them yet
+	getFileInfoStart := time.Now()
+	needInfo := make([]int, 0)
+	for i, fi := range fileInfos {
+		if fi.NumRows <= 0 {
+			needInfo = append(needInfo, i)
+		}
+	}
+
+	rowCounts := make([]int64, len(fileInfos))
+	for i, fi := range fileInfos {
+		rowCounts[i] = fi.NumRows
+	}
+
+	const getFileInfoWorkers = 16
+	if len(needInfo) > 0 {
+		var firstErr error
+		var errOnce sync.Once
+		tasks := make(chan int, len(needInfo))
+		var wg sync.WaitGroup
+
+		workers := getFileInfoWorkers
+		if workers > len(needInfo) {
+			workers = len(needInfo)
+		}
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for i := range tasks {
+					fetchedInfo, err := GetFileInfo(format, fileInfos[i].FilePath, storageConfig, extfsOverrides)
+					if err != nil {
+						errOnce.Do(func() {
+							firstErr = fmt.Errorf("failed to get file info for %s: %w", fileInfos[i].FilePath, err)
+						})
+						return
+					}
+					rowCounts[i] = fetchedInfo.NumRows
+				}
+			}()
+		}
+		for _, idx := range needInfo {
+			if ctx.Err() != nil || firstErr != nil {
+				break
+			}
+			tasks <- idx
+		}
+		close(tasks)
+		wg.Wait()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if firstErr != nil {
+			return nil, firstErr
+		}
+	}
+
+	getFileInfoDuration := time.Since(getFileInfoStart)
+	log.Info("GetFileInfo phase completed (assigned files)",
+		zap.Int("filesNeedingInfo", len(needInfo)),
+		zap.Int("totalFiles", len(fileInfos)),
+		zap.Duration("getFileInfoDuration", getFileInfoDuration))
+
+	var fragments []Fragment
+	fragmentIDGenerator := NewFragmentIDGenerator(0)
+	for i, fi := range fileInfos {
+		fileFragments := SplitFileToFragments(fi.FilePath, rowCounts[i], rowLimit, fragmentIDGenerator)
+		fragments = append(fragments, fileFragments...)
+	}
+
+	if len(fragments) == 0 {
+		return nil, fmt.Errorf("no fragments created from %d assigned files", len(fileInfos))
+	}
+
+	log.Info("Created fragments from assigned files",
 		zap.Int("totalFragments", len(fragments)),
 		zap.Int("fileCount", len(fileInfos)))
 
