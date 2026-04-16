@@ -324,8 +324,9 @@ func (t *RefreshExternalCollectionTask) fetchFragmentsFromExternalSource(ctx con
 		t.req.GetFileIndexEnd(),
 		manifestPath,
 		packed.ExternalFetchOptions{
-			CollectionID: t.req.GetCollectionID(),
-			SpecExtfs:    specExtfs,
+			CollectionID:     t.req.GetCollectionID(),
+			SpecExtfs:        specExtfs,
+			FormatProperties: t.parsedSpec.BuildFormatProperties(),
 		},
 		targetRowsPerSegment,
 	)

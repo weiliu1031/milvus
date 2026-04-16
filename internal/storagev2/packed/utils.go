@@ -88,8 +88,9 @@ func SplitFileToFragments(
 // ExternalFetchOptions groups per-collection external table parameters
 // to keep function signatures clean.
 type ExternalFetchOptions struct {
-	CollectionID int64
-	SpecExtfs    map[string]string // extfs overrides from ExternalSpec (already prefix-keyed)
+	CollectionID     int64
+	SpecExtfs        map[string]string // extfs overrides from ExternalSpec (already prefix-keyed)
+	FormatProperties map[string]string // format-specific properties (e.g., "iceberg.snapshot_id")
 }
 
 // FetchFragmentsFromExternalSourceWithRange
@@ -99,7 +100,6 @@ type ExternalFetchOptions struct {
 func FetchFragmentsFromExternalSourceWithRange(
 	ctx context.Context,
 	format string,
-	columns []string,
 	externalSource string,
 	storageConfig *indexpb.StorageConfig,
 	fileIndexBegin, fileIndexEnd int64,
@@ -118,6 +118,9 @@ func FetchFragmentsFromExternalSourceWithRange(
 	var err error
 	extfsPrefix := ExtfsPrefixForCollection(opts.CollectionID)
 	extfsOverrides := BuildExtfsOverrides(externalSource, storageConfig, extfsPrefix, opts.SpecExtfs)
+	for k, v := range opts.FormatProperties {
+		extfsOverrides[k] = v
+	}
 
 	if exploreManifestPath == "" {
 		return nil, fmt.Errorf("explore manifest path is required")
@@ -163,6 +166,14 @@ func FetchFragmentsFromExternalSourceWithRange(
 
 	const getFileInfoWorkers = 16
 	if len(needInfo) > 0 {
+		// Use a derived context so the first worker that hits an error cancels
+		// all peers AND the producer below. This replaces an earlier pattern
+		// that used an unsynchronised `firstErr` read from the producer while
+		// workers wrote it under sync.Once — that was a data race under the
+		// Go memory model. Context cancellation is the native race-free signal.
+		fetchCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
 		var firstErr error
 		var errOnce sync.Once
 		tasks := make(chan int, len(needInfo))
@@ -177,10 +188,14 @@ func FetchFragmentsFromExternalSourceWithRange(
 			go func() {
 				defer wg.Done()
 				for i := range tasks {
+					if fetchCtx.Err() != nil {
+						return
+					}
 					fetchedInfo, err := GetFileInfo(format, fileInfos[i].FilePath, storageConfig, extfsOverrides)
 					if err != nil {
 						errOnce.Do(func() {
 							firstErr = fmt.Errorf("failed to get file info for %s: %w", fileInfos[i].FilePath, err)
+							cancel()
 						})
 						return
 					}
@@ -189,18 +204,20 @@ func FetchFragmentsFromExternalSourceWithRange(
 			}()
 		}
 		for _, idx := range needInfo {
-			if ctx.Err() != nil || firstErr != nil {
+			if fetchCtx.Err() != nil {
 				break
 			}
 			tasks <- idx
 		}
 		close(tasks)
 		wg.Wait()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+		// errOnce has finished any writes to firstErr before wg.Wait() returns
+		// (the happens-before of Done → Wait), so the read here is safe.
 		if firstErr != nil {
 			return nil, firstErr
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 	}
 
@@ -226,117 +243,6 @@ func FetchFragmentsFromExternalSourceWithRange(
 		zap.Int("fileCount", len(fileInfos)),
 		zap.Int64("fileIndexBegin", fileIndexBegin),
 		zap.Int64("fileIndexEnd", fileIndexEnd))
-
-	return fragments, nil
-}
-
-// FetchFragmentsFromFileInfos creates fragments from a pre-computed file list.
-// This is the fastest path: DataCoord already explored and split files, so DN
-// only needs to fetch row counts (if missing) and create fragments.
-func FetchFragmentsFromFileInfos(
-	ctx context.Context,
-	format string,
-	columns []string,
-	externalSource string,
-	storageConfig *indexpb.StorageConfig,
-	fileInfos []FileInfo,
-	opts ExternalFetchOptions,
-	fragmentRowLimit ...int64,
-) ([]Fragment, error) {
-	log := log.Ctx(ctx)
-
-	rowLimit := int64(DefaultFragmentRowLimit)
-	if len(fragmentRowLimit) > 0 && fragmentRowLimit[0] > 0 {
-		rowLimit = fragmentRowLimit[0]
-	}
-
-	extfsPrefix := ExtfsPrefixForCollection(opts.CollectionID)
-	extfsOverrides := BuildExtfsOverrides(externalSource, storageConfig, extfsPrefix, opts.SpecExtfs)
-
-	if len(fileInfos) == 0 {
-		return nil, fmt.Errorf("no assigned files")
-	}
-
-	log.Info("FetchFragmentsFromFileInfos: using pre-assigned file list",
-		zap.Int("numFiles", len(fileInfos)))
-
-	// Fetch row counts for files that don't have them yet
-	getFileInfoStart := time.Now()
-	needInfo := make([]int, 0)
-	for i, fi := range fileInfos {
-		if fi.NumRows <= 0 {
-			needInfo = append(needInfo, i)
-		}
-	}
-
-	rowCounts := make([]int64, len(fileInfos))
-	for i, fi := range fileInfos {
-		rowCounts[i] = fi.NumRows
-	}
-
-	const getFileInfoWorkers = 16
-	if len(needInfo) > 0 {
-		var firstErr error
-		var errOnce sync.Once
-		tasks := make(chan int, len(needInfo))
-		var wg sync.WaitGroup
-
-		workers := getFileInfoWorkers
-		if workers > len(needInfo) {
-			workers = len(needInfo)
-		}
-		wg.Add(workers)
-		for w := 0; w < workers; w++ {
-			go func() {
-				defer wg.Done()
-				for i := range tasks {
-					fetchedInfo, err := GetFileInfo(format, fileInfos[i].FilePath, storageConfig, extfsOverrides)
-					if err != nil {
-						errOnce.Do(func() {
-							firstErr = fmt.Errorf("failed to get file info for %s: %w", fileInfos[i].FilePath, err)
-						})
-						return
-					}
-					rowCounts[i] = fetchedInfo.NumRows
-				}
-			}()
-		}
-		for _, idx := range needInfo {
-			if ctx.Err() != nil || firstErr != nil {
-				break
-			}
-			tasks <- idx
-		}
-		close(tasks)
-		wg.Wait()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if firstErr != nil {
-			return nil, firstErr
-		}
-	}
-
-	getFileInfoDuration := time.Since(getFileInfoStart)
-	log.Info("GetFileInfo phase completed (assigned files)",
-		zap.Int("filesNeedingInfo", len(needInfo)),
-		zap.Int("totalFiles", len(fileInfos)),
-		zap.Duration("getFileInfoDuration", getFileInfoDuration))
-
-	var fragments []Fragment
-	fragmentIDGenerator := NewFragmentIDGenerator(0)
-	for i, fi := range fileInfos {
-		fileFragments := SplitFileToFragments(fi.FilePath, rowCounts[i], rowLimit, fragmentIDGenerator)
-		fragments = append(fragments, fileFragments...)
-	}
-
-	if len(fragments) == 0 {
-		return nil, fmt.Errorf("no fragments created from %d assigned files", len(fileInfos))
-	}
-
-	log.Info("Created fragments from assigned files",
-		zap.Int("totalFragments", len(fragments)),
-		zap.Int("fileCount", len(fileInfos)))
 
 	return fragments, nil
 }
@@ -378,40 +284,6 @@ func BuildCurrentSegmentFragments(
 		}
 	}
 	return result, nil
-}
-
-// CreateSegmentManifest creates a manifest file for a segment with the given fragments.
-// This is a convenience wrapper around CreateManifestForSegment.
-func CreateSegmentManifest(
-	ctx context.Context,
-	collectionID int64,
-	segmentID int64,
-	format string,
-	columns []string,
-	fragments []Fragment,
-	storageConfig *indexpb.StorageConfig,
-) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	default:
-	}
-
-	// Build manifest base path
-	basePath := fmt.Sprintf("external/%d/segments/%d", collectionID, segmentID)
-
-	manifestPath, err := CreateManifestForSegment(
-		basePath,
-		columns,
-		format,
-		fragments,
-		storageConfig,
-	)
-	if err != nil {
-		return "", err
-	}
-
-	return manifestPath, nil
 }
 
 // CreateSegmentManifestWithBasePath creates a manifest file with a custom base path.
