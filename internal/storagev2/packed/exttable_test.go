@@ -32,43 +32,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v2/proto/indexpb"
 )
 
-func TestExploreFiles_EmptyColumns(t *testing.T) {
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{
-		StorageType: "local",
-		BucketName:  tmpDir,
-		RootPath:    tmpDir,
-	}
-
-	// Empty columns should still work
-	files, err := ExploreFiles([]string{}, "parquet", "/tmp", "/nonexistent", config, nil)
-
-	// Expect error due to nonexistent directory
-	assert.Error(t, err)
-	assert.Nil(t, files)
-}
-
-func TestExploreFiles_InvalidDirectory(t *testing.T) {
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{
-		StorageType: "local",
-		BucketName:  tmpDir,
-		RootPath:    tmpDir,
-	}
-
-	files, err := ExploreFiles(
-		[]string{"col1", "col2"},
-		"parquet",
-		"/nonexistent/base",
-		"/nonexistent/explore",
-		config,
-		nil,
-	)
-
-	assert.Error(t, err)
-	assert.Nil(t, files)
-}
-
 func TestGetFileInfo_NonexistentFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &indexpb.StorageConfig{
@@ -370,14 +333,6 @@ func TestMarshalManifestPath_EmptyBasePath(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "", basePath)
 	assert.Equal(t, int64(0), ver)
-}
-
-func TestCreateSegmentManifest_CanceledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-
-	_, err := CreateSegmentManifest(ctx, 1, 1, "parquet", []string{"col1"}, nil, nil)
-	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestCreateSegmentManifestWithBasePath_CanceledContext(t *testing.T) {
@@ -714,6 +669,72 @@ func TestMakePropertiesFromStorageConfig_ExtraKVsOverride(t *testing.T) {
 	defer FreeProperties(props)
 }
 
+// ==================== SampleExternalFieldSizes Tests ====================
+
+func TestSampleExternalFieldSizes_NilStorageConfig(t *testing.T) {
+	result, err := SampleExternalFieldSizes(
+		`{"base_path":"/tmp","ver":1}`, 100, 42,
+		"s3://bucket/data/", `{"format":"parquet"}`,
+		nil, nil,
+	)
+	assert.Nil(t, result)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "storageConfig is required")
+}
+
+func TestSampleExternalFieldSizes_EmptyManifestPath(t *testing.T) {
+	config := &indexpb.StorageConfig{
+		StorageType: "local",
+		BucketName:  "/tmp",
+		RootPath:    "/tmp",
+	}
+	result, err := SampleExternalFieldSizes(
+		"", 100, 42,
+		"", "",
+		config, nil,
+	)
+	assert.Nil(t, result)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "manifest_path is empty")
+}
+
+func TestSampleExternalFieldSizes_InvalidManifestPath(t *testing.T) {
+	config := &indexpb.StorageConfig{
+		StorageType: "local",
+		BucketName:  "/tmp",
+		RootPath:    "/tmp",
+	}
+	// Valid JSON but manifest file doesn't exist
+	result, err := SampleExternalFieldSizes(
+		`{"base_path":"/nonexistent/path","ver":1}`, 100, 42,
+		"", "",
+		config, nil,
+	)
+	assert.Nil(t, result)
+	assert.Error(t, err)
+}
+
+func TestSampleExternalFieldSizes_WithSpecExtfs(t *testing.T) {
+	config := &indexpb.StorageConfig{
+		StorageType: "local",
+		BucketName:  "/tmp",
+		RootPath:    "/tmp",
+	}
+	specExtfs := map[string]string{
+		"extfs.42.region":  "us-west-2",
+		"extfs.42.use_ssl": "true",
+	}
+	// Will fail at manifest read (no real file), but validates that
+	// properties construction with specExtfs doesn't panic
+	result, err := SampleExternalFieldSizes(
+		`{"base_path":"/nonexistent","ver":1}`, 100, 42,
+		"s3://s3.us-west-2.amazonaws.com/ext-bucket/data/", `{"format":"parquet"}`,
+		config, specExtfs,
+	)
+	assert.Nil(t, result)
+	assert.Error(t, err)
+}
+
 // ==================== ExploreFilesReturnManifestPath Tests ====================
 
 func TestExploreFilesReturnManifestPath_InvalidDir(t *testing.T) {
@@ -827,7 +848,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_HappyPath(t *testing.T) {
 	defer mockRead.UnPatch()
 
 	fragments, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", []string{"col1"}, "s3:///bucket/path", config,
+		ctx, "parquet", "s3:///bucket/path", config,
 		0, 3, "/manifest.json", ExternalFetchOptions{CollectionID: 1},
 		5000, // rowLimit
 	)
@@ -841,7 +862,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_EmptyManifest(t *testing.T) {
 	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
 
 	_, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		0, 10, "", ExternalFetchOptions{},
 	)
 	assert.Error(t, err)
@@ -858,7 +879,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_ReadManifestFailed(t *testing
 	defer mockRead.UnPatch()
 
 	_, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		0, 10, "/manifest.json", ExternalFetchOptions{},
 	)
 	assert.Error(t, err)
@@ -876,7 +897,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_IndexOutOfRange(t *testing.T)
 	defer mockRead.UnPatch()
 
 	_, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		5, 10, "/manifest.json", ExternalFetchOptions{},
 	)
 	assert.Error(t, err)
@@ -900,7 +921,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_NeedsFileInfo(t *testing.T) {
 	defer mockGetInfo.UnPatch()
 
 	fragments, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		0, 1, "/manifest.json", ExternalFetchOptions{CollectionID: 1}, 1000,
 	)
 	assert.NoError(t, err)
@@ -923,7 +944,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_GetFileInfoFailed(t *testing.
 	defer mockGetInfo.UnPatch()
 
 	_, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		0, 1, "/manifest.json", ExternalFetchOptions{CollectionID: 1},
 	)
 	assert.Error(t, err)
@@ -943,7 +964,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_FileIndexEndClamped(t *testin
 
 	// fileIndexEnd (99) > len(fileInfos) (2), should be clamped
 	fragments, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		0, 99, "/manifest.json", ExternalFetchOptions{CollectionID: 1}, 1000,
 	)
 	assert.NoError(t, err)
@@ -961,7 +982,7 @@ func TestFetchFragmentsFromExternalSourceWithRange_FormatProperties(t *testing.T
 	defer mockRead.UnPatch()
 
 	fragments, err := FetchFragmentsFromExternalSourceWithRange(
-		ctx, "parquet", nil, "", config,
+		ctx, "parquet", "", config,
 		0, 1, "/manifest.json", ExternalFetchOptions{
 			CollectionID:     1,
 			FormatProperties: map[string]string{"iceberg.snapshot_id": "42"},
@@ -969,123 +990,6 @@ func TestFetchFragmentsFromExternalSourceWithRange_FormatProperties(t *testing.T
 	)
 	assert.NoError(t, err)
 	assert.Len(t, fragments, 1)
-}
-
-// ==================== FetchFragmentsFromFileInfos Tests ====================
-
-func TestFetchFragmentsFromFileInfos_HappyPath(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
-
-	fileInfos := []FileInfo{
-		{FilePath: "f1.parquet", NumRows: 500},
-		{FilePath: "f2.parquet", NumRows: 1000},
-	}
-
-	fragments, err := FetchFragmentsFromFileInfos(
-		ctx, "parquet", []string{"col1"}, "s3:///b/p", config,
-		fileInfos, ExternalFetchOptions{CollectionID: 1}, 2000,
-	)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, fragments)
-}
-
-func TestFetchFragmentsFromFileInfos_EmptyFiles(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
-
-	_, err := FetchFragmentsFromFileInfos(
-		ctx, "parquet", nil, "", config,
-		nil, ExternalFetchOptions{},
-	)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no assigned files")
-}
-
-func TestFetchFragmentsFromFileInfos_NeedsFileInfo(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
-
-	mockGetInfo := mockey.Mock(GetFileInfo).Return(&FileInfo{
-		FilePath: "f1.parquet", NumRows: 800,
-	}, nil).Build()
-	defer mockGetInfo.UnPatch()
-
-	fileInfos := []FileInfo{
-		{FilePath: "f1.parquet", NumRows: 0}, // needs GetFileInfo
-	}
-
-	fragments, err := FetchFragmentsFromFileInfos(
-		ctx, "parquet", nil, "", config,
-		fileInfos, ExternalFetchOptions{CollectionID: 1}, 10000,
-	)
-	assert.NoError(t, err)
-	assert.Len(t, fragments, 1)
-	assert.Equal(t, int64(800), fragments[0].RowCount)
-}
-
-func TestFetchFragmentsFromFileInfos_GetFileInfoFailed(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
-
-	mockGetInfo := mockey.Mock(GetFileInfo).
-		Return(nil, fmt.Errorf("disk error")).Build()
-	defer mockGetInfo.UnPatch()
-
-	fileInfos := []FileInfo{
-		{FilePath: "f1.parquet", NumRows: 0},
-	}
-
-	_, err := FetchFragmentsFromFileInfos(
-		ctx, "parquet", nil, "", config,
-		fileInfos, ExternalFetchOptions{CollectionID: 1},
-	)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "disk error")
-}
-
-func TestFetchFragmentsFromFileInfos_ContextCanceled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
-
-	// GetFileInfo should not be called because context is canceled
-	mockGetInfo := mockey.Mock(GetFileInfo).Return(&FileInfo{NumRows: 100}, nil).Build()
-	defer mockGetInfo.UnPatch()
-
-	fileInfos := []FileInfo{
-		{FilePath: "f1.parquet", NumRows: 0},
-	}
-
-	_, err := FetchFragmentsFromFileInfos(
-		ctx, "parquet", nil, "", config,
-		fileInfos, ExternalFetchOptions{CollectionID: 1},
-	)
-	assert.Error(t, err)
-}
-
-func TestFetchFragmentsFromFileInfos_CustomRowLimit(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-	config := &indexpb.StorageConfig{StorageType: "local", BucketName: tmpDir, RootPath: tmpDir}
-
-	fileInfos := []FileInfo{
-		{FilePath: "f1.parquet", NumRows: 5000},
-	}
-
-	// Custom row limit of 1000 should produce 5 fragments
-	fragments, err := FetchFragmentsFromFileInfos(
-		ctx, "parquet", nil, "", config,
-		fileInfos, ExternalFetchOptions{CollectionID: 1}, 1000,
-	)
-	assert.NoError(t, err)
-	assert.Len(t, fragments, 5)
 }
 
 func TestMakePropertiesFromStorageConfig_WithExtraKVs(t *testing.T) {
