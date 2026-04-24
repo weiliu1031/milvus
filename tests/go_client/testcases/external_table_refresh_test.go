@@ -3031,3 +3031,58 @@ func TestRefreshExternalCollectionWrongExternalField(t *testing.T) {
 	require.Contains(t, finalReason, "external_field mappings",
 		"reason must hint at the real fix; got %q", finalReason)
 }
+
+// Security regression: DescribeCollection must redact secret extfs keys
+// (access_key_id / access_key_value / ssl_ca_cert) in the ExternalSpec
+// JSON returned to the client. Any caller with Describe privilege would
+// otherwise be able to read another tenant's object-storage credentials.
+func TestDescribeExternalCollectionRedactsCredentials(t *testing.T) {
+	ctx := hp.CreateContext(t, time.Second*common.DefaultTimeout)
+	mc := hp.CreateDefaultMilvusClient(ctx, t)
+
+	minioCfg := getMinIOConfig()
+	if _, err := newMinIOClient(minioCfg); err != nil {
+		t.Skipf("MinIO unavailable, skipping: %v", err)
+	}
+
+	collName := common.GenRandomString("ext_redact", 6)
+	extPath := fmt.Sprintf("external-e2e-test/%s", collName)
+
+	// Embed secret credentials in extfs; they are persisted into etcd and
+	// must NOT flow back out unredacted through DescribeCollection.
+	rawSpec := fmt.Sprintf(
+		`{"format":"parquet","extfs":{"access_key_id":%q,"access_key_value":%q,"region":"us-east-1"}}`,
+		"AKIAEXAMPLELEAKME", "supersecretvaluemustnotleak")
+
+	schema := entity.NewSchema().
+		WithName(collName).
+		WithExternalSource(extPath).
+		WithExternalSpec(rawSpec).
+		WithField(entity.NewField().WithName("id").WithDataType(entity.FieldTypeInt64).WithExternalField("id")).
+		WithField(entity.NewField().WithName("embedding").WithDataType(entity.FieldTypeFloatVector).
+			WithDim(testVecDim).WithExternalField("embedding"))
+
+	err := mc.CreateCollection(ctx, client.NewCreateCollectionOption(collName, schema))
+	common.CheckErr(t, err, true)
+	t.Cleanup(func() {
+		_ = mc.DropCollection(context.Background(), client.NewDropCollectionOption(collName))
+	})
+
+	desc, err := mc.DescribeCollection(ctx, client.NewDescribeCollectionOption(collName))
+	require.NoError(t, err)
+
+	returnedSpec := desc.Schema.ExternalSpec
+	t.Logf("returned ExternalSpec: %s", returnedSpec)
+
+	require.NotContains(t, returnedSpec, "AKIAEXAMPLELEAKME",
+		"access_key_id plaintext leaked via DescribeCollection")
+	require.NotContains(t, returnedSpec, "supersecretvaluemustnotleak",
+		"access_key_value plaintext leaked via DescribeCollection")
+	require.Contains(t, returnedSpec, `"access_key_id":"***"`,
+		"access_key_id must be redacted to ***")
+	require.Contains(t, returnedSpec, `"access_key_value":"***"`,
+		"access_key_value must be redacted to ***")
+	// Non-secret values remain visible for operator troubleshooting.
+	require.Contains(t, returnedSpec, `"region":"us-east-1"`,
+		"non-secret extfs values must remain readable")
+}

@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v2/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v2/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v2/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/v2/util/externalspec"
 	"github.com/milvus-io/milvus/pkg/v2/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v2/util/merr"
 	"github.com/milvus-io/milvus/pkg/v2/util/paramtable"
@@ -1070,7 +1071,17 @@ func (t *describeCollectionTask) Execute(ctx context.Context) error {
 	t.result.Schema.AutoID = result.Schema.AutoID
 	t.result.Schema.EnableDynamicField = result.Schema.EnableDynamicField
 	t.result.Schema.ExternalSource = result.Schema.ExternalSource
-	t.result.Schema.ExternalSpec = result.Schema.ExternalSpec
+	// Redact ExternalSpec before returning to the client. The persisted
+	// spec may embed extfs credentials (access_key_id / access_key_value
+	// / ssl_ca_cert) that were supplied at CreateCollection time and are
+	// stored in the etcd schema. Any caller with Describe privilege would
+	// otherwise be able to read another tenant's object-storage
+	// credentials via DescribeCollection. The credentials still flow
+	// through the FFI layer for actual storage authentication via the
+	// internal path (refresh_external_collection reads the raw spec
+	// directly from collection metadata), only this client-facing edge
+	// is sanitized.
+	t.result.Schema.ExternalSpec = externalspec.RedactExternalSpec(result.Schema.ExternalSpec)
 	t.result.Schema.EnableNamespace = result.Schema.EnableNamespace
 	t.result.CollectionID = result.CollectionID
 	t.result.VirtualChannelNames = result.VirtualChannelNames
