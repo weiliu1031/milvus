@@ -55,6 +55,10 @@ StringChunkWriter::calculate_size(const arrow::ArrayVector& array_vec) {
     offsets_.reserve(offset_num);
     for (const auto& data : array_vec) {
         auto array = std::dynamic_pointer_cast<arrow::BinaryArray>(data);
+        AssertInfo(array != nullptr,
+                   "StringChunkWriter expects arrow::BinaryArray, got "
+                   "type id {}; upstream normalizer must coerce to BINARY",
+                   data ? static_cast<int>(data->type_id()) : -1);
         for (int i = 0; i < array->length(); i++) {
             offsets_.push_back(static_cast<uint32_t>(cursor));
             cursor += array->GetView(i).size();
@@ -121,6 +125,10 @@ JSONChunkWriter::calculate_size(const arrow::ArrayVector& array_vec) {
     offsets_.reserve(offset_num);
     for (const auto& data : array_vec) {
         auto array = std::dynamic_pointer_cast<arrow::BinaryArray>(data);
+        AssertInfo(array != nullptr,
+                   "JSONChunkWriter expects arrow::BinaryArray, got "
+                   "type id {}; upstream normalizer must coerce to BINARY",
+                   data ? static_cast<int>(data->type_id()) : -1);
         for (int i = 0; i < array->length(); i++) {
             offsets_.push_back(static_cast<uint32_t>(cursor));
             cursor += array->GetView(i).size();
@@ -184,6 +192,10 @@ GeometryChunkWriter::calculate_size(const arrow::ArrayVector& array_vec) {
     offsets_.reserve(offset_num);
     for (const auto& data : array_vec) {
         auto array = std::dynamic_pointer_cast<arrow::BinaryArray>(data);
+        AssertInfo(array != nullptr,
+                   "GeometryChunkWriter expects arrow::BinaryArray, got "
+                   "type id {}; upstream normalizer must coerce to BINARY",
+                   data ? static_cast<int>(data->type_id()) : -1);
         for (int64_t i = 0; i < array->length(); ++i) {
             offsets_.push_back(static_cast<uint32_t>(cursor));
             cursor += array->GetView(i).size();
@@ -217,6 +229,10 @@ GeometryChunkWriter::write_to_target(
 
     for (const auto& data : array_vec) {
         auto array = std::dynamic_pointer_cast<arrow::BinaryArray>(data);
+        AssertInfo(array != nullptr,
+                   "GeometryChunkWriter expects arrow::BinaryArray, got "
+                   "type id {}; upstream normalizer must coerce to BINARY",
+                   data ? static_cast<int>(data->type_id()) : -1);
         for (int64_t i = 0; i < array->length(); ++i) {
             auto str = array->GetView(i);
             target->write(str.data(), str.size());
@@ -254,6 +270,10 @@ ArrayChunkWriter::calculate_size(const arrow::ArrayVector& array_vec) {
 
     for (const auto& data : array_vec) {
         auto array = std::dynamic_pointer_cast<arrow::BinaryArray>(data);
+        AssertInfo(array != nullptr,
+                   "ArrayChunkWriter expects arrow::BinaryArray, got "
+                   "type id {}; upstream normalizer must coerce to BINARY",
+                   data ? static_cast<int>(data->type_id()) : -1);
         for (int64_t i = 0; i < array->length(); ++i) {
             auto str = array->GetView(i);
             ScalarFieldProto scalar_array;
