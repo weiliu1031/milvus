@@ -100,12 +100,31 @@ func (s *DDLCallbacks) restoreSnapshotV2AckCallback(ctx context.Context, result 
 		zap.String("snapshotName", header.SnapshotName),
 		zap.Int64("collectionID", header.CollectionId),
 		zap.Int64("jobID", header.JobId),
+		zap.Bool("external", header.External),
+		zap.String("snapshotS3Location", redactSnapshotObjectPath(header.SnapshotS3Location)),
+		zap.Bool("externalSpecSet", header.GetExternalSpec() != ""),
 	)
 	log.Info("restoreSnapshotV2AckCallback received")
 
 	// Restore data (create copy segment job)
 	// Use the pre-allocated jobID from the WAL message for idempotency
-	jobID, err := s.snapshotManager.RestoreData(ctx, header.SourceCollectionId, header.SnapshotName, header.CollectionId, header.JobId, header.PinId)
+	var (
+		jobID int64
+		err   error
+	)
+	if header.GetExternal() {
+		jobID, err = s.snapshotManager.RestoreExternalData(
+			ctx,
+			header.SourceCollectionId,
+			header.SnapshotName,
+			header.SnapshotS3Location,
+			header.CollectionId,
+			header.JobId,
+			header.GetExternalSpec(),
+		)
+	} else {
+		jobID, err = s.snapshotManager.RestoreData(ctx, header.SourceCollectionId, header.SnapshotName, header.CollectionId, header.JobId, header.PinId)
+	}
 	if err != nil {
 		log.Error("failed to restore data", zap.Error(err))
 		return err

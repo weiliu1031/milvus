@@ -150,6 +150,25 @@ func (s *Server) startRestoreSnapshotLock(
 	return b, nil
 }
 
+func (s *Server) startExternalRestoreSnapshotLock(
+	ctx context.Context,
+	targetDbName, targetCollectionName string,
+) (broadcaster.BroadcastAPI, error) {
+	b, err := broadcast.StartBroadcastWithResourceKeys(
+		ctx,
+		message.NewSharedDBNameResourceKey(targetDbName),
+		message.NewExclusiveCollectionNameResourceKey(targetDbName, targetCollectionName),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Ctx(ctx).Info("phase 0 external restore lock acquired",
+		zap.String("targetDbName", targetDbName),
+		zap.String("targetCollectionName", targetCollectionName))
+	return b, nil
+}
+
 // validateRestoreSnapshotResources validates that all required resources exist for restore.
 // This includes snapshot, collection, partitions, and indexes.
 func (s *Server) validateRestoreSnapshotResources(ctx context.Context, collectionID int64, snapshotData *SnapshotData) error {
@@ -165,6 +184,16 @@ func (s *Server) validateRestoreSnapshotResources(ctx context.Context, collectio
 			snapshotData.SnapshotInfo.GetName(), sourceCollectionID, err)
 	}
 	log.Info("snapshot validated", zap.String("snapshotName", snapshot.GetName()))
+
+	return s.validateRestoredCollectionResources(ctx, collectionID, snapshotData)
+}
+
+func (s *Server) validateExternalRestoreSnapshotResources(ctx context.Context, collectionID int64, snapshotData *SnapshotData) error {
+	return s.validateRestoredCollectionResources(ctx, collectionID, snapshotData)
+}
+
+func (s *Server) validateRestoredCollectionResources(ctx context.Context, collectionID int64, snapshotData *SnapshotData) error {
+	log := log.Ctx(ctx).With(zap.Int64("collectionID", collectionID))
 
 	// ========== Validate Collection Exists ==========
 	coll, err := s.broker.DescribeCollectionInternal(ctx, collectionID)

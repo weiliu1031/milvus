@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/log"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -87,7 +88,13 @@ type CopySegmentTask struct {
 	segmentResults map[int64]*datapb.CopySegmentResult // Results for each target segment
 	req            *datapb.CopySegmentRequest          // Original request with source/target pairs
 	manager        TaskManager                         // Task manager for state updates and coordination
-	cm             storage.ChunkManager                // ChunkManager for file copy operations
+
+	sourceCM            storage.ChunkManager
+	targetCM            storage.ChunkManager
+	sourceStorageConfig *indexpb.StorageConfig
+	copier              storage.CrossBucketCopier
+	sourceBucket        string
+	targetBucket        string
 
 	// Cleanup tracking: records all successfully copied files for cleanup on failure
 	copiedFilesMu sync.Mutex // Protects copiedFiles for concurrent segment copies
@@ -118,7 +125,12 @@ type CopySegmentTask struct {
 func NewCopySegmentTask(
 	req *datapb.CopySegmentRequest,
 	manager TaskManager,
-	cm storage.ChunkManager,
+	sourceCM storage.ChunkManager,
+	targetCM storage.ChunkManager,
+	sourceStorageConfig *indexpb.StorageConfig,
+	copier storage.CrossBucketCopier,
+	sourceBucket string,
+	targetBucket string,
 ) Task {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -169,7 +181,13 @@ func NewCopySegmentTask(
 		segmentResults: segmentResults,
 		req:            req,
 		manager:        manager,
-		cm:             cm,
+
+		sourceCM:            sourceCM,
+		targetCM:            targetCM,
+		sourceStorageConfig: sourceStorageConfig,
+		copier:              copier,
+		sourceBucket:        sourceBucket,
+		targetBucket:        targetBucket,
 	}
 	return task
 }
@@ -253,7 +271,13 @@ func (t *CopySegmentTask) Clone() Task {
 		segmentResults: results,
 		req:            t.req,
 		manager:        t.manager,
-		cm:             t.cm,
+
+		sourceCM:            t.sourceCM,
+		targetCM:            t.targetCM,
+		sourceStorageConfig: t.sourceStorageConfig,
+		copier:              t.copier,
+		sourceBucket:        t.sourceBucket,
+		targetBucket:        t.targetBucket,
 	}
 }
 
@@ -377,8 +401,9 @@ func (t *CopySegmentTask) copySingleSegment(source *datapb.CopySegmentSource, ta
 
 	log.Info("start copying single segment", logFields...)
 
-	// Step 1: Validate source has required binlogs
-	if len(source.GetInsertBinlogs()) == 0 && len(source.GetDeltaBinlogs()) == 0 {
+	// Step 1: Validate source has required binlogs or a StorageV3 manifest.
+	hasManifestInsert := source.GetStorageVersion() >= storage.StorageV3 && source.GetManifestPath() != ""
+	if len(source.GetInsertBinlogs()) == 0 && len(source.GetDeltaBinlogs()) == 0 && !hasManifestInsert {
 		reason := "no insert/delete binlogs for segment"
 		log.Error(reason, logFields...)
 		t.manager.Update(t.GetTaskID(), UpdateState(datapb.ImportTaskStateV2_Failed), UpdateReason(reason))
@@ -388,7 +413,12 @@ func (t *CopySegmentTask) copySingleSegment(source *datapb.CopySegmentSource, ta
 	// Step 2: Copy all segment files (binlogs + indexes) together
 	segmentResult, copiedFiles, err := CopySegmentAndIndexFiles(
 		t.ctx,
-		t.cm,
+		t.sourceCM,
+		t.targetCM,
+		t.sourceStorageConfig,
+		t.copier,
+		t.sourceBucket,
+		t.targetBucket,
 		source,
 		target,
 		logFields,
@@ -487,7 +517,7 @@ func (t *CopySegmentTask) CleanupCopiedFiles() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := t.cm.MultiRemove(ctx, files); err != nil {
+	if err := t.targetCM.MultiRemove(ctx, files); err != nil {
 		// Cleanup failure is logged but doesn't block task removal
 		log.Error("failed to cleanup copied files",
 			zap.Int64("taskID", t.taskID),

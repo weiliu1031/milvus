@@ -2470,7 +2470,11 @@ func (s *Server) RestoreSnapshot(ctx context.Context, req *datapb.RestoreSnapsho
 		zap.String("snapshot", req.GetName()),
 		zap.Int64("sourceCollectionID", req.GetSourceCollectionId()),
 		zap.String("targetDbName", req.GetTargetDbName()),
-		zap.String("targetCollectionName", req.GetTargetCollectionName()))
+		zap.String("targetCollectionName", req.GetTargetCollectionName()),
+		zap.Bool("external", req.GetExternal()),
+		zap.String("snapshotS3Location", redactSnapshotObjectPath(req.GetSnapshotS3Location())),
+		zap.Bool("externalSpecSet", req.GetExternalSpec() != ""),
+	)
 
 	if err := merr.CheckHealthy(s.GetStateCode()); err != nil {
 		return &datapb.RestoreSnapshotResponse{
@@ -2480,8 +2484,15 @@ func (s *Server) RestoreSnapshot(ctx context.Context, req *datapb.RestoreSnapsho
 	log.Info("receive RestoreSnapshot request")
 
 	// Validate parameters
-	if req.GetName() == "" {
+	if !req.GetExternal() && req.GetName() == "" {
 		err := merr.WrapErrParameterInvalidMsg("snapshot name is required")
+		log.Warn("invalid request", zap.Error(err))
+		return &datapb.RestoreSnapshotResponse{
+			Status: merr.Status(err),
+		}, nil
+	}
+	if req.GetExternal() && req.GetSnapshotS3Location() == "" {
+		err := merr.WrapErrParameterInvalidMsg("snapshot_s3_location is required")
 		log.Warn("invalid request", zap.Error(err))
 		return &datapb.RestoreSnapshotResponse{
 			Status: merr.Status(err),
@@ -2492,6 +2503,32 @@ func (s *Server) RestoreSnapshot(ctx context.Context, req *datapb.RestoreSnapsho
 		log.Warn("invalid request", zap.Error(err))
 		return &datapb.RestoreSnapshotResponse{
 			Status: merr.Status(err),
+		}, nil
+	}
+
+	if req.GetExternal() {
+		jobID, err := s.snapshotManager.RestoreExternalSnapshot(
+			ctx,
+			req.GetSnapshotS3Location(),
+			req.GetTargetCollectionName(),
+			req.GetTargetDbName(),
+			req.GetExternalSpec(),
+			s.startExternalRestoreSnapshotLock,
+			s.startBroadcastForRestoreSnapshot,
+			s.rollbackRestoreSnapshot,
+			s.validateExternalRestoreSnapshotResources,
+		)
+		if err != nil {
+			log.Error("restore external snapshot failed", zap.Error(err))
+			return &datapb.RestoreSnapshotResponse{
+				Status: merr.Status(err),
+			}, nil
+		}
+
+		log.Info("restore external snapshot completed", zap.Int64("jobID", jobID))
+		return &datapb.RestoreSnapshotResponse{
+			Status: merr.Success(),
+			JobId:  jobID,
 		}, nil
 	}
 
