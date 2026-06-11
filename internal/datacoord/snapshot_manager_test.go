@@ -51,7 +51,9 @@ import (
 )
 
 type fixedRestoreAllocator struct {
-	id typeutil.UniqueID
+	id          typeutil.UniqueID
+	allocNStart typeutil.UniqueID
+	allocNEnd   typeutil.UniqueID
 }
 
 func (a *fixedRestoreAllocator) AllocTimestamp(context.Context) (typeutil.Timestamp, error) {
@@ -63,7 +65,14 @@ func (a *fixedRestoreAllocator) AllocID(context.Context) (typeutil.UniqueID, err
 }
 
 func (a *fixedRestoreAllocator) AllocN(n int64) (typeutil.UniqueID, typeutil.UniqueID, error) {
+	if a.allocNStart != 0 || a.allocNEnd != 0 {
+		return a.allocNStart, a.allocNEnd, nil
+	}
 	return 0, n, nil
+}
+
+func (s *mockMixCoord) ExportSnapshot(ctx context.Context, req *datapb.ExportSnapshotRequest) (*datapb.ExportSnapshotResponse, error) {
+	panic("implement me")
 }
 
 // --- Test CreateSnapshot ---
@@ -1909,12 +1918,6 @@ func TestCreateRestoreJob_ExternalPersistsSourceLocationAndSkipsLocalSegmentLook
 		},
 	}
 
-	mockAlloc := allocator.NewMockAllocator(t)
-	mockAlloc.EXPECT().AllocN(int64(1)).Return(int64(1000), int64(1001), nil)
-
-	mockHandler := NewNMockHandler(t)
-	mockHandler.EXPECT().GetCollection(mock.Anything, int64(200)).Return(&collectionInfo{}, nil)
-
 	getSegmentCalled := false
 	mGetSegment := mockey.Mock((*meta).GetSegment).To(func(_ *meta, _ context.Context, _ int64) *SegmentInfo {
 		getSegmentCalled = true
@@ -1936,8 +1939,8 @@ func TestCreateRestoreJob_ExternalPersistsSourceLocationAndSkipsLocalSegmentLook
 
 	sm := &snapshotManager{
 		meta:            &meta{},
-		allocator:       mockAlloc,
-		handler:         mockHandler,
+		allocator:       &fixedRestoreAllocator{allocNStart: 1000, allocNEnd: 1001},
+		handler:         newMockHandler(),
 		copySegmentMeta: &copySegmentMeta{},
 	}
 
@@ -3183,9 +3186,7 @@ func TestRestoreExternalSnapshot_BroadcastCarriesExternalSpec(t *testing.T) {
 		snapshotMeta: &snapshotMeta{},
 		allocator:    &fixedRestoreAllocator{id: 77},
 	}
-	mockWAL := mock_streaming.NewMockWALAccesser(t)
-	mockWAL.EXPECT().ControlChannel().Return("control_channel")
-	streaming.SetWALForTest(mockWAL)
+	streaming.SetupNoopWALForTest()
 
 	jobID, err := sm.RestoreExternalSnapshot(
 		ctx,

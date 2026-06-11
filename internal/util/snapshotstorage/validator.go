@@ -115,7 +115,7 @@ func ValidateSnapshotForeignStorage(
 
 func validateDirection(direction Direction) error {
 	switch direction {
-	case DirectionExport, DirectionRestore:
+	case DirectionExport, DirectionRestore, DirectionCopySource:
 		return nil
 	default:
 		return merr.WrapErrParameterInvalidMsg("snapshot foreign storage direction %d is not supported", direction)

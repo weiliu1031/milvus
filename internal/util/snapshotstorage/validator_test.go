@@ -198,6 +198,18 @@ func TestValidateSnapshotForeignStorageExportUsesTargetRoot(t *testing.T) {
 	assert.Equal(t, "export-root", validated.ForeignRoot)
 }
 
+func TestValidateSnapshotForeignStorageCopySourceUsesSourceRoot(t *testing.T) {
+	validated, err := ValidateSnapshotForeignStorage(
+		DirectionCopySource,
+		"s3://foreign-bucket/source-root/files",
+		`{"extfs":{"cloud_provider":"aws","region":"us-west-2"}}`,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, DirectionCopySource, validated.Direction)
+	assert.Equal(t, "foreign-bucket", validated.ForeignBucket)
+	assert.Equal(t, "source-root/files", validated.ForeignRoot)
+}
+
 func TestValidateSnapshotForeignStorageRestoreRejectsMissingSnapshotMetadataAnchor(t *testing.T) {
 	_, err := ValidateSnapshotForeignStorage(
 		DirectionRestore,
