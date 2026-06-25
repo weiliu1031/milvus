@@ -272,14 +272,15 @@ func (t *mixCompactionTask) writeSegment(ctx context.Context,
 	mWriter *MultiSegmentWriter, pkField *schemapb.FieldSchema,
 	writerSchema *schemapb.CollectionSchema,
 ) (deletedRowCount, expiredRowCount int64, err error) {
-	delta, err := compaction.ComposeDeleteFromDeltalogs(ctx, pkField.DataType, seg,
+	restoreTsRanges := compaction.NewRestoreTsRanges(seg.GetRestoreTsRanges())
+	delta, err := compaction.ComposeDeleteFromDeltalogsWithRestoreTsRanges(ctx, pkField.DataType, seg, restoreTsRanges,
 		storage.WithDownloader(t.binlogIO.Download),
 		storage.WithStorageConfig(t.compactionParams.StorageConfig))
 	if err != nil {
 		mlog.Warn(context.TODO(), "compact wrong, fail to merge deltalogs", mlog.Err(err))
 		return
 	}
-	entityFilter := compaction.NewEntityFilter(delta, t.plan.GetCollectionTtl(), t.currentTime, seg.GetCommitTimestamp())
+	entityFilter := compaction.NewEntityFilter(delta, t.plan.GetCollectionTtl(), t.currentTime, seg.GetCommitTimestamp(), restoreTsRanges)
 
 	reader, existingFields, err := newCompactionSegmentRecordReader(ctx, seg, t.plan.GetSchema(), t.compactionParams.StorageConfig,
 		storage.WithCollectionID(t.collectionID),

@@ -184,6 +184,36 @@ TEST_F(SegmentLoadInfoTest, ConstructFromProto) {
     EXPECT_EQ(info.GetPriority(), proto::common::LoadPriority::LOW);
 }
 
+TEST_F(SegmentLoadInfoTest, RestoreTsRanges) {
+    auto* valid = proto_.add_restore_ts_ranges();
+    valid->set_lower_bound(100);
+    valid->set_upper_bound(200);
+
+    auto* equal_bound = proto_.add_restore_ts_ranges();
+    equal_bound->set_lower_bound(300);
+    equal_bound->set_upper_bound(300);
+
+    auto* reversed = proto_.add_restore_ts_ranges();
+    reversed->set_lower_bound(500);
+    reversed->set_upper_bound(400);
+
+    auto* another_valid = proto_.add_restore_ts_ranges();
+    another_valid->set_lower_bound(0);
+    another_valid->set_upper_bound(1);
+
+    SegmentLoadInfo info(proto_, schema_);
+
+    auto ranges = info.GetRestoreTsRanges();
+    ASSERT_EQ(ranges.size(), 2);
+    EXPECT_EQ(ranges[0].lower_bound, 100);
+    EXPECT_EQ(ranges[0].upper_bound, 200);
+    EXPECT_EQ(ranges[1].lower_bound, 0);
+    EXPECT_EQ(ranges[1].upper_bound, 1);
+    EXPECT_FALSE(ranges[0].Contains(100));
+    EXPECT_TRUE(ranges[0].Contains(150));
+    EXPECT_FALSE(ranges[0].Contains(200));
+}
+
 TEST_F(SegmentLoadInfoTest, MoveConstructor) {
     SegmentLoadInfo info1(proto_, schema_);
     SegmentLoadInfo info2(std::move(info1));

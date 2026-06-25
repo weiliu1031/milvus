@@ -642,6 +642,11 @@ class SegmentInternalInterface : public SegmentInterface {
     virtual Timestamp
     get_max_timestamp() const = 0;
 
+    virtual bool
+    HasRestoreTsRanges() const {
+        return false;
+    }
+
     /**
      * search offset by possible pk values and mvcc timestamp
      *

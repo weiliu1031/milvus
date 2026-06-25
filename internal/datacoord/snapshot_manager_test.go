@@ -41,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
+	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -1806,7 +1807,7 @@ func TestCreateRestoreJob_PropagatesPinID(t *testing.T) {
 		copySegmentMeta: &copySegmentMeta{},
 	}
 
-	err := sm.createRestoreJob(ctx, int64(200), map[string]string{}, map[int64]int64{}, snapshotData, int64(42), expectedPinID)
+	err := sm.createRestoreJob(ctx, int64(200), map[string]string{}, map[int64]int64{}, snapshotData, int64(42), expectedPinID, 0)
 	assert.NoError(t, err)
 	require.NotNil(t, captured, "AddJob must be invoked")
 	assert.Equal(t, expectedPinID, captured.GetPinId(), "PinId must be propagated verbatim to the persisted job")
@@ -1816,11 +1817,11 @@ func TestCreateRestoreJob_PropagatesPinID(t *testing.T) {
 	assert.Equal(t, int64(100), captured.GetSourceCollectionId())
 }
 
-func TestCreateRestoreJob_PreRegistersTargetSegmentsAsImporting(t *testing.T) {
+func TestCreateRestoreJobMarksRestoreTsRanges(t *testing.T) {
 	ctx := context.Background()
 
 	snapshotData := &SnapshotData{
-		SnapshotInfo: &datapb.SnapshotInfo{Name: "snap1", CollectionId: 100},
+		SnapshotInfo: &datapb.SnapshotInfo{Name: "snap1", CollectionId: 100, CreateTs: 1000},
 		Collection:   &datapb.CollectionDescription{},
 		Segments: []*datapb.SegmentDescription{{
 			SegmentId:      11,
@@ -1833,8 +1834,10 @@ func TestCreateRestoreJob_PreRegistersTargetSegmentsAsImporting(t *testing.T) {
 		}},
 	}
 
+	var capturedSegment *datapb.SegmentInfo
 	catalog := catalogmocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, seg *datapb.SegmentInfo) error {
+		capturedSegment = seg
 		assert.Equal(t, int64(2001), seg.GetID())
 		assert.Equal(t, int64(200), seg.GetCollectionID())
 		assert.Equal(t, int64(20), seg.GetPartitionID())
@@ -1842,6 +1845,9 @@ func TestCreateRestoreJob_PreRegistersTargetSegmentsAsImporting(t *testing.T) {
 		assert.Equal(t, commonpb.SegmentState_Importing, seg.GetState())
 		assert.True(t, seg.GetIsImporting())
 		assert.Equal(t, int64(3), seg.GetStorageVersion())
+		assert.Len(t, seg.GetRestoreTsRanges(), 1)
+		assert.Equal(t, uint64(1000), seg.GetRestoreTsRanges()[0].GetLowerBound())
+		assert.Equal(t, uint64(2000), seg.GetRestoreTsRanges()[0].GetUpperBound())
 		return nil
 	}).Once()
 	catalog.EXPECT().SaveChannelCheckpoint(mock.Anything, "dst-ch", mock.Anything).Return(nil).Once()
@@ -1857,10 +1863,10 @@ func TestCreateRestoreJob_PreRegistersTargetSegmentsAsImporting(t *testing.T) {
 	mockHandler := NewNMockHandler(t)
 	mockHandler.EXPECT().GetCollection(mock.Anything, int64(200)).Return(&collectionInfo{StartPositions: []*commonpb.KeyDataPair{{Key: "dst-ch", Data: []byte{1}}}}, nil)
 
-	addJobCalled := false
+	var capturedJob *datapb.CopySegmentJob
 	mAddJob := mockey.Mock((*copySegmentMeta).AddJob).To(
-		func(_ *copySegmentMeta, _ context.Context, _ CopySegmentJob) error {
-			addJobCalled = true
+		func(_ *copySegmentMeta, _ context.Context, job CopySegmentJob) error {
+			capturedJob = job.(*copySegmentJob).CopySegmentJob
 			return nil
 		}).Build()
 	defer mAddJob.UnPatch()
@@ -1872,9 +1878,41 @@ func TestCreateRestoreJob_PreRegistersTargetSegmentsAsImporting(t *testing.T) {
 		copySegmentMeta: &copySegmentMeta{},
 	}
 
-	err = sm.createRestoreJob(ctx, int64(200), map[string]string{"src-ch": "dst-ch"}, map[int64]int64{10: 20}, snapshotData, int64(42), int64(7))
+	err = sm.createRestoreJob(ctx, int64(200), map[string]string{"src-ch": "dst-ch"}, map[int64]int64{10: 20}, snapshotData, int64(42), int64(7), uint64(2000))
 	require.NoError(t, err)
-	assert.True(t, addJobCalled)
+	require.NotNil(t, capturedSegment)
+	require.NotNil(t, capturedJob)
+	copyIndex, err := funcutil.GetAttrByKeyFromRepeatedKV("copy_index", capturedJob.GetOptions())
+	require.NoError(t, err)
+	assert.Equal(t, "false", copyIndex)
+}
+
+func TestAppendRestoreTsRangeClonesAndFiltersExisting(t *testing.T) {
+	valid := &datapb.RestoreTsRange{LowerBound: 10, UpperBound: 20}
+	ranges := appendRestoreTsRange([]*datapb.RestoreTsRange{
+		nil,
+		{LowerBound: 30, UpperBound: 30},
+		{LowerBound: 40, UpperBound: 35},
+		valid,
+	}, 100, 200)
+
+	require.Len(t, ranges, 2)
+	assert.Equal(t, uint64(10), ranges[0].GetLowerBound())
+	assert.Equal(t, uint64(20), ranges[0].GetUpperBound())
+	assert.Equal(t, uint64(100), ranges[1].GetLowerBound())
+	assert.Equal(t, uint64(200), ranges[1].GetUpperBound())
+
+	valid.LowerBound = 999
+	assert.Equal(t, uint64(10), ranges[0].GetLowerBound())
+}
+
+func TestAppendRestoreTsRangeSkipsInvalidBounds(t *testing.T) {
+	existing := []*datapb.RestoreTsRange{{LowerBound: 10, UpperBound: 20}}
+
+	require.Len(t, appendRestoreTsRange(existing, 0, 200), 1)
+	require.Len(t, appendRestoreTsRange(existing, 100, 0), 1)
+	require.Len(t, appendRestoreTsRange(existing, 200, 100), 1)
+	require.Len(t, appendRestoreTsRange(existing, 100, 100), 1)
 }
 
 // TestSnapshotManager_HasActivePins_Delegation verifies the manager-layer wrapper
@@ -1924,7 +1962,7 @@ func TestCreateRestoreJob_AllocNFailurePropagates(t *testing.T) {
 		copySegmentMeta: &copySegmentMeta{},
 	}
 
-	err := sm.createRestoreJob(ctx, int64(200), nil, nil, snapshotData, int64(42), int64(7))
+	err := sm.createRestoreJob(ctx, int64(200), nil, nil, snapshotData, int64(42), int64(7), 0)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "alloc segment IDs failed")
 	assert.False(t, addJobCalled, "AddJob must not be called when segment-ID allocation fails")
@@ -2137,6 +2175,16 @@ func TestSnapshotManager_RestoreData_Success(t *testing.T) {
 	}).Build()
 	defer mockGetJob.UnPatch()
 
+	mockDescribeCollection := mockey.Mock(mockey.GetMethod(&broker.MockBroker{}, "DescribeCollectionInternal")).To(func(
+		b *broker.MockBroker,
+		ctx context.Context,
+		collectionID int64,
+	) (*milvuspb.DescribeCollectionResponse, error) {
+		assert.Equal(t, int64(200), collectionID)
+		return &milvuspb.DescribeCollectionResponse{CreatedTimestamp: 2000}, nil
+	}).Build()
+	defer mockDescribeCollection.UnPatch()
+
 	// Mock buildPartitionMapping
 	mockBuildPartition := mockey.Mock((*snapshotManager).buildPartitionMapping).To(func(
 		sm *snapshotManager,
@@ -2169,15 +2217,18 @@ func TestSnapshotManager_RestoreData_Success(t *testing.T) {
 		snapshotData *SnapshotData,
 		jobID int64,
 		pinID int64,
+		restoreCreateTs uint64,
 	) error {
 		assert.Equal(t, int64(200), collectionID)
 		assert.Equal(t, int64(12345), jobID)
+		assert.Equal(t, uint64(2000), restoreCreateTs)
 		return nil
 	}).Build()
 	defer mockCreateJob.UnPatch()
 
 	sm := &snapshotManager{
 		copySegmentMeta: &copySegmentMeta{},
+		broker:          &broker.MockBroker{},
 	}
 
 	jobID, err := sm.RestoreData(ctx, int64(100), snapshotData.SnapshotInfo.GetName(), 200, 12345, int64(0))
@@ -2256,6 +2307,10 @@ func TestSnapshotManager_RestoreData_PartitionMappingError(t *testing.T) {
 	}).Build()
 	defer mockGetJob.UnPatch()
 
+	mockDescribeCollection := mockey.Mock(mockey.GetMethod(&broker.MockBroker{}, "DescribeCollectionInternal")).Return(
+		&milvuspb.DescribeCollectionResponse{CreatedTimestamp: 2000}, nil).Build()
+	defer mockDescribeCollection.UnPatch()
+
 	// Mock buildPartitionMapping to return error
 	mockBuildPartition := mockey.Mock((*snapshotManager).buildPartitionMapping).To(func(
 		sm *snapshotManager,
@@ -2269,6 +2324,7 @@ func TestSnapshotManager_RestoreData_PartitionMappingError(t *testing.T) {
 
 	sm := &snapshotManager{
 		copySegmentMeta: &copySegmentMeta{},
+		broker:          &broker.MockBroker{},
 	}
 
 	jobID, err := sm.RestoreData(ctx, int64(100), snapshotData.SnapshotInfo.GetName(), 200, 12345, int64(0))
@@ -2312,6 +2368,10 @@ func TestSnapshotManager_RestoreData_ChannelMappingError(t *testing.T) {
 	}).Build()
 	defer mockGetJob.UnPatch()
 
+	mockDescribeCollection := mockey.Mock(mockey.GetMethod(&broker.MockBroker{}, "DescribeCollectionInternal")).Return(
+		&milvuspb.DescribeCollectionResponse{CreatedTimestamp: 2000}, nil).Build()
+	defer mockDescribeCollection.UnPatch()
+
 	// Mock buildPartitionMapping
 	mockBuildPartition := mockey.Mock((*snapshotManager).buildPartitionMapping).To(func(
 		sm *snapshotManager,
@@ -2336,6 +2396,7 @@ func TestSnapshotManager_RestoreData_ChannelMappingError(t *testing.T) {
 
 	sm := &snapshotManager{
 		copySegmentMeta: &copySegmentMeta{},
+		broker:          &broker.MockBroker{},
 	}
 
 	jobID, err := sm.RestoreData(ctx, int64(100), snapshotData.SnapshotInfo.GetName(), 200, 12345, int64(0))
@@ -2379,6 +2440,10 @@ func TestSnapshotManager_RestoreData_CreateJobError(t *testing.T) {
 	}).Build()
 	defer mockGetJob.UnPatch()
 
+	mockDescribeCollection := mockey.Mock(mockey.GetMethod(&broker.MockBroker{}, "DescribeCollectionInternal")).Return(
+		&milvuspb.DescribeCollectionResponse{CreatedTimestamp: 2000}, nil).Build()
+	defer mockDescribeCollection.UnPatch()
+
 	// Mock buildPartitionMapping
 	mockBuildPartition := mockey.Mock((*snapshotManager).buildPartitionMapping).To(func(
 		sm *snapshotManager,
@@ -2411,13 +2476,16 @@ func TestSnapshotManager_RestoreData_CreateJobError(t *testing.T) {
 		snapshotData *SnapshotData,
 		jobID int64,
 		pinID int64,
+		restoreCreateTs uint64,
 	) error {
+		assert.Equal(t, uint64(2000), restoreCreateTs)
 		return expectedErr
 	}).Build()
 	defer mockCreateJob.UnPatch()
 
 	sm := &snapshotManager{
 		copySegmentMeta: &copySegmentMeta{},
+		broker:          &broker.MockBroker{},
 	}
 
 	jobID, err := sm.RestoreData(ctx, int64(100), snapshotData.SnapshotInfo.GetName(), 200, 12345, int64(0))
@@ -2430,8 +2498,6 @@ func TestSnapshotManager_RestoreData_CreateJobError(t *testing.T) {
 func TestSnapshotManager_RestoreData_ReadSnapshotDataError(t *testing.T) {
 	ctx := context.Background()
 
-	expectedErr := errors.New("snapshot read error")
-
 	// Mock copySegmentMeta.GetJob to return nil
 	mockGetJob := mockey.Mock((*copySegmentMeta).GetJob).To(func(
 		cm *copySegmentMeta,
@@ -2442,20 +2508,11 @@ func TestSnapshotManager_RestoreData_ReadSnapshotDataError(t *testing.T) {
 	}).Build()
 	defer mockGetJob.UnPatch()
 
-	// Mock ReadSnapshotData to return error
-	mockReadSnapshotData := mockey.Mock((*snapshotManager).ReadSnapshotData).To(func(
-		sm *snapshotManager,
-		ctx context.Context,
-		collectionID int64,
-		name string,
-	) (*SnapshotData, error) {
-		assert.Equal(t, "test_snapshot", name)
-		return nil, expectedErr
-	}).Build()
-	defer mockReadSnapshotData.UnPatch()
-
 	sm := &snapshotManager{
 		copySegmentMeta: &copySegmentMeta{},
+		snapshotMeta: &snapshotMeta{
+			snapshotName2ID: typeutil.NewConcurrentMap[UniqueID, *typeutil.ConcurrentMap[string, UniqueID]](),
+		},
 	}
 
 	jobID, err := sm.RestoreData(ctx, int64(100), "test_snapshot", 200, 12345, int64(0))

@@ -460,7 +460,26 @@ func ConvertToSegcoreSegmentLoadInfo(src *querypb.SegmentLoadInfo) *segcorepb.Se
 		UseTakeForOutput:     src.GetUseTakeForOutput(),
 		EstimatedBytesPerRow: src.GetEstimatedBytesPerRow(),
 		CommitTimestamp:      src.GetCommitTimestamp(),
+		RestoreTsRanges:      convertRestoreTsRanges(src.GetRestoreTsRanges()),
 	}
+}
+
+func convertRestoreTsRanges(ranges []*datapb.RestoreTsRange) []*segcorepb.RestoreTsRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	out := make([]*segcorepb.RestoreTsRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r == nil || r.GetLowerBound() >= r.GetUpperBound() {
+			continue
+		}
+		out = append(out, &segcorepb.RestoreTsRange{
+			LowerBound: r.GetLowerBound(),
+			UpperBound: r.GetUpperBound(),
+		})
+	}
+	return out
 }
 
 // resolveStatsWithBasePaths resolves text/json stats and computes basePaths.

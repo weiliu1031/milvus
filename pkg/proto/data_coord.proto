@@ -380,6 +380,15 @@ message SegmentMsg{
   SegmentInfo segment = 2;
 }
 
+message RestoreTsRange {
+  // Rows with lower_bound < effective_row_ts && effective_row_ts < upper_bound
+  // are logically hidden from the restored segment.
+  // Delete events with lower_bound < delete_ts && delete_ts < upper_bound
+  // are ignored for this segment.
+  uint64 lower_bound = 1;
+  uint64 upper_bound = 2;
+}
+
 message SegmentInfo {
   int64 ID = 1;
   int64 collectionID = 2;
@@ -463,6 +472,10 @@ message SegmentInfo {
   // timestamps to commit_timestamp, then clears this field back to 0. L0 delete
   // compaction is excluded because it only compacts delete logs.
   uint64 commit_timestamp = 36;
+  // restore_ts_ranges marks operation timestamp ranges that were copied from
+  // the source segment but are not visible in the restored collection.
+  // Empty means no restore range mask is needed.
+  repeated RestoreTsRange restore_ts_ranges = 37;
 }
 
 message SegmentStartPosition {
@@ -735,6 +748,7 @@ message CompactionSegmentBinlogs {
   // expiry during compaction: isEntityExpired uses max(row_ts, commit_ts)
   // so stale row timestamps never cause rows to be silently dropped.
   uint64 commit_timestamp = 14;
+  repeated RestoreTsRange restore_ts_ranges = 15;
 }
 
 message CompactionPlan {
@@ -1570,6 +1584,7 @@ message SegmentDescription {
   // Must be preserved across snapshot/restore so temporal protections
   // (GC, TTL, MVCC) are not lost on the restored segments.
   uint64 commit_timestamp = 18;
+  repeated RestoreTsRange restore_ts_ranges = 19;
 }
 
 message CollectionDescription {

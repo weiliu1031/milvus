@@ -332,6 +332,7 @@ func (t *l0CompactionTask) selectFlushedSegment() ([]*SegmentInfo, []*datapb.Com
 			IsSortedByNamespace: info.GetIsSortedByNamespace(),
 			Manifest:            info.GetManifestPath(),
 			CommitTimestamp:     info.GetCommitTimestamp(),
+			RestoreTsRanges:     info.GetRestoreTsRanges(),
 		})
 	}
 
@@ -374,6 +375,7 @@ func (t *l0CompactionTask) BuildCompactionRequest() (*datapb.CompactionPlan, err
 			IsSortedByNamespace: segInfo.GetIsSortedByNamespace(),
 			Manifest:            segInfo.GetManifestPath(),
 			CommitTimestamp:     segInfo.GetCommitTimestamp(),
+			RestoreTsRanges:     segInfo.GetRestoreTsRanges(),
 		})
 		segments = append(segments, segInfo)
 	}

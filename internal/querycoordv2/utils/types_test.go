@@ -171,3 +171,20 @@ func TestPackSegmentLoadInfo_CommitTimestamp(t *testing.T) {
 	assert.Equal(t, commitTs, loadInfo.GetCommitTimestamp())
 	assert.Equal(t, dataVersion, loadInfo.GetDataVersion())
 }
+
+func TestPackSegmentLoadInfo_RestoreTsRanges(t *testing.T) {
+	segment := &datapb.SegmentInfo{
+		ID:            1,
+		CollectionID:  2,
+		PartitionID:   3,
+		InsertChannel: "ch",
+		RestoreTsRanges: []*datapb.RestoreTsRange{
+			{LowerBound: 100, UpperBound: 200},
+		},
+	}
+
+	loadInfo := PackSegmentLoadInfo(segment, &msgpb.MsgPosition{Timestamp: 10}, nil)
+	assert.Len(t, loadInfo.GetRestoreTsRanges(), 1)
+	assert.Equal(t, uint64(100), loadInfo.GetRestoreTsRanges()[0].GetLowerBound())
+	assert.Equal(t, uint64(200), loadInfo.GetRestoreTsRanges()[0].GetUpperBound())
+}

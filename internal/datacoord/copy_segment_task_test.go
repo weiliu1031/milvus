@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -50,6 +51,48 @@ type CopySegmentTaskSuite struct {
 
 func TestCopySegmentTask(t *testing.T) {
 	suite.Run(t, new(CopySegmentTaskSuite))
+}
+
+func TestCopyIndexEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		job      CopySegmentJob
+		expected bool
+	}{
+		{name: "nil job defaults true", expected: true},
+		{
+			name:     "missing option defaults true",
+			job:      &copySegmentJob{CopySegmentJob: &datapb.CopySegmentJob{}},
+			expected: true,
+		},
+		{
+			name: "explicit false disables",
+			job: &copySegmentJob{CopySegmentJob: &datapb.CopySegmentJob{
+				Options: []*commonpb.KeyValuePair{{Key: "copy_index", Value: "false"}},
+			}},
+			expected: false,
+		},
+		{
+			name: "explicit false is case insensitive",
+			job: &copySegmentJob{CopySegmentJob: &datapb.CopySegmentJob{
+				Options: []*commonpb.KeyValuePair{{Key: "copy_index", Value: "FALSE"}},
+			}},
+			expected: false,
+		},
+		{
+			name: "explicit true enables",
+			job: &copySegmentJob{CopySegmentJob: &datapb.CopySegmentJob{
+				Options: []*commonpb.KeyValuePair{{Key: "copy_index", Value: "true"}},
+			}},
+			expected: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, copyIndexEnabled(test.job))
+		})
+	}
 }
 
 func (s *CopySegmentTaskSuite) TestCopySegmentTask_GettersAndSetters() {
@@ -599,6 +642,95 @@ func (s *CopySegmentTaskSuite) TestSyncCopySegmentTask_CompletedUpdatesSegment()
 	updatedTask := copyMeta.GetTask(ctx, 1001)
 	s.Equal(datapb.CopySegmentTaskState_CopySegmentTaskCompleted, updatedTask.GetState())
 	s.NotZero(updatedTask.(*copySegmentTask).task.Load().GetCompleteTs())
+}
+
+func (s *CopySegmentTaskSuite) TestSyncCopySegmentTask_CopyIndexFalseSkipsIndexSync() {
+	ctx := context.Background()
+	task := createTestCopyTask(100, 2001).(*copySegmentTask)
+	copyMeta, m := newCopySegmentTaskTestMeta(s.T(), task)
+	s.NoError(copyMeta.AddJob(ctx, &copySegmentJob{
+		CopySegmentJob: &datapb.CopySegmentJob{
+			JobId:        task.GetJobId(),
+			CollectionId: task.GetCollectionId(),
+			Options: []*commonpb.KeyValuePair{
+				{Key: "copy_index", Value: "false"},
+			},
+		},
+		tr: timerecord.NewTimeRecorder("test_job"),
+	}))
+
+	err := m.AddSegment(ctx, newTestCopySegment(2001))
+	s.NoError(err)
+
+	resp := &datapb.QueryCopySegmentResponse{
+		TaskID: 1001,
+		State:  datapb.CopySegmentTaskState_CopySegmentTaskCompleted,
+		SegmentResults: []*datapb.CopySegmentResult{
+			{
+				SegmentId:    2001,
+				ImportedRows: 100,
+				Binlogs:      makeTestCopySegmentBinlogs(),
+				IndexInfos: map[int64]*datapb.VectorScalarIndexInfo{
+					3001: {BuildId: 3001, IndexName: "vec_idx"},
+				},
+				TextIndexInfos: map[int64]*datapb.TextIndexStats{
+					200: {FieldID: 200, BuildID: 4001},
+				},
+				JsonKeyIndexInfos: map[int64]*datapb.JsonKeyStats{
+					300: {FieldID: 300, BuildID: 5001},
+				},
+			},
+		},
+	}
+
+	err = SyncCopySegmentTask(task, resp, copyMeta, m)
+	s.NoError(err)
+	segment := m.GetSegment(ctx, 2001)
+	s.Equal(commonpb.SegmentState_Flushed, segment.GetState())
+	s.Empty(segment.GetTextStatsLogs())
+	s.Empty(segment.GetJsonKeyStats())
+}
+
+func (s *CopySegmentTaskSuite) TestSyncCopySegmentTask_CopyIndexDefaultSyncsIndexes() {
+	ctx := context.Background()
+	task := createTestCopyTask(100, 2001).(*copySegmentTask)
+	copyMeta, m := newCopySegmentTaskTestMeta(s.T(), task)
+	m.ctx = ctx
+	s.NoError(copyMeta.AddJob(ctx, &copySegmentJob{
+		CopySegmentJob: &datapb.CopySegmentJob{
+			JobId:        task.GetJobId(),
+			CollectionId: task.GetCollectionId(),
+		},
+		tr: timerecord.NewTimeRecorder("test_job"),
+	}))
+
+	err := m.AddSegment(ctx, newTestCopySegment(2001))
+	s.NoError(err)
+
+	resp := &datapb.QueryCopySegmentResponse{
+		TaskID: 1001,
+		State:  datapb.CopySegmentTaskState_CopySegmentTaskCompleted,
+		SegmentResults: []*datapb.CopySegmentResult{
+			{
+				SegmentId:    2001,
+				ImportedRows: 100,
+				Binlogs:      makeTestCopySegmentBinlogs(),
+				TextIndexInfos: map[int64]*datapb.TextIndexStats{
+					200: {FieldID: 200, BuildID: 4001},
+				},
+				JsonKeyIndexInfos: map[int64]*datapb.JsonKeyStats{
+					300: {FieldID: 300, BuildID: 5001},
+				},
+			},
+		},
+	}
+
+	err = SyncCopySegmentTask(task, resp, copyMeta, m)
+	s.NoError(err)
+	segment := m.GetSegment(ctx, 2001)
+	s.Equal(commonpb.SegmentState_Flushed, segment.GetState())
+	s.Contains(segment.GetTextStatsLogs(), int64(200))
+	s.Contains(segment.GetJsonKeyStats(), int64(300))
 }
 
 func (s *CopySegmentTaskSuite) TestSyncCopySegmentTask_FailedResponseUpdatesTask() {
@@ -1237,7 +1369,7 @@ func TestAssembleCopySegmentRequest_MarksExternalCollection(t *testing.T) {
 	assert.True(t, req.GetSources()[0].GetIsExternalCollection())
 }
 
-func TestAssembleCopySegmentRequest_AllocatesTextAndJsonBuildIDs(t *testing.T) {
+func TestAssembleCopySegmentRequest_CopyIndexDefaultCopiesIndexes(t *testing.T) {
 	// Arrange: snapshot data with segment that has vector, text, and JSON key indexes
 	snapshotData := &SnapshotData{
 		SnapshotInfo: &datapb.SnapshotInfo{
@@ -1310,7 +1442,11 @@ func TestAssembleCopySegmentRequest_AllocatesTextAndJsonBuildIDs(t *testing.T) {
 	// Assert
 	assert.NoError(t, err)
 	assert.NotNil(t, req)
+	assert.Len(t, req.Sources, 1)
 	assert.Len(t, req.Targets, 1)
+	assert.Len(t, req.Sources[0].GetIndexFiles(), 1)
+	assert.Len(t, req.Sources[0].GetTextIndexFiles(), 1)
+	assert.Len(t, req.Sources[0].GetJsonKeyIndexFiles(), 1)
 
 	newBuildIDs := req.Targets[0].GetNewBuildIds()
 	// Should have 3 entries: one for vector index (3001), one for text (4001), one for JSON (5001)
@@ -1326,6 +1462,73 @@ func TestAssembleCopySegmentRequest_AllocatesTextAndJsonBuildIDs(t *testing.T) {
 		assert.False(t, seenIDs[newID], "new build IDs should be unique")
 		seenIDs[newID] = true
 	}
+}
+
+func TestAssembleCopySegmentRequest_CopyIndexFalseSkipsIndexes(t *testing.T) {
+	snapshotData := &SnapshotData{
+		SnapshotInfo: &datapb.SnapshotInfo{
+			Id:           1,
+			CollectionId: 100,
+			Name:         "test_snapshot",
+		},
+		Segments: []*datapb.SegmentDescription{
+			{
+				SegmentId:   1,
+				PartitionId: 10,
+				IndexFiles: []*indexpb.IndexFilePathInfo{
+					{BuildID: 3001, FieldID: 100, IndexID: 1001},
+				},
+				TextIndexFiles: map[int64]*datapb.TextIndexStats{
+					200: {FieldID: 200, BuildID: 4001},
+				},
+				JsonKeyIndexFiles: map[int64]*datapb.JsonKeyStats{
+					300: {FieldID: 300, BuildID: 5001},
+				},
+			},
+		},
+	}
+
+	sm := &snapshotMeta{}
+	mockReadSnapshot := mockey.Mock((*snapshotMeta).ReadSnapshotData).Return(snapshotData, nil).Build()
+	defer mockReadSnapshot.UnPatch()
+
+	mockStorageConfig := mockey.Mock(createStorageConfig).Return(nil).Build()
+	defer mockStorageConfig.UnPatch()
+
+	task := &copySegmentTask{
+		snapshotMeta: sm,
+		tr:           timerecord.NewTimeRecorder("test"),
+		times:        taskcommon.NewTimes(),
+	}
+	task.task.Store(&datapb.CopySegmentTask{
+		TaskId:       1001,
+		JobId:        100,
+		CollectionId: 100,
+		IdMappings: []*datapb.CopySegmentIDMapping{
+			{SourceSegmentId: 1, TargetSegmentId: 2001, PartitionId: 10},
+		},
+	})
+
+	job := &copySegmentJob{
+		CopySegmentJob: &datapb.CopySegmentJob{
+			JobId:        100,
+			CollectionId: 100,
+			SnapshotName: "test_snapshot",
+			Options: []*commonpb.KeyValuePair{
+				{Key: "copy_index", Value: "false"},
+			},
+		},
+		tr: timerecord.NewTimeRecorder("test_job"),
+	}
+
+	req, err := AssembleCopySegmentRequest(task, job)
+	require.NoError(t, err)
+	require.Len(t, req.GetSources(), 1)
+	require.Len(t, req.GetTargets(), 1)
+	require.Empty(t, req.GetSources()[0].GetIndexFiles())
+	require.Empty(t, req.GetSources()[0].GetTextIndexFiles())
+	require.Empty(t, req.GetSources()[0].GetJsonKeyIndexFiles())
+	require.Empty(t, req.GetTargets()[0].GetNewBuildIds())
 }
 
 // embeddedAllocator: named type for mockey interface-method patching; avoids a

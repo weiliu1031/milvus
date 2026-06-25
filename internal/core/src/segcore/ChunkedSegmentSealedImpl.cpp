@@ -172,6 +172,14 @@ field_exists_in_schema(const SchemaPtr& schema, FieldId field_id) {
 }
 
 static inline bool
+restore_ts_ranges_contain(const std::vector<RestoreTsRange>& ranges,
+                          Timestamp ts) {
+    return std::any_of(ranges.begin(), ranges.end(), [ts](const auto& range) {
+        return range.Contains(ts);
+    });
+}
+
+static inline bool
 has_bit_position(const BitsetType& bitset, FieldId field_id) {
     auto pos = field_id.get() - START_USER_FIELDID;
     return pos >= 0 && static_cast<size_t>(pos) < bitset.size();
@@ -1287,6 +1295,25 @@ ChunkedSegmentSealedImpl::LoadDeletedRecord(const LoadDeletedRecordInfo& info) {
     std::vector<PkType> pks(size);
     ParsePksFromIDs(pks, field_meta.get_data_type(), *info.primary_keys);
     auto timestamps = reinterpret_cast<const Timestamp*>(info.timestamps);
+    auto restore_ts_ranges = GetRestoreTsRangesSnapshot();
+    if (!restore_ts_ranges.empty()) {
+        std::vector<PkType> filtered_pks;
+        std::vector<Timestamp> filtered_timestamps;
+        filtered_pks.reserve(size);
+        filtered_timestamps.reserve(size);
+        for (int64_t i = 0; i < size; ++i) {
+            if (restore_ts_ranges_contain(restore_ts_ranges, timestamps[i])) {
+                continue;
+            }
+            filtered_pks.emplace_back(pks[i]);
+            filtered_timestamps.emplace_back(timestamps[i]);
+        }
+        if (filtered_pks.empty()) {
+            return;
+        }
+        deleted_record_.LoadPush(filtered_pks, filtered_timestamps.data());
+        return;
+    }
 
     // step 2: push delete info to delete_record
     deleted_record_.LoadPush(pks, timestamps);
@@ -4181,6 +4208,18 @@ ChunkedSegmentSealedImpl::Delete(int64_t size,
         size = end - ordering.begin();
         ordering.resize(size);
     }
+    auto restore_ts_ranges = GetRestoreTsRangesSnapshot();
+    if (!restore_ts_ranges.empty()) {
+        auto end =
+            std::remove_if(ordering.begin(),
+                           ordering.end(),
+                           [&](const std::tuple<Timestamp, PkType>& record) {
+                               return restore_ts_ranges_contain(
+                                   restore_ts_ranges, std::get<0>(record));
+                           });
+        size = end - ordering.begin();
+        ordering.resize(size);
+    }
     if (size == 0) {
         return SegcoreError::success();
     }
@@ -4286,7 +4325,7 @@ ChunkedSegmentSealedImpl::mask_with_timestamps(BitsetTypeView& bitset_chunk,
                "timestamp index is not ready");
     auto& ts_index_data = ts_cell != nullptr ? ts_cell->timestamp_index()
                                              : insert_record_.timestamp_index_;
-    auto effective_commit_ts = EffectiveCommitTs();
+    auto [effective_commit_ts, restore_ts_ranges] = GetTimestampMaskMetadata();
     // When commit_ts_ is set, the per-row scan must use commit_ts_, not the
     // raw v2/v3 timestamp column (which still holds the original row_ts). The
     // index itself is already commit_ts-overwritten at load time, so the
@@ -4339,22 +4378,33 @@ ChunkedSegmentSealedImpl::mask_with_timestamps(BitsetTypeView& bitset_chunk,
 
     // range == (size_, size_): all data is useful, no filtering needed.
     if (range.first == range.second && range.first == total_size) {
-        return;
+        if (restore_ts_ranges.empty()) {
+            return;
+        }
     }
     // range == (0, 0): all data is too new, mask everything out.
-    if (range.first == range.second && range.first == 0) {
+    else if (range.first == range.second && range.first == 0) {
         bitset_chunk.set();
         return;
+    } else {
+        // [0, beg) = false, [beg, end) = check, [end, size) = true
+        BitsetType mask;
+        mask.reserve(total_size);
+        mask.resize(range.first, false);
+        mask.resize(total_size, true);
+        do_scan(range.first, range.second, [&](int64_t i, Timestamp val) {
+            mask[i] = val > timestamp;
+        });
+        bitset_chunk |= mask;
     }
-    // [0, beg) = false, [beg, end) = check, [end, size) = true
-    BitsetType mask;
-    mask.reserve(total_size);
-    mask.resize(range.first, false);
-    mask.resize(total_size, true);
-    do_scan(range.first, range.second, [&](int64_t i, Timestamp val) {
-        mask[i] = val > timestamp;
-    });
-    bitset_chunk |= mask;
+
+    if (!restore_ts_ranges.empty()) {
+        do_scan(0, total_size, [&](int64_t i, Timestamp val) {
+            if (restore_ts_ranges_contain(restore_ts_ranges, val)) {
+                bitset_chunk[i] = true;
+            }
+        });
+    }
 }
 
 bool
@@ -4796,6 +4846,7 @@ ChunkedSegmentSealedImpl::Reopen(
     LOG_INFO("Reopen segment {} with diff {}", id_, diff.ToString());
 
     auto published = std::make_shared<const SegmentLoadInfo>(new_local);
+    SetTimestampMaskMetadata(*published);
     std::atomic_store(&segment_load_info_, published);
     use_take_for_output_.store(published->GetUseTakeForOutput(),
                                std::memory_order_relaxed);
@@ -5146,7 +5197,33 @@ ChunkedSegmentSealedImpl::SetCommitTimestamp(uint64_t ts) {
 
 uint64_t
 ChunkedSegmentSealedImpl::GetCommitTimestamp() const {
+    std::shared_lock lck(mutex_);
     return commit_ts_;
+}
+
+std::vector<RestoreTsRange>
+ChunkedSegmentSealedImpl::GetRestoreTsRangesSnapshot() const {
+    std::shared_lock lck(mutex_);
+    return restore_ts_ranges_;
+}
+
+std::pair<std::optional<Timestamp>, std::vector<RestoreTsRange>>
+ChunkedSegmentSealedImpl::GetTimestampMaskMetadata() const {
+    std::shared_lock lck(mutex_);
+    auto effective_commit_ts =
+        commit_ts_ != 0 ? std::optional<Timestamp>{commit_ts_} : std::nullopt;
+    return {effective_commit_ts, restore_ts_ranges_};
+}
+
+void
+ChunkedSegmentSealedImpl::SetTimestampMaskMetadata(
+    const SegmentLoadInfo& segment_load_info) {
+    auto commit_ts =
+        static_cast<milvus::Timestamp>(segment_load_info.GetCommitTimestamp());
+    auto restore_ts_ranges = segment_load_info.GetRestoreTsRanges();
+    std::unique_lock lck(mutex_);
+    commit_ts_ = commit_ts;
+    restore_ts_ranges_ = std::move(restore_ts_ranges);
 }
 
 void
@@ -5155,14 +5232,9 @@ ChunkedSegmentSealedImpl::SetLoadInfo(
     // reopen_mutex_ serializes with Reopen(pb)/Load/other SetLoadInfo so the
     // published snapshot and use_take_for_output_ bit stay in sync.
     std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
-    auto commit_ts =
-        static_cast<milvus::Timestamp>(load_info.commit_timestamp());
-    {
-        std::unique_lock lck(mutex_);
-        commit_ts_ = commit_ts;
-    }
     auto published =
         std::make_shared<const SegmentLoadInfo>(std::move(load_info), schema_);
+    SetTimestampMaskMetadata(*published);
     std::atomic_store(&segment_load_info_, published);
     use_take_for_output_.store(published->GetUseTakeForOutput(),
                                std::memory_order_relaxed);
@@ -5174,7 +5246,7 @@ ChunkedSegmentSealedImpl::SetLoadInfo(
         published->GetIndexInfoCount(),
         published->GetStorageVersion(),
         use_take_for_output_.load(std::memory_order_relaxed),
-        commit_ts);
+        published->GetCommitTimestamp());
 }
 
 void

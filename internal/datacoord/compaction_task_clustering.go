@@ -402,6 +402,7 @@ func (t *clusteringCompactionTask) BuildCompactionRequest() (*datapb.CompactionP
 			StorageVersion:      segInfo.GetStorageVersion(),
 			Manifest:            segInfo.GetManifestPath(),
 			CommitTimestamp:     segInfo.GetCommitTimestamp(),
+			RestoreTsRanges:     segInfo.GetRestoreTsRanges(),
 		})
 	}
 	WrapPluginContext(taskProto.GetCollectionID(), taskProto.GetSchema().GetProperties(), plan)

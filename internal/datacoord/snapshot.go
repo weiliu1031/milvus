@@ -64,7 +64,8 @@ const (
 	// Version 2: Adds index_store_path_version to vector/scalar index files
 	// Version 3: Adds commit_timestamp to ManifestEntry (import/CDC segments)
 	// Version 4: Adds child_fields and format to AvroFieldBinlog
-	SnapshotFormatVersion = 4
+	// Version 5: Adds restore_ts_ranges to ManifestEntry.
+	SnapshotFormatVersion = 5
 )
 
 var (
@@ -83,12 +84,16 @@ var (
 	manifestSchemaV4Once sync.Once
 	manifestSchemaV4     avro.Schema
 	manifestSchemaV4Err  error
+
+	manifestSchemaV5Once sync.Once
+	manifestSchemaV5     avro.Schema
+	manifestSchemaV5Err  error
 )
 
 // getManifestSchema returns the cached Avro schema for writing new manifest files.
-// New writes always use the current schema version (V4).
+// New writes always use the current schema version (V5).
 func getManifestSchema() (avro.Schema, error) {
-	return getManifestSchemaV4()
+	return getManifestSchemaV5()
 }
 
 func getManifestSchemaV1() (avro.Schema, error) {
@@ -119,6 +124,13 @@ func getManifestSchemaV4() (avro.Schema, error) {
 	return manifestSchemaV4, manifestSchemaV4Err
 }
 
+func getManifestSchemaV5() (avro.Schema, error) {
+	manifestSchemaV5Once.Do(func() {
+		manifestSchemaV5, manifestSchemaV5Err = avro.Parse(getAvroSchemaV5())
+	})
+	return manifestSchemaV5, manifestSchemaV5Err
+}
+
 // getManifestSchemaByVersion returns the Avro schema for the specified format
 // version. Avro binary is positional, so each on-disk version must be decoded
 // with the exact schema it was written with — a single "current" schema with
@@ -129,7 +141,8 @@ func getManifestSchemaV4() (avro.Schema, error) {
 //   - Version 2: Adds index_store_path_version
 //   - Version 3: Adds commit_timestamp (import/CDC segments)
 //   - Version 4: Adds child_fields and format to AvroFieldBinlog
-//   - Version 5+: Future schemas (to be added when needed)
+//   - Version 5: Adds restore_ts_ranges to ManifestEntry
+//   - Version 6+: Future schemas (to be added when needed)
 //
 // When adding a new schema version:
 //  1. Create a new schema function (e.g., getAvroSchemaV4) that derives from
@@ -150,6 +163,8 @@ func getManifestSchemaByVersion(version int) (avro.Schema, error) {
 		return getManifestSchemaV3()
 	case 4:
 		return getManifestSchemaV4()
+	case 5:
+		return getManifestSchemaV5()
 	default:
 		return nil, merr.WrapErrServiceInternalMsg("unsupported manifest schema version: %d", version)
 	}
@@ -246,6 +261,13 @@ type ManifestEntry struct {
 	// Stored as int64 because Avro `long` is signed and hamba/avro/v2 rejects
 	// uint64 — the proto-side uint64 is converted at the boundary.
 	CommitTimestamp int64 `avro:"commit_timestamp"`
+	// RestoreTsRanges records timestamp ranges masked out for restored segments.
+	RestoreTsRanges []AvroRestoreTsRange `avro:"restore_ts_ranges"`
+}
+
+type AvroRestoreTsRange struct {
+	LowerBound int64 `avro:"lower_bound"`
+	UpperBound int64 `avro:"upper_bound"`
 }
 
 // AvroFieldBinlog represents datapb.FieldBinlog in Avro-compatible format.
@@ -935,6 +957,7 @@ func (r *SnapshotReader) readManifestFile(ctx context.Context, filePath string, 
 		StorageVersion:  record.StorageVersion,
 		IsSorted:        record.IsSorted,
 		CommitTimestamp: uint64(record.CommitTimestamp), // int64 -> uint64
+		RestoreTsRanges: convertAvroToRestoreTsRanges(record.RestoreTsRanges),
 	}
 
 	// Convert binlog files (insert data)
@@ -1105,6 +1128,7 @@ func convertSegmentToManifestEntry(segment *datapb.SegmentDescription) ManifestE
 		StorageVersion:    segment.GetStorageVersion(),
 		IsSorted:          segment.GetIsSorted(),
 		CommitTimestamp:   int64(segment.GetCommitTimestamp()), // uint64 -> int64
+		RestoreTsRanges:   convertRestoreTsRangesToAvro(segment.GetRestoreTsRanges()),
 	}
 }
 
@@ -1164,6 +1188,23 @@ func convertIndexFilePathInfoToAvro(info *indexpb.IndexFilePathInfo) AvroIndexFi
 	return avroInfo
 }
 
+func convertRestoreTsRangesToAvro(ranges []*datapb.RestoreTsRange) []AvroRestoreTsRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([]AvroRestoreTsRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r == nil || r.GetLowerBound() >= r.GetUpperBound() {
+			continue
+		}
+		out = append(out, AvroRestoreTsRange{
+			LowerBound: int64(r.GetLowerBound()),
+			UpperBound: int64(r.GetUpperBound()),
+		})
+	}
+	return out
+}
+
 // --- Avro to Protobuf Conversion (for reading snapshots) ---
 
 // convertAvroToFieldBinlog converts Avro FieldBinlog back to protobuf format.
@@ -1219,6 +1260,28 @@ func convertAvroToIndexFilePathInfo(avroInfo AvroIndexFilePathInfo) *indexpb.Ind
 	}
 
 	return info
+}
+
+func convertAvroToRestoreTsRanges(ranges []AvroRestoreTsRange) []*datapb.RestoreTsRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([]*datapb.RestoreTsRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r.LowerBound < 0 || r.UpperBound < 0 {
+			continue
+		}
+		lower := uint64(r.LowerBound)
+		upper := uint64(r.UpperBound)
+		if lower >= upper {
+			continue
+		}
+		out = append(out, &datapb.RestoreTsRange{
+			LowerBound: lower,
+			UpperBound: upper,
+		})
+	}
+	return out
 }
 
 // --- Message Position Conversion ---
@@ -1594,8 +1657,8 @@ func getAvroSchemaV3() string {
 }
 
 // getAvroSchemaV4 returns the V4 schema, derived from V3 by extending
-// AvroFieldBinlog with child_fields and format. New writes use V4; legacy V1/V2/V3
-// manifests are decoded with their exact historical schemas.
+// AvroFieldBinlog with child_fields and format. Legacy V1/V2/V3/V4 manifests
+// are decoded with their exact historical schemas.
 func getAvroSchemaV4() string {
 	return strings.Replace(getAvroSchemaV3(),
 		`"name": "AvroFieldBinlog",
@@ -1610,5 +1673,27 @@ func getAvroSchemaV4() string {
 								{"name": "format", "type": "string", "default": ""},
 								{
 									"name": "binlogs",`,
+		1)
+}
+
+func getAvroSchemaV5() string {
+	return strings.Replace(getAvroSchemaV4(),
+		`{"name": "commit_timestamp", "type": "long", "default": 0},`,
+		`{"name": "commit_timestamp", "type": "long", "default": 0},
+					{
+						"name": "restore_ts_ranges",
+						"type": {
+							"type": "array",
+							"items": {
+								"type": "record",
+								"name": "AvroRestoreTsRange",
+								"fields": [
+									{"name": "lower_bound", "type": "long"},
+									{"name": "upper_bound", "type": "long"}
+								]
+							}
+						},
+						"default": []
+					},`,
 		1)
 }

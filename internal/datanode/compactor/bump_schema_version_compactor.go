@@ -424,13 +424,14 @@ func (t *bumpSchemaVersionCompactionTask) runFullSchemaRewrite(existingFields ma
 	if err != nil {
 		return nil, err
 	}
-	delta, err := compaction.ComposeDeleteFromDeltalogs(t.ctx, pkField.GetDataType(), segment,
+	restoreTsRanges := compaction.NewRestoreTsRanges(segment.GetRestoreTsRanges())
+	delta, err := compaction.ComposeDeleteFromDeltalogsWithRestoreTsRanges(t.ctx, pkField.GetDataType(), segment, restoreTsRanges,
 		storage.WithDownloader(t.chunkManager.MultiRead),
 		storage.WithStorageConfig(t.compactionParams.StorageConfig))
 	if err != nil {
 		return nil, err
 	}
-	entityFilter := compaction.NewEntityFilter(delta, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp())
+	entityFilter := compaction.NewEntityFilter(delta, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp(), restoreTsRanges)
 	ttlFieldID := getTTLFieldID(t.plan.GetSchema())
 	reader, _, err := newCompactionSegmentRecordReaderWithFields(t.ctx, segment, t.plan.GetSchema(), t.compactionParams.StorageConfig, existingFields,
 		storage.WithCollectionID(collectionID),

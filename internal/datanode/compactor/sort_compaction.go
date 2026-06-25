@@ -196,7 +196,9 @@ func (t *sortCompactionTask) sortSegment(ctx context.Context) (*datapb.Compactio
 	initWriterCost := time.Since(phaseStart)
 
 	phaseStart = time.Now()
-	deletePKs, err := compaction.ComposeDeleteFromDeltalogs(ctx, pkField.DataType, t.plan.SegmentBinlogs[0],
+	segment := t.plan.SegmentBinlogs[0]
+	restoreTsRanges := compaction.NewRestoreTsRanges(segment.GetRestoreTsRanges())
+	deletePKs, err := compaction.ComposeDeleteFromDeltalogsWithRestoreTsRanges(ctx, pkField.DataType, segment, restoreTsRanges,
 		storage.WithDownloader(t.binlogIO.Download),
 		storage.WithStorageConfig(t.compactionParams.StorageConfig))
 	if err != nil {
@@ -207,7 +209,7 @@ func (t *sortCompactionTask) sortSegment(ctx context.Context) (*datapb.Compactio
 	loadDeltaCost := time.Since(phaseStart)
 	hasTTLField := t.ttlFieldID >= common.StartOfUserFieldID
 
-	entityFilter := compaction.NewEntityFilter(deletePKs, t.plan.GetCollectionTtl(), t.currentTime, t.plan.GetSegmentBinlogs()[0].GetCommitTimestamp())
+	entityFilter := compaction.NewEntityFilter(deletePKs, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp(), restoreTsRanges)
 	var predicate func(r storage.Record, ri, i int) bool
 	switch pkField.DataType {
 	case schemapb.DataType_Int64:

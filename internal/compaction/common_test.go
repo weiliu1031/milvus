@@ -225,6 +225,33 @@ func (s *CommonSuite) TestComposeDeleteFromDeltalogs() {
 	}
 }
 
+func (s *CommonSuite) TestComposeDeleteFromDeltalogsFiltersRestoreTsRangeBeforeCollapse() {
+	ctx := context.Background()
+	blob := s.createTestDeltaLog(schemapb.DataType_Int64, []int64{1, 1, 2}, []int64{90, 150, 250})
+	deltalogs := []*datapb.FieldBinlog{{
+		FieldID: 100,
+		Binlogs: []*datapb.Binlog{{
+			LogPath: "/test/deltalog-restore-range.bin",
+		}},
+	}}
+	options := []storage.RwOption{
+		storage.WithVersion(storage.StorageV1),
+		storage.WithDownloader(func(ctx context.Context, paths []string) ([][]byte, error) {
+			return [][]byte{blob.Value}, nil
+		}),
+	}
+
+	deletedPkTs, err := ComposeDeleteFromDeltalogsV1WithRestoreTsRanges(
+		ctx,
+		schemapb.DataType_Int64,
+		deltalogs,
+		[]RestoreTsRange{{LowerBound: 100, UpperBound: 200}},
+		options...)
+	s.Require().NoError(err)
+	s.Equal(typeutil.Timestamp(90), deletedPkTs[int64(1)])
+	s.Equal(typeutil.Timestamp(250), deletedPkTs[int64(2)])
+}
+
 // Helper functions to create test deltalog data
 
 // createTestDeltaLog creates a deltalog blob with the given PKs and timestamps.

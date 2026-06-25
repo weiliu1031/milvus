@@ -415,6 +415,7 @@ message SegmentLoadInfo {
     // passing to C++ segcore to overwrite the in-memory timestamp column
     // (enabling correct MVCC visibility and TTL evaluation).
     uint64 commit_timestamp = 28;
+    repeated data.RestoreTsRange restore_ts_ranges = 29;
 }
 
 message FieldIndexInfo {

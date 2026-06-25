@@ -210,6 +210,8 @@ message CreateStatsRequest {
   int64 json_stats_write_batch_size = 30;
   string manifest_path = 31;
   repeated internal.FileResourceInfo file_resources = 32;
+  repeated data.RestoreTsRange restore_ts_ranges = 33;
+  uint64 commit_timestamp = 34;
 }
 
 message CreateJobV2Request {

@@ -226,6 +226,23 @@ class TestChunkSegmentStorageV2 : public testing::TestWithParam<bool> {
     }
 
     void
+    SetRestoreTsRange(segcore::SegmentSealedUPtr& seg,
+                      Timestamp lower_bound,
+                      Timestamp upper_bound,
+                      Timestamp commit_ts = 0) {
+        auto* sealed = dynamic_cast<ChunkedSegmentSealedImpl*>(seg.get());
+        ASSERT_NE(sealed, nullptr);
+
+        proto::segcore::SegmentLoadInfo load_info;
+        load_info.set_commit_timestamp(commit_ts);
+        auto* range = load_info.add_restore_ts_ranges();
+        range->set_lower_bound(lower_bound);
+        range->set_upper_bound(upper_bound);
+        sealed->SetLoadInfo(std::move(load_info));
+        ASSERT_TRUE(sealed->HasRestoreTsRanges());
+    }
+
+    void
     SetUp() override {
         bool pk_is_string = GetParam();
         schema_ = segcore::GenChunkedSegmentTestSchema(pk_is_string);
@@ -1090,6 +1107,99 @@ TEST_P(TestChunkSegmentStorageV2, TestSameTimestampDeleteNotEffective) {
     // The delete should not have taken effect because delete_ts == insert_ts
     ASSERT_EQ(0, unsorted_segment->get_deleted_count());
     ASSERT_EQ(chunk_num * test_data_count, unsorted_segment->get_real_count());
+}
+
+TEST_P(TestChunkSegmentStorageV2, RestoreTsRangeMasksOpenInterval) {
+    auto ranged_segment = CreateSegment(false);
+    SetRestoreTsRange(ranged_segment, 100, 200);
+    auto* segment_internal =
+        dynamic_cast<SegmentInternalInterface*>(ranged_segment.get());
+    ASSERT_NE(segment_internal, nullptr);
+
+    BitsetType timestamp_mask(chunk_num * test_data_count);
+    BitsetTypeView timestamp_mask_view(timestamp_mask);
+    segment_internal->mask_with_timestamps(
+        timestamp_mask_view, MAX_TIMESTAMP, 0);
+
+    ASSERT_EQ(timestamp_mask.count(), 99);
+    EXPECT_FALSE(timestamp_mask[100]);
+    EXPECT_TRUE(timestamp_mask[101]);
+    EXPECT_TRUE(timestamp_mask[199]);
+    EXPECT_FALSE(timestamp_mask[200]);
+}
+
+TEST_P(TestChunkSegmentStorageV2, RestoreTsRangeUsesCommitTimestamp) {
+    auto ranged_segment = CreateSegment(false);
+    SetRestoreTsRange(ranged_segment, 100, 200, 150);
+    auto* segment_internal =
+        dynamic_cast<SegmentInternalInterface*>(ranged_segment.get());
+    ASSERT_NE(segment_internal, nullptr);
+
+    BitsetType timestamp_mask(chunk_num * test_data_count);
+    BitsetTypeView timestamp_mask_view(timestamp_mask);
+    segment_internal->mask_with_timestamps(
+        timestamp_mask_view, MAX_TIMESTAMP, 0);
+
+    ASSERT_EQ(timestamp_mask.count(),
+              static_cast<size_t>(chunk_num * test_data_count));
+    EXPECT_TRUE(timestamp_mask[0]);
+    EXPECT_TRUE(timestamp_mask[chunk_num * test_data_count - 1]);
+}
+
+TEST_P(TestChunkSegmentStorageV2, RestoreTsRangeFiltersDeleteEvents) {
+    auto make_delete_ids = [this](int64_t begin, int64_t count) {
+        auto ids = std::make_unique<IdArray>();
+        if (GetParam()) {
+            auto* data = ids->mutable_str_id()->mutable_data();
+            for (int64_t i = 0; i < count; ++i) {
+                data->Add("test" + std::to_string(begin + i));
+            }
+        } else {
+            auto* data = ids->mutable_int_id()->mutable_data();
+            for (int64_t i = 0; i < count; ++i) {
+                data->Add(begin + i);
+            }
+        }
+        return ids;
+    };
+
+    auto stream_segment = CreateSegment(false);
+    SetRestoreTsRange(stream_segment, 100, 200);
+
+    auto stream_delete_ids = make_delete_ids(0, 1);
+    Timestamp hidden_delete_ts = 150;
+    ASSERT_TRUE(
+        stream_segment->Delete(1, stream_delete_ids.get(), &hidden_delete_ts)
+            .ok());
+    ASSERT_EQ(stream_segment->get_deleted_count(), 0);
+
+    Timestamp visible_delete_ts = 250;
+    ASSERT_TRUE(
+        stream_segment->Delete(1, stream_delete_ids.get(), &visible_delete_ts)
+            .ok());
+    ASSERT_EQ(stream_segment->get_deleted_count(), 1);
+
+    BitsetType stream_delete_mask(chunk_num * test_data_count);
+    BitsetTypeView stream_delete_mask_view(stream_delete_mask);
+    stream_segment->mask_with_delete(
+        stream_delete_mask_view, chunk_num * test_data_count, MAX_TIMESTAMP);
+    ASSERT_EQ(stream_delete_mask.count(), 1);
+
+    auto load_segment = CreateSegment(false);
+    SetRestoreTsRange(load_segment, 100, 200);
+
+    auto load_delete_ids = make_delete_ids(0, 2);
+    std::vector<Timestamp> load_delete_ts = {150, 250};
+    LoadDeletedRecordInfo load_deleted_record_info{
+        load_delete_ts.data(), load_delete_ids.get(), 2};
+    load_segment->LoadDeletedRecord(load_deleted_record_info);
+    ASSERT_EQ(load_segment->get_deleted_count(), 1);
+
+    BitsetType load_delete_mask(chunk_num * test_data_count);
+    BitsetTypeView load_delete_mask_view(load_delete_mask);
+    load_segment->mask_with_delete(
+        load_delete_mask_view, chunk_num * test_data_count, MAX_TIMESTAMP);
+    ASSERT_EQ(load_delete_mask.count(), 1);
 }
 
 TEST_P(TestChunkSegmentStorageV2, TestLazySystemIndexesOnSortedSegment) {

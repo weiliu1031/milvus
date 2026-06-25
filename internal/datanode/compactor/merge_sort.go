@@ -88,13 +88,14 @@ func mergeSortMultipleSegments(ctx context.Context,
 		}
 		reader = newMaterializedRecordReader(reader, materializer)
 		segmentReaders[i] = wrapReaderWithTimestampOverwrite(reader, s.GetCommitTimestamp())
-		delta, err := compaction.ComposeDeleteFromDeltalogs(ctx, pkField.DataType, s,
+		restoreTsRanges := compaction.NewRestoreTsRanges(s.GetRestoreTsRanges())
+		delta, err := compaction.ComposeDeleteFromDeltalogsWithRestoreTsRanges(ctx, pkField.DataType, s, restoreTsRanges,
 			storage.WithDownloader(binlogIO.Download),
 			storage.WithStorageConfig(compactionParams.StorageConfig))
 		if err != nil {
 			return nil, err
 		}
-		segmentFilters[i] = compaction.NewEntityFilter(delta, collectionTTL, currentTime, s.GetCommitTimestamp())
+		segmentFilters[i] = compaction.NewEntityFilter(delta, collectionTTL, currentTime, s.GetCommitTimestamp(), restoreTsRanges)
 	}
 
 	var predicate func(r storage.Record, ri, i int) bool

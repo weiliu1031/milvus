@@ -19,6 +19,7 @@ package datacoord
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -54,13 +55,13 @@ import (
 // - CreateTaskOnWorker: Assemble request from snapshot data and dispatch to DataNode
 // - QueryTaskOnWorker: Poll DataNode for task status and sync results
 // - DropTaskOnWorker: Clean up task resources on DataNode
-// - SyncCopySegmentTask: Update segment binlogs and indexes after successful copy
+// - SyncCopySegmentTask: Update segment binlogs and optional indexes after successful copy
 //
 // DATA FLOW:
 // 1. Read snapshot data from S3 (contains source segment binlogs)
 // 2. Build CopySegmentRequest with source/target segment mappings
 // 3. DataNode copies files and generates new binlog paths
-// 4. Sync binlogs, indexes (vector/scalar/text/JSON) to segment metadata
+// 4. Sync binlogs and, unless copy_index=false, indexes to segment metadata
 // 5. Mark segments as Flushed for query availability
 //
 // FAILURE HANDLING:
@@ -488,6 +489,18 @@ func WrapCopySegmentTaskLog(task CopySegmentTask, fields ...mlog.Field) []mlog.F
 // Request Assembly: Build CopySegmentRequest from Snapshot Data
 // ===========================================================================================
 
+func copyIndexEnabled(job CopySegmentJob) bool {
+	if job == nil {
+		return true
+	}
+	for _, kv := range job.GetOptions() {
+		if kv.GetKey() == "copy_index" {
+			return !strings.EqualFold(kv.GetValue(), "false")
+		}
+	}
+	return true
+}
+
 // AssembleCopySegmentRequest builds the request for DataNode copy segment operation.
 //
 // Process flow:
@@ -495,7 +508,7 @@ func WrapCopySegmentTaskLog(task CopySegmentTask, fields ...mlog.Field) []mlog.F
 //  2. Build source segment lookup map for efficient retrieval
 //  3. For each ID mapping in the task:
 //     a. Lookup source segment in snapshot data
-//     b. Build CopySegmentSource with full binlog paths (insert/stats/delta/index)
+//     b. Build CopySegmentSource with full binlog paths and optional index paths
 //     c. Build CopySegmentTarget with only IDs (binlogs generated during copy)
 //  4. Assemble CopySegmentRequest with sources, targets, and storage config
 //
@@ -509,7 +522,7 @@ func WrapCopySegmentTaskLog(task CopySegmentTask, fields ...mlog.Field) []mlog.F
 //
 // Why read full snapshot:
 // - Source segments contain complete binlog paths for all file types
-// - Index files (vector/scalar/text/JSON) need to be copied with segment data
+// - Index files are copied with segment data unless copy_index=false
 // - Snapshot is authoritative source for segment metadata
 //
 // Source vs Target:
@@ -518,6 +531,7 @@ func WrapCopySegmentTaskLog(task CopySegmentTask, fields ...mlog.Field) []mlog.F
 func AssembleCopySegmentRequest(task CopySegmentTask, job CopySegmentJob) (*datapb.CopySegmentRequest, error) {
 	t := task.(*copySegmentTask)
 	ctx := context.Background()
+	copyIndex := copyIndexEnabled(job)
 
 	// Read complete snapshot data from S3 to retrieve source segment binlogs
 	snapshotData, err := t.snapshotMeta.ReadSnapshotData(ctx, job.GetSourceCollectionId(), job.GetSnapshotName(), true)
@@ -563,46 +577,51 @@ func AssembleCopySegmentRequest(task CopySegmentTask, job CopySegmentJob) (*data
 			InsertBinlogs:        sourceSegDesc.GetBinlogs(),
 			StatsBinlogs:         sourceSegDesc.GetStatslogs(),
 			DeltaBinlogs:         sourceSegDesc.GetDeltalogs(),
-			IndexFiles:           sourceSegDesc.GetIndexFiles(),        // vector/scalar index file info
-			Bm25Binlogs:          sourceSegDesc.GetBm25Statslogs(),     // BM25 stats logs
-			TextIndexFiles:       sourceSegDesc.GetTextIndexFiles(),    // Text index files
-			JsonKeyIndexFiles:    sourceSegDesc.GetJsonKeyIndexFiles(), // JSON key index files
-			ManifestPath:         sourceSegDesc.GetManifestPath(),      // manifest path for StorageV3+
-			StorageVersion:       sourceSegDesc.GetStorageVersion(),    // storage version for binlog format decision
+			Bm25Binlogs:          sourceSegDesc.GetBm25Statslogs(),  // BM25 stats logs
+			ManifestPath:         sourceSegDesc.GetManifestPath(),   // manifest path for StorageV3+
+			StorageVersion:       sourceSegDesc.GetStorageVersion(), // storage version for binlog format decision
 			IsExternalCollection: isExternalCollection,
+		}
+		if copyIndex {
+			source.IndexFiles = sourceSegDesc.GetIndexFiles()
+			source.TextIndexFiles = sourceSegDesc.GetTextIndexFiles()
+			source.JsonKeyIndexFiles = sourceSegDesc.GetJsonKeyIndexFiles()
 		}
 		sources = append(sources, source)
 
 		// Collect all unique source build IDs from index files and allocate new ones
 		// to avoid buildID reuse across copy segments, which would corrupt the
 		// 1:1 segmentBuildInfo map in DataCoord indexMeta.
-		newBuildIDs := make(map[int64]int64)
-		allocNewBuildID := func(srcBuildID int64) error {
-			if _, exists := newBuildIDs[srcBuildID]; !exists {
-				newID, err := t.alloc.AllocID(ctx)
-				if err != nil {
-					return merr.Wrapf(err, "failed to allocate new buildID for source buildID %d", srcBuildID)
+		var newBuildIDs map[int64]int64
+		if copyIndex {
+			newBuildIDs = make(map[int64]int64)
+			allocNewBuildID := func(srcBuildID int64) error {
+				if _, exists := newBuildIDs[srcBuildID]; !exists {
+					newID, err := t.alloc.AllocID(ctx)
+					if err != nil {
+						return merr.Wrapf(err, "failed to allocate new buildID for source buildID %d", srcBuildID)
+					}
+					newBuildIDs[srcBuildID] = newID
 				}
-				newBuildIDs[srcBuildID] = newID
+				return nil
 			}
-			return nil
-		}
-		for _, indexFile := range sourceSegDesc.GetIndexFiles() {
-			if err := allocNewBuildID(indexFile.GetBuildID()); err != nil {
-				return nil, err
-			}
-		}
-		for _, textIndex := range sourceSegDesc.GetTextIndexFiles() {
-			if textIndex.GetBuildID() != 0 {
-				if err := allocNewBuildID(textIndex.GetBuildID()); err != nil {
+			for _, indexFile := range sourceSegDesc.GetIndexFiles() {
+				if err := allocNewBuildID(indexFile.GetBuildID()); err != nil {
 					return nil, err
 				}
 			}
-		}
-		for _, jsonKeyIndex := range sourceSegDesc.GetJsonKeyIndexFiles() {
-			if jsonKeyIndex.GetBuildID() != 0 {
-				if err := allocNewBuildID(jsonKeyIndex.GetBuildID()); err != nil {
-					return nil, err
+			for _, textIndex := range sourceSegDesc.GetTextIndexFiles() {
+				if textIndex.GetBuildID() != 0 {
+					if err := allocNewBuildID(textIndex.GetBuildID()); err != nil {
+						return nil, err
+					}
+				}
+			}
+			for _, jsonKeyIndex := range sourceSegDesc.GetJsonKeyIndexFiles() {
+				if jsonKeyIndex.GetBuildID() != 0 {
+					if err := allocNewBuildID(jsonKeyIndex.GetBuildID()); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -649,9 +668,9 @@ func AssembleCopySegmentRequest(task CopySegmentTask, job CopySegmentJob) (*data
 //     a. Compress binlog paths and fill logID
 //     b. Update segment binlogs (insert/stats/delta/BM25)
 //     c. Mark segment as Flushed
-//     d. Sync vector/scalar indexes to indexMeta
-//     e. Sync text indexes to segment metadata
-//     f. Sync JSON key indexes to segment metadata
+//     d. Unless copy_index=false, sync vector/scalar indexes to indexMeta
+//     e. Unless copy_index=false, sync text indexes to segment metadata
+//     f. Unless copy_index=false, sync JSON key indexes to segment metadata
 //  2. Record task execution metrics (executing duration, total duration)
 //  3. Mark task as completed with completion timestamp
 //
@@ -673,7 +692,7 @@ func AssembleCopySegmentRequest(task CopySegmentTask, job CopySegmentJob) (*data
 // - Vector/scalar indexes: Traditional dense/sparse vector and scalar indexes
 // - Text indexes: Full-text search indexes for VARCHAR fields
 // - JSON key indexes: Indexes on JSON field keys
-// - All must be copied and registered for query functionality
+// - Copied indexes are registered unless copy_index=false
 //
 // Error handling:
 // - Any error during sync marks both task and job as failed
@@ -685,6 +704,11 @@ func SyncCopySegmentTask(task CopySegmentTask, resp *datapb.QueryCopySegmentResp
 	// Update task state based on response
 	switch resp.GetState() {
 	case datapb.CopySegmentTaskState_CopySegmentTaskCompleted:
+		copyIndex := true
+		if job := copyMeta.GetJob(ctx, task.GetJobId()); job != nil {
+			copyIndex = copyIndexEnabled(job)
+		}
+
 		// Update binlog information for all segments
 		for _, result := range resp.GetSegmentResults() {
 			// Update binlog info and segment state to Flushed
@@ -722,19 +746,21 @@ func SyncCopySegmentTask(task CopySegmentTask, resp *datapb.QueryCopySegmentResp
 				return err
 			}
 
-			// Sync vector/scalar indexes
-			if err = syncVectorScalarIndexes(ctx, result, task, meta, copyMeta); err != nil {
-				return err
-			}
+			if copyIndex {
+				// Sync vector/scalar indexes
+				if err = syncVectorScalarIndexes(ctx, result, task, meta, copyMeta); err != nil {
+					return err
+				}
 
-			// Sync text indexes
-			if err = syncTextIndexes(ctx, result, task, meta, copyMeta); err != nil {
-				return err
-			}
+				// Sync text indexes
+				if err = syncTextIndexes(ctx, result, task, meta, copyMeta); err != nil {
+					return err
+				}
 
-			// Sync JSON key indexes
-			if err = syncJSONKeyIndexes(ctx, result, task, meta, copyMeta); err != nil {
-				return err
+				// Sync JSON key indexes
+				if err = syncJSONKeyIndexes(ctx, result, task, meta, copyMeta); err != nil {
+					return err
+				}
 			}
 
 			mlog.Info(context.TODO(), "update copy segment info done",

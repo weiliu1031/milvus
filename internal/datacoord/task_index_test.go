@@ -240,6 +240,43 @@ func (s *indexTaskSuite) TestCreateTaskOnWorker() {
 	})
 }
 
+func (s *indexTaskSuite) TestCreateTaskOnWorkerSkipsRestoreTsRangeSegment() {
+	catalog := catalogmocks.NewDataCoordCatalog(s.T())
+	catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Maybe()
+	mt := &meta{
+		segments: &SegmentsInfo{
+			segments: map[int64]*SegmentInfo{
+				s.segID: {
+					SegmentInfo: &datapb.SegmentInfo{
+						ID:            s.segID,
+						CollectionID:  s.collID,
+						PartitionID:   s.partID,
+						InsertChannel: "ch1",
+						NumOfRows:     65535,
+						State:         commonpb.SegmentState_Flushed,
+						MaxRowNum:     65535,
+						Level:         datapb.SegmentLevel_L2,
+						RestoreTsRanges: []*datapb.RestoreTsRange{
+							{LowerBound: 100, UpperBound: 200},
+						},
+					},
+				},
+			},
+		},
+		indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
+	}
+	segIndex, ok := mt.indexMeta.segmentBuildInfo.Get(s.taskID)
+	s.True(ok)
+
+	it := newIndexBuildTask(segIndex, 1, mt, nil, nil, newIndexEngineVersionManager())
+	cluster := session.NewMockCluster(s.T())
+
+	it.CreateTaskOnWorker(1, cluster)
+
+	s.Equal(indexpb.JobState_JobStateNone, indexpb.JobState(it.IndexState))
+	s.Equal("segment has restore timestamp ranges; wait for compaction", it.FailReason)
+}
+
 func (s *indexTaskSuite) TestCreateTaskOnWorkerVectorArrayMaxSimRequiresEnoughVectors() {
 	const (
 		dim        = 128

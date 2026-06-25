@@ -187,6 +187,97 @@ func (s *TaskStatsSuite) TestSortSegmentWithBM25() {
 	})
 }
 
+func (s *TaskStatsSuite) TestSortSegmentFiltersRestoreTsRange() {
+	s.Run("row timestamp", func() {
+		pkRows := s.runSortSegmentWithRestoreTsRange([]statsRestoreRangeRow{
+			{pk: 1, ts: 90},
+			{pk: 2, ts: 150},
+			{pk: 3, ts: 250},
+		}, 0)
+		s.Equal(int64(2), pkRows)
+	})
+
+	s.Run("commit timestamp", func() {
+		pkRows := s.runSortSegmentWithRestoreTsRange([]statsRestoreRangeRow{
+			{pk: 1, ts: 90},
+			{pk: 2, ts: 250},
+		}, 150)
+		s.Equal(int64(1), pkRows)
+	})
+}
+
+type statsRestoreRangeRow struct {
+	pk int64
+	ts int64
+}
+
+func (s *TaskStatsSuite) runSortSegmentWithRestoreTsRange(rows []statsRestoreRangeRow, commitTs uint64) int64 {
+	s.schema = genCollectionSchemaWithBM25()
+	segWriter, err := compactor.NewSegmentWriter(s.schema, 100, statsBatchSize, 0, s.partitionID, s.collectionID, []int64{102})
+	s.Require().NoError(err)
+	for _, row := range rows {
+		err = segWriter.Write(&storage.Value{
+			PK:        storage.NewInt64PrimaryKey(row.pk),
+			Timestamp: row.ts,
+			Value:     genRowWithBM25Timestamp(row.pk, row.ts),
+		})
+		s.Require().NoError(err)
+	}
+	segWriter.FlushAndIsFull()
+
+	_, kvs, fBinlogs, err := serializeWrite(context.TODO(), "root_path", 0, segWriter)
+	s.Require().NoError(err)
+	s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, paths []string) ([][]byte, error) {
+		result := make([][]byte, len(paths))
+		for i, path := range paths {
+			result[i] = kvs[path]
+		}
+		return result, nil
+	})
+	s.mockBinlogIO.EXPECT().Upload(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	testTaskKey := Key{ClusterID: s.clusterID, TaskID: 100}
+	manager := NewTaskManager(ctx)
+	manager.LoadOrStoreStatsTask(s.clusterID, testTaskKey.TaskID, &StatsTaskInfo{SegID: 1})
+	task := NewStatsTask(ctx, cancel, &workerpb.CreateStatsRequest{
+		CollectionID:    s.collectionID,
+		PartitionID:     s.partitionID,
+		ClusterID:       s.clusterID,
+		TaskID:          testTaskKey.TaskID,
+		TargetSegmentID: 1,
+		SegmentID:       100,
+		InsertLogs:      lo.Values(fBinlogs),
+		Schema:          s.schema,
+		NumRows:         int64(len(rows)),
+		StartLogID:      0,
+		EndLogID:        7,
+		BinlogMaxSize:   64 * 1024 * 1024,
+		StorageConfig: &indexpb.StorageConfig{
+			RootPath: "root_path",
+		},
+		RestoreTsRanges: []*datapb.RestoreTsRange{{LowerBound: 100, UpperBound: 200}},
+		CommitTimestamp: commitTs,
+	}, manager, s.mockChunkManager)
+	task.binlogIO = s.mockBinlogIO
+
+	err = task.PreExecute(ctx)
+	s.Require().NoError(err)
+	binlogs, err := task.sort(ctx)
+	s.Require().NoError(err)
+
+	var pkRows int64
+	for _, fieldBinlog := range binlogs {
+		if fieldBinlog.GetFieldID() != 100 {
+			continue
+		}
+		for _, binlog := range fieldBinlog.GetBinlogs() {
+			pkRows += binlog.GetEntriesNum()
+		}
+	}
+	return pkRows
+}
+
 func (s *TaskStatsSuite) TestBuildIndexParams() {
 	s.Run("test storage v2 index params", func() {
 		req := &workerpb.CreateStatsRequest{
@@ -289,9 +380,13 @@ func genCollectionSchemaWithBM25() *schemapb.CollectionSchema {
 
 func genRowWithBM25(magic int64) map[int64]interface{} {
 	ts := tsoutil.ComposeTSByTime(getMilvusBirthday(), 0)
+	return genRowWithBM25Timestamp(magic, int64(ts))
+}
+
+func genRowWithBM25Timestamp(magic int64, ts int64) map[int64]interface{} {
 	return map[int64]interface{}{
 		common.RowIDField:     magic,
-		common.TimeStampField: int64(ts),
+		common.TimeStampField: ts,
 		100:                   magic,
 		101:                   "varchar",
 		102:                   typeutil.CreateAndSortSparseFloatRow(map[uint32]float32{1: 1}),

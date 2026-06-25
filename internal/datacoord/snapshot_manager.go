@@ -961,6 +961,13 @@ func (sm *snapshotManager) RestoreData(
 		return 0, merr.Wrap(err, "failed to read snapshot data")
 	}
 
+	targetCollectionResp, err := sm.broker.DescribeCollectionInternal(ctx, collectionID)
+	if err != nil {
+		mlog.Error(ctx, "failed to describe target collection", mlog.Err(err))
+		return 0, merr.Wrap(err, "failed to describe target collection")
+	}
+	restoreCreateTs := targetCollectionResp.GetCreatedTimestamp()
+
 	// ========== Phase 2: Build partition mapping ==========
 	partitionMapping, err := sm.buildPartitionMapping(ctx, snapshotData, collectionID)
 	if err != nil {
@@ -978,7 +985,7 @@ func (sm *snapshotManager) RestoreData(
 
 	// ========== Phase 4: Create copy segment job ==========
 	// Use the pre-allocated jobID from the WAL message
-	if err := sm.createRestoreJob(ctx, collectionID, channelMapping, partitionMapping, snapshotData, jobID, pinID); err != nil {
+	if err := sm.createRestoreJob(ctx, collectionID, channelMapping, partitionMapping, snapshotData, jobID, pinID, restoreCreateTs); err != nil {
 		mlog.Error(context.TODO(), "failed to create restore job", mlog.Err(err))
 		return 0, merr.Wrap(err, "restore job creation failed")
 	}
@@ -1111,6 +1118,31 @@ func (sm *snapshotManager) buildChannelMapping(
 	return mapping, nil
 }
 
+func cloneRestoreTsRanges(ranges []*datapb.RestoreTsRange) []*datapb.RestoreTsRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([]*datapb.RestoreTsRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r == nil || r.GetLowerBound() >= r.GetUpperBound() {
+			continue
+		}
+		out = append(out, proto.Clone(r).(*datapb.RestoreTsRange))
+	}
+	return out
+}
+
+func appendRestoreTsRange(existing []*datapb.RestoreTsRange, snapshotCreateTs, restoreCreateTs uint64) []*datapb.RestoreTsRange {
+	out := cloneRestoreTsRanges(existing)
+	if snapshotCreateTs == 0 || restoreCreateTs == 0 || snapshotCreateTs >= restoreCreateTs {
+		return out
+	}
+	return append(out, &datapb.RestoreTsRange{
+		LowerBound: snapshotCreateTs,
+		UpperBound: restoreCreateTs,
+	})
+}
+
 // createRestoreJob creates a copy segment job for snapshot restore.
 // This is the internal implementation of restoreSnapshotByCopy from services.go.
 // The jobID must be pre-allocated by the caller.
@@ -1122,6 +1154,7 @@ func (sm *snapshotManager) createRestoreJob(
 	snapshotData *SnapshotData,
 	jobID int64,
 	pinID int64,
+	restoreCreateTs uint64,
 ) error {
 	// Validate which segments exist in meta
 	validSegments := make([]*datapb.SegmentDescription, 0, len(snapshotData.Segments))
@@ -1148,6 +1181,7 @@ func (sm *snapshotManager) createRestoreJob(
 	idMappings := make([]*datapb.CopySegmentIDMapping, 0, len(validSegments))
 	totalRows := int64(0)
 	targetSegments := make(map[int64]*SegmentInfo, len(validSegments))
+	snapshotCreateTs := uint64(snapshotData.SnapshotInfo.GetCreateTs())
 	for i, segDesc := range validSegments {
 		sourceSegmentID := segDesc.GetSegmentId()
 		targetSegmentID := targetSegmentIDStart + int64(i)
@@ -1212,6 +1246,7 @@ func (sm *snapshotManager) createRestoreJob(
 				StorageVersion:      segDesc.GetStorageVersion(),
 				IsSorted:            segDesc.GetIsSorted(),
 				CommitTimestamp:     segDesc.GetCommitTimestamp(),
+				RestoreTsRanges:     appendRestoreTsRange(segDesc.GetRestoreTsRanges(), snapshotCreateTs, restoreCreateTs),
 				IsImporting:         true,
 			},
 		}
@@ -1251,7 +1286,7 @@ func (sm *snapshotManager) createRestoreJob(
 			TimeoutTs:    uint64(time.Now().Add(jobTimeout).UnixNano()),
 			StartTs:      uint64(time.Now().UnixNano()),
 			Options: []*commonpb.KeyValuePair{
-				{Key: "copy_index", Value: "true"},
+				{Key: "copy_index", Value: "false"},
 				{Key: "source_type", Value: "snapshot"},
 			},
 			TotalSegments:      int64(len(idMappings)),

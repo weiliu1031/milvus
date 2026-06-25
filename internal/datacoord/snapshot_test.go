@@ -764,6 +764,88 @@ func TestSnapshotManifest_FieldBinlogChildFieldsAndFormatRoundtripV4(t *testing.
 	assert.Equal(t, "parquet", segments[0].GetBinlogs()[0].GetFormat())
 }
 
+func TestSnapshotManifestRestoreTsRangesV5(t *testing.T) {
+	tempDir := t.TempDir()
+	cm := storage.NewLocalChunkManager(objectstorage.RootPath(tempDir))
+	reader := NewSnapshotReader(cm)
+
+	segment := &datapb.SegmentDescription{
+		SegmentId:       100,
+		PartitionId:     10,
+		SegmentLevel:    datapb.SegmentLevel_L1,
+		ChannelName:     "by-dev-rootcoord-dml_0_1v0",
+		NumOfRows:       1000,
+		StartPosition:   &msgpb.MsgPosition{Timestamp: 100},
+		DmlPosition:     &msgpb.MsgPosition{Timestamp: 500},
+		StorageVersion:  0,
+		CommitTimestamp: 0,
+		RestoreTsRanges: []*datapb.RestoreTsRange{
+			{LowerBound: 200, UpperBound: 400},
+			{LowerBound: 450, UpperBound: 500},
+		},
+	}
+
+	entry := convertSegmentToManifestEntry(segment)
+	require.Len(t, entry.RestoreTsRanges, 2)
+	require.Equal(t, int64(200), entry.RestoreTsRanges[0].LowerBound)
+	require.Equal(t, int64(400), entry.RestoreTsRanges[0].UpperBound)
+
+	restored := convertAvroToRestoreTsRanges(entry.RestoreTsRanges)
+	require.Len(t, restored, 2)
+	require.Equal(t, uint64(450), restored[1].GetLowerBound())
+	require.Equal(t, uint64(500), restored[1].GetUpperBound())
+	require.Contains(t, getAvroSchemaV5(), "restore_ts_ranges")
+	require.NotContains(t, getAvroSchemaV4(), "restore_ts_ranges")
+	require.Equal(t, 5, SnapshotFormatVersion)
+
+	v5Schema, err := getManifestSchemaByVersion(5)
+	require.NoError(t, err)
+	binaryData, err := avro.Marshal(v5Schema, entry)
+	require.NoError(t, err)
+
+	manifestPath := path.Join(tempDir, "v5_manifest.avro")
+	require.NoError(t, cm.Write(context.Background(), manifestPath, binaryData))
+
+	segments, err := reader.readManifestFile(context.Background(), manifestPath, 5)
+	require.NoError(t, err)
+	require.Len(t, segments, 1)
+	require.Len(t, segments[0].GetRestoreTsRanges(), 2)
+	require.Equal(t, uint64(200), segments[0].GetRestoreTsRanges()[0].GetLowerBound())
+	require.Equal(t, uint64(400), segments[0].GetRestoreTsRanges()[0].GetUpperBound())
+	require.Equal(t, uint64(450), segments[0].GetRestoreTsRanges()[1].GetLowerBound())
+	require.Equal(t, uint64(500), segments[0].GetRestoreTsRanges()[1].GetUpperBound())
+}
+
+func TestSnapshotManifestRestoreTsRangesV5_LegacyV4ManifestDecodesEmptyRanges(t *testing.T) {
+	tempDir := t.TempDir()
+	cm := storage.NewLocalChunkManager(objectstorage.RootPath(tempDir))
+	reader := NewSnapshotReader(cm)
+
+	segment := &datapb.SegmentDescription{
+		SegmentId:   1001,
+		PartitionId: 2001,
+		RestoreTsRanges: []*datapb.RestoreTsRange{
+			{LowerBound: 200, UpperBound: 400},
+		},
+	}
+	entry := convertSegmentToManifestEntry(segment)
+	require.Len(t, entry.RestoreTsRanges, 1)
+
+	require.NotContains(t, getAvroSchemaV4(), "restore_ts_ranges")
+	v4Schema, err := getManifestSchemaByVersion(4)
+	require.NoError(t, err)
+	binaryData, err := avro.Marshal(v4Schema, entry)
+	require.NoError(t, err)
+
+	manifestPath := path.Join(tempDir, "v4_manifest.avro")
+	require.NoError(t, cm.Write(context.Background(), manifestPath, binaryData))
+
+	segments, err := reader.readManifestFile(context.Background(), manifestPath, 4)
+	require.NoError(t, err)
+	require.Len(t, segments, 1)
+	require.Empty(t, segments[0].GetRestoreTsRanges())
+}
+
 func TestSnapshotManifest_LegacyV3NoChildFieldsOrFormat(t *testing.T) {
 	tempDir := t.TempDir()
 	cm := storage.NewLocalChunkManager(objectstorage.RootPath(tempDir))
@@ -1295,6 +1377,11 @@ func TestValidateFormatVersion(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "version_5_current",
+			version: 5,
+			wantErr: false,
+		},
+		{
 			name:        "version_100_future",
 			version:     100,
 			wantErr:     true,
@@ -1345,6 +1432,11 @@ func TestGetManifestSchemaByVersion(t *testing.T) {
 		{
 			name:    "version_4_current",
 			version: 4,
+			wantErr: false,
+		},
+		{
+			name:    "version_5_current",
+			version: 5,
 			wantErr: false,
 		},
 		{

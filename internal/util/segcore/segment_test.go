@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -180,6 +181,30 @@ func TestConvertToSegcoreSegmentLoadInfo_CommitTimestamp(t *testing.T) {
 	assert.NotNil(t, result2)
 	assert.Equal(t, int64(43), result2.GetSegmentID(),
 		"SegmentID must be preserved through conversion when CommitTimestamp is zero")
+}
+
+func TestConvertToSegcoreSegmentLoadInfo_RestoreTsRanges(t *testing.T) {
+	src := &querypb.SegmentLoadInfo{
+		SegmentID: 1,
+		RestoreTsRanges: []*datapb.RestoreTsRange{
+			{LowerBound: 100, UpperBound: 200},
+			nil,
+			{LowerBound: 300, UpperBound: 300},
+			{LowerBound: 500, UpperBound: 400},
+			{LowerBound: 600, UpperBound: 700},
+		},
+	}
+
+	result := segcore.ConvertToSegcoreSegmentLoadInfo(src)
+	require.NotNil(t, result)
+	ranges := result.GetRestoreTsRanges()
+	require.Len(t, ranges, 2)
+	require.NotNil(t, ranges[0])
+	require.NotNil(t, ranges[1])
+	assert.Equal(t, uint64(100), ranges[0].GetLowerBound())
+	assert.Equal(t, uint64(200), ranges[0].GetUpperBound())
+	assert.Equal(t, uint64(600), ranges[1].GetLowerBound())
+	assert.Equal(t, uint64(700), ranges[1].GetUpperBound())
 }
 
 func TestConvertToSegcoreSegmentLoadInfo(t *testing.T) {

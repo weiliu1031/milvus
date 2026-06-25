@@ -168,6 +168,12 @@ func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 		it.SetState(indexpb.JobState_JobStateNone, "task is no need to build index")
 		return
 	}
+	if len(segment.GetRestoreTsRanges()) > 0 {
+		log.Info(ctx, "skip index build for segment with restore timestamp ranges",
+			mlog.Int("rangeCount", len(segment.GetRestoreTsRanges())))
+		it.SetState(indexpb.JobState_JobStateNone, "segment has restore timestamp ranges; wait for compaction")
+		return
+	}
 
 	// Handle special cases for certain index types or small segments
 	indexParams := it.meta.indexMeta.GetIndexParams(segIndex.CollectionID, segIndex.IndexID)

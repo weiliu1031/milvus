@@ -359,6 +359,12 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         return insert_record_.timestamp_index_.get_max_timestamp();
     }
 
+    bool
+    HasRestoreTsRanges() const override {
+        std::shared_lock lck(mutex_);
+        return !restore_ts_ranges_.empty();
+    }
+
     const Schema&
     get_schema() const override;
 
@@ -1485,6 +1491,15 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     // InsertRecord needs to pin pk column.
     friend class storagev1translator::InsertRecordTranslator;
 
+    std::vector<RestoreTsRange>
+    GetRestoreTsRangesSnapshot() const;
+
+    std::pair<std::optional<Timestamp>, std::vector<RestoreTsRange>>
+    GetTimestampMaskMetadata() const;
+
+    void
+    SetTimestampMaskMetadata(const SegmentLoadInfo& segment_load_info);
+
     // mmap descriptor, used in chunk cache
     storage::MmapChunkDescriptorPtr mmap_descriptor_ = nullptr;
     // segment loading state
@@ -1548,6 +1563,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     // commit_ts_ is set for import segments to prevent rows with old historical
     // timestamps from being visible to queries before T_commit.
     uint64_t commit_ts_{0};
+    std::vector<RestoreTsRange> restore_ts_ranges_;
     mutable folly::Synchronized<
         std::unordered_map<FieldId, std::shared_ptr<ChunkedColumnInterface>>>
         fields_;

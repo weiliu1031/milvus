@@ -40,6 +40,16 @@
 
 namespace milvus::segcore {
 
+struct RestoreTsRange {
+    Timestamp lower_bound;
+    Timestamp upper_bound;
+
+    [[nodiscard]] bool
+    Contains(Timestamp ts) const {
+        return lower_bound < ts && ts < upper_bound;
+    }
+};
+
 /**
  * @brief Structure representing the difference between two SegmentLoadInfos,
  *       used for reopening segments.
@@ -585,6 +595,25 @@ class SegmentLoadInfo {
     [[nodiscard]] int64_t
     GetEstimatedBytesPerRow() const {
         return info_.estimated_bytes_per_row();
+    }
+
+    [[nodiscard]] uint64_t
+    GetCommitTimestamp() const {
+        return info_.commit_timestamp();
+    }
+
+    [[nodiscard]] std::vector<RestoreTsRange>
+    GetRestoreTsRanges() const {
+        std::vector<RestoreTsRange> ranges;
+        ranges.reserve(info_.restore_ts_ranges_size());
+        for (const auto& range : info_.restore_ts_ranges()) {
+            auto lower_bound = static_cast<Timestamp>(range.lower_bound());
+            auto upper_bound = static_cast<Timestamp>(range.upper_bound());
+            if (lower_bound < upper_bound) {
+                ranges.emplace_back(RestoreTsRange{lower_bound, upper_bound});
+            }
+        }
+        return ranges;
     }
 
     // ==================== Compaction Info ====================

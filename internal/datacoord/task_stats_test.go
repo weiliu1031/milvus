@@ -668,6 +668,10 @@ func (s *statsTaskSuite) TestPrepareJobRequest() {
 		segment.Deltalogs = []*datapb.FieldBinlog{
 			{FieldID: 1, Binlogs: []*datapb.Binlog{{LogPath: "deltalog1"}}},
 		}
+		segment.RestoreTsRanges = []*datapb.RestoreTsRange{
+			{LowerBound: 100, UpperBound: 200},
+		}
+		segment.CommitTimestamp = 250
 
 		req, err := st.prepareJobRequest(context.Background(), segment)
 		s.NoError(err)
@@ -681,5 +685,7 @@ func (s *statsTaskSuite) TestPrepareJobRequest() {
 		s.Equal(startID, req.StartLogID)
 		s.Equal(endID, req.EndLogID)
 		s.Equal(int64(1000), req.NumRows)
+		s.Equal(segment.GetRestoreTsRanges(), req.GetRestoreTsRanges())
+		s.Equal(segment.GetCommitTimestamp(), req.GetCommitTimestamp())
 	})
 }

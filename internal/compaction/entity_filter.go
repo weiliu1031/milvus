@@ -3,6 +3,7 @@ package compaction
 import (
 	"time"
 
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -16,8 +17,45 @@ type EntityFilter interface {
 	GetMissingDeleteCount() int
 }
 
-func NewEntityFilter(deletedPkTs map[interface{}]typeutil.Timestamp, ttl int64, currTime time.Time, commitTs typeutil.Timestamp) EntityFilter {
-	return newEntityFilter(deletedPkTs, ttl, currTime, commitTs)
+type RestoreTsRange struct {
+	LowerBound typeutil.Timestamp
+	UpperBound typeutil.Timestamp
+}
+
+func NewRestoreTsRanges(ranges []*datapb.RestoreTsRange) []RestoreTsRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([]RestoreTsRange, 0, len(ranges))
+	for _, r := range ranges {
+		if r == nil || r.GetLowerBound() >= r.GetUpperBound() {
+			continue
+		}
+		out = append(out, RestoreTsRange{
+			LowerBound: r.GetLowerBound(),
+			UpperBound: r.GetUpperBound(),
+		})
+	}
+	return out
+}
+
+func IsInRestoreTsRanges(ts typeutil.Timestamp, ranges []RestoreTsRange) bool {
+	for _, r := range ranges {
+		if r.LowerBound < ts && ts < r.UpperBound {
+			return true
+		}
+	}
+	return false
+}
+
+func NewEntityFilter(
+	deletedPkTs map[interface{}]typeutil.Timestamp,
+	ttl int64,
+	currTime time.Time,
+	commitTs typeutil.Timestamp,
+	restoreTsRanges []RestoreTsRange,
+) EntityFilter {
+	return newEntityFilter(deletedPkTs, ttl, currTime, commitTs, restoreTsRanges)
 }
 
 type EntityFilterImpl struct {
@@ -31,23 +69,36 @@ type EntityFilterImpl struct {
 	// pre-commit delete is applied.
 	commitTs typeutil.Timestamp
 
+	restoreTsRanges []RestoreTsRange
+
 	expiredCount int
 	deletedCount int
 }
 
-func newEntityFilter(deletedPkTs map[interface{}]typeutil.Timestamp, ttl int64, currTime time.Time, commitTs typeutil.Timestamp) *EntityFilterImpl {
+func newEntityFilter(
+	deletedPkTs map[interface{}]typeutil.Timestamp,
+	ttl int64,
+	currTime time.Time,
+	commitTs typeutil.Timestamp,
+	restoreTsRanges []RestoreTsRange,
+) *EntityFilterImpl {
 	if deletedPkTs == nil {
 		deletedPkTs = make(map[interface{}]typeutil.Timestamp)
 	}
 	return &EntityFilterImpl{
-		deletedPkTs: deletedPkTs,
-		ttl:         ttl,
-		currentTime: currTime,
-		commitTs:    commitTs,
+		deletedPkTs:     deletedPkTs,
+		ttl:             ttl,
+		currentTime:     currTime,
+		commitTs:        commitTs,
+		restoreTsRanges: restoreTsRanges,
 	}
 }
 
 func (filter *EntityFilterImpl) Filtered(pk any, ts typeutil.Timestamp, expirationTimeMicros int64) bool {
+	if filter.isEntityInRestoreRange(ts) {
+		return true
+	}
+
 	if filter.isEntityDeleted(pk, ts) {
 		filter.deletedCount++
 		return true
@@ -84,6 +135,11 @@ func (filter *EntityFilterImpl) GetMissingDeleteCount() int {
 		diff = 0
 	}
 	return diff
+}
+
+func (filter *EntityFilterImpl) isEntityInRestoreRange(entityTs typeutil.Timestamp) bool {
+	effectiveTs := tsoutil.EffectiveTimestamp(entityTs, filter.commitTs)
+	return IsInRestoreTsRanges(effectiveTs, filter.restoreTsRanges)
 }
 
 func (filter *EntityFilterImpl) isEntityDeleted(pk interface{}, pkTs typeutil.Timestamp) bool {

@@ -426,7 +426,7 @@ func (t *LevelZeroCompactionTask) process(ctx context.Context, l0MemSize int64, 
 		return nil, err
 	}
 
-	allDelta, err := compaction.ComposeDeleteDataFromSegments(ctx, pkField.DataType, l0Segments,
+	allDelta, err := compaction.ComposeDeleteDataFromSegmentsWithRestoreTsRanges(ctx, pkField.DataType, l0Segments,
 		storage.WithDownloader(t.Download),
 		storage.WithStorageConfig(t.compactionParams.StorageConfig))
 	if err != nil {

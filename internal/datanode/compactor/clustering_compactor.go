@@ -573,11 +573,12 @@ func (t *clusteringCompactionTask) mappingSegment(
 		storage.WithDownloader(t.binlogIO.Download),
 		storage.WithStorageConfig(t.compactionParams.StorageConfig),
 	}
-	delta, err := compaction.ComposeDeleteFromDeltalogs(ctx, t.primaryKeyField.DataType, segment, options...)
+	restoreTsRanges := compaction.NewRestoreTsRanges(segment.GetRestoreTsRanges())
+	delta, err := compaction.ComposeDeleteFromDeltalogsWithRestoreTsRanges(ctx, t.primaryKeyField.DataType, segment, restoreTsRanges, options...)
 	if err != nil {
 		return err
 	}
-	entityFilter := compaction.NewEntityFilter(delta, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp())
+	entityFilter := compaction.NewEntityFilter(delta, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp(), restoreTsRanges)
 
 	mappingStats := &clusteringpb.ClusteringCentroidIdMappingStats{}
 	if t.isVectorClusteringKey {
@@ -900,7 +901,8 @@ func (t *clusteringCompactionTask) scalarAnalyzeSegment(
 	}
 	mlog.Debug(context.TODO(), "binlogNum", mlog.Int("binlogNum", binlogNum))
 
-	expiredFilter := compaction.NewEntityFilter(nil, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp())
+	restoreTsRanges := compaction.NewRestoreTsRanges(segment.GetRestoreTsRanges())
+	expiredFilter := compaction.NewEntityFilter(nil, t.plan.GetCollectionTtl(), t.currentTime, segment.GetCommitTimestamp(), restoreTsRanges)
 	requiredFields := typeutil.NewSet[int64]()
 	requiredFields.Insert(0, 1, t.primaryKeyField.GetFieldID(), t.clusteringKeyField.GetFieldID())
 	if t.ttlFieldID >= common.StartOfUserFieldID {

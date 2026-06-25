@@ -67,7 +67,7 @@ func (s *EntityFilterSuite) TestEntityFilterByTTL() {
 	}
 	for _, test := range tests {
 		s.Run(test.description, func() {
-			filter := newEntityFilter(nil, test.collTTL, test.nowTime, 0)
+			filter := newEntityFilter(nil, test.collTTL, test.nowTime, 0, nil)
 
 			entityTs := tsoutil.ComposeTSByTime(test.entityTime, 0)
 			got := filter.Filtered("mockpk", entityTs, -1)
@@ -99,7 +99,7 @@ func (s *EntityFilterSuite) TestEntityFilterByTTLWithCommitTs() {
 	ttlOneHour := int64(1 * time.Hour)
 
 	s.Run("without commitTs: row expires (baseline)", func() {
-		filter := newEntityFilter(nil, ttlOneHour, nowTime, 0)
+		filter := newEntityFilter(nil, ttlOneHour, nowTime, 0, nil)
 		got := filter.Filtered("pk1", entityTs, -1)
 		s.True(got, "row should expire without commitTs protection")
 	})
@@ -108,7 +108,7 @@ func (s *EntityFilterSuite) TestEntityFilterByTTLWithCommitTs() {
 		// commitTs is 30 minutes ago — within TTL.
 		recentCommitTime := nowTime.Add(-30 * time.Minute)
 		commitTs := tsoutil.ComposeTSByTime(recentCommitTime, 0)
-		filter := newEntityFilter(nil, ttlOneHour, nowTime, commitTs)
+		filter := newEntityFilter(nil, ttlOneHour, nowTime, commitTs, nil)
 		got := filter.Filtered("pk1", entityTs, -1)
 		s.False(got, "row should not expire when commitTs is within TTL window")
 	})
@@ -117,7 +117,7 @@ func (s *EntityFilterSuite) TestEntityFilterByTTLWithCommitTs() {
 		// commitTs is 2 hours ago — beyond TTL.
 		expiredCommitTime := nowTime.Add(-2 * time.Hour)
 		commitTs := tsoutil.ComposeTSByTime(expiredCommitTime, 0)
-		filter := newEntityFilter(nil, ttlOneHour, nowTime, commitTs)
+		filter := newEntityFilter(nil, ttlOneHour, nowTime, commitTs, nil)
 		got := filter.Filtered("pk1", entityTs, -1)
 		s.True(got, "row should expire when both row_ts and commitTs are beyond TTL")
 	})
@@ -128,14 +128,14 @@ func (s *EntityFilterSuite) TestEntityFilterByTTLWithCommitTs() {
 		expiredTimeMicros := nowTime.Add(-1 * time.Hour).UnixMicro()
 		recentCommitTime := nowTime.Add(-30 * time.Minute)
 		commitTs := tsoutil.ComposeTSByTime(recentCommitTime, 0)
-		filter := newEntityFilter(nil, ttlOneHour, nowTime, commitTs)
+		filter := newEntityFilter(nil, ttlOneHour, nowTime, commitTs, nil)
 		got := filter.Filtered("pk1", tsoutil.ComposeTSByTime(recentCommitTime, 0), expiredTimeMicros)
 		s.True(got, "ttl_field expiration should apply even when commitTs is set")
 	})
 
 	s.Run("without commitTs: ttl_field expiration applies", func() {
 		expiredTimeMicros := nowTime.Add(-1 * time.Hour).UnixMicro()
-		filter := newEntityFilter(nil, ttlOneHour, nowTime, 0)
+		filter := newEntityFilter(nil, ttlOneHour, nowTime, 0, nil)
 		// Use a recent entity ts so TTL by timestamp alone would NOT expire it.
 		recentTs := tsoutil.ComposeTSByTime(nowTime.Add(-30*time.Minute), 0)
 		got := filter.Filtered("pk1", recentTs, expiredTimeMicros)
@@ -175,7 +175,7 @@ func (s *EntityFilterSuite) TestEntityFilterByDeleteWithCommitTs() {
 			deletedPkTs := map[interface{}]typeutil.Timestamp{
 				"pk1": test.deleteTs,
 			}
-			filter := newEntityFilter(deletedPkTs, 0, nowTime, test.commitTs)
+			filter := newEntityFilter(deletedPkTs, 0, nowTime, test.commitTs, nil)
 			got := filter.Filtered("pk1", test.rowTs, -1)
 			s.Equal(test.expect, got)
 			if got {
@@ -186,6 +186,25 @@ func (s *EntityFilterSuite) TestEntityFilterByDeleteWithCommitTs() {
 			}
 		})
 	}
+}
+
+func (s *EntityFilterSuite) TestEntityFilterByRestoreTsRange() {
+	nowTime := time.Now()
+	ranges := []RestoreTsRange{{LowerBound: 100, UpperBound: 200}}
+	filter := newEntityFilter(nil, 0, nowTime, 0, ranges)
+
+	s.False(filter.Filtered(int64(1), 100, -1))
+	s.True(filter.Filtered(int64(1), 101, -1))
+	s.True(filter.Filtered(int64(1), 199, -1))
+	s.False(filter.Filtered(int64(1), 200, -1))
+}
+
+func (s *EntityFilterSuite) TestEntityFilterByRestoreTsRangeWithCommitTs() {
+	nowTime := time.Now()
+	ranges := []RestoreTsRange{{LowerBound: 100, UpperBound: 200}}
+	filter := newEntityFilter(nil, 0, nowTime, 150, ranges)
+
+	s.True(filter.Filtered(int64(1), 1, -1))
 }
 
 func getMilvusBirthday() time.Time {

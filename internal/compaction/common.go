@@ -149,6 +149,21 @@ func ComposeDeleteFromDeltalogs(
 	return buildPk2TsMap(pks, tss), nil
 }
 
+func ComposeDeleteFromDeltalogsWithRestoreTsRanges(
+	ctx context.Context,
+	pkType schemapb.DataType,
+	segment *datapb.CompactionSegmentBinlogs,
+	restoreTsRanges []RestoreTsRange,
+	option ...storage.RwOption,
+) (map[any]typeutil.Timestamp, error) {
+	pks, tss, err := readFromSegment(ctx, pkType, segment, option...)
+	if err != nil {
+		return nil, err
+	}
+	pks, tss = filterRestoreRangeDeletes(pks, tss, restoreTsRanges)
+	return buildPk2TsMap(pks, tss), nil
+}
+
 // ComposeDeleteDataFromDeltalogs reads deltalogs from segment and returns DeleteData.
 // Auto-detects V1/V2 based on segment.GetManifest().
 func ComposeDeleteDataFromDeltalogs(
@@ -161,6 +176,21 @@ func ComposeDeleteDataFromDeltalogs(
 	if err != nil {
 		return nil, err
 	}
+	return storage.NewDeleteData(pks, tss), nil
+}
+
+func ComposeDeleteDataFromDeltalogsWithRestoreTsRanges(
+	ctx context.Context,
+	pkType schemapb.DataType,
+	segment *datapb.CompactionSegmentBinlogs,
+	restoreTsRanges []RestoreTsRange,
+	option ...storage.RwOption,
+) (*storage.DeleteData, error) {
+	pks, tss, err := readFromSegment(ctx, pkType, segment, option...)
+	if err != nil {
+		return nil, err
+	}
+	pks, tss = filterRestoreRangeDeletes(pks, tss, restoreTsRanges)
 	return storage.NewDeleteData(pks, tss), nil
 }
 
@@ -187,6 +217,29 @@ func ComposeDeleteDataFromSegments(
 	return storage.NewDeleteData(allPks, allTss), nil
 }
 
+func ComposeDeleteDataFromSegmentsWithRestoreTsRanges(
+	ctx context.Context,
+	pkType schemapb.DataType,
+	segments []*datapb.CompactionSegmentBinlogs,
+	option ...storage.RwOption,
+) (*storage.DeleteData, error) {
+	var allPks []storage.PrimaryKey
+	var allTss []typeutil.Timestamp
+
+	for _, segment := range segments {
+		pks, tss, err := readFromSegment(ctx, pkType, segment, option...)
+		if err != nil {
+			return nil, err
+		}
+		restoreTsRanges := NewRestoreTsRanges(segment.GetRestoreTsRanges())
+		pks, tss = filterRestoreRangeDeletes(pks, tss, restoreTsRanges)
+		allPks = append(allPks, pks...)
+		allTss = append(allTss, tss...)
+	}
+
+	return storage.NewDeleteData(allPks, allTss), nil
+}
+
 // ComposeDeleteFromDeltalogsV1 reads V1 deltalogs and returns a map of pk to timestamp.
 // For legacy code without segment info.
 func ComposeDeleteFromDeltalogsV1(
@@ -200,6 +253,41 @@ func ComposeDeleteFromDeltalogsV1(
 		return nil, err
 	}
 	return buildPk2TsMap(pks, tss), nil
+}
+
+func ComposeDeleteFromDeltalogsV1WithRestoreTsRanges(
+	ctx context.Context,
+	pkType schemapb.DataType,
+	deltalogs []*datapb.FieldBinlog,
+	restoreTsRanges []RestoreTsRange,
+	option ...storage.RwOption,
+) (map[any]typeutil.Timestamp, error) {
+	pks, tss, err := readDeltalogsV1(ctx, pkType, deltalogs, option...)
+	if err != nil {
+		return nil, err
+	}
+	pks, tss = filterRestoreRangeDeletes(pks, tss, restoreTsRanges)
+	return buildPk2TsMap(pks, tss), nil
+}
+
+func filterRestoreRangeDeletes(
+	pks []storage.PrimaryKey,
+	tss []typeutil.Timestamp,
+	restoreTsRanges []RestoreTsRange,
+) ([]storage.PrimaryKey, []typeutil.Timestamp) {
+	if len(restoreTsRanges) == 0 || len(pks) == 0 {
+		return pks, tss
+	}
+	filteredPks := make([]storage.PrimaryKey, 0, len(pks))
+	filteredTss := make([]typeutil.Timestamp, 0, len(tss))
+	for i, ts := range tss {
+		if IsInRestoreTsRanges(ts, restoreTsRanges) {
+			continue
+		}
+		filteredPks = append(filteredPks, pks[i])
+		filteredTss = append(filteredTss, ts)
+	}
+	return filteredPks, filteredTss
 }
 
 // buildPk2TsMap builds a map from pk value to timestamp.

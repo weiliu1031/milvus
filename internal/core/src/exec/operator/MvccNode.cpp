@@ -90,13 +90,13 @@ PhyMvccNode::GetOutput() {
     }
 
     // ── Sealed-segment fast path (skip timestamp mask) ──
-    // On a sealed segment without TTL, when query_ts covers all inserts,
-    // mask_with_timestamps is redundant (all rows pass).  Only apply the
-    // delete mask — which is a no-op when no deletes exist.  Then decide
-    // all_rows_visible from the actual bitmap instead of a racy
+    // On a sealed segment without TTL or restore ranges, when query_ts covers
+    // all inserts, mask_with_timestamps is redundant (all rows pass).  Only
+    // apply the delete mask — which is a no-op when no deletes exist.
+    // Then decide all_rows_visible from the actual bitmap instead of a racy
     // get_deleted_count() check.
     if (is_source_node_ && segment_->type() == SegmentType::Sealed &&
-        collection_ttl_timestamp_ == 0 &&
+        collection_ttl_timestamp_ == 0 && !segment_->HasRestoreTsRanges() &&
         query_timestamp_ >= segment_->get_max_timestamp()) {
         auto col_input = std::make_shared<ColumnVector>(
             TargetBitmap(active_count_), TargetBitmap(active_count_));

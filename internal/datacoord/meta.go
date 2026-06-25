@@ -2358,6 +2358,7 @@ func (m *meta) completeClusterCompactionMutation(t *datapb.CompactionTask, resul
 			ExpirQuantiles:  seg.GetExpirQuantiles(),
 			SchemaVersion:   t.GetSchema().GetVersion(),
 			CommitTimestamp: 0, // Normalized: row timestamps already rewritten
+			RestoreTsRanges: nil,
 		}
 		segment := NewSegmentInfo(segmentInfo)
 		compactToSegInfos = append(compactToSegInfos, segment)

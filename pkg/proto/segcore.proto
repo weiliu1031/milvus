@@ -114,6 +114,11 @@ message FieldIndexInfo {
   index.IndexStorePathVersion index_store_path_version = 14;
 }
 
+message RestoreTsRange {
+  uint64 lower_bound = 1;
+  uint64 upper_bound = 2;
+}
+
 message SegmentLoadInfo {
   int64 segmentID = 1;
   int64 partitionID = 2;
@@ -142,4 +147,5 @@ message SegmentLoadInfo {
   // When non-zero, segcore overwrites the in-memory timestamp column so all
   // MVCC/TTL/delete logic uses the commit time instead of raw row timestamps.
   uint64 commit_timestamp = 24;
+  repeated RestoreTsRange restore_ts_ranges = 25;
 }

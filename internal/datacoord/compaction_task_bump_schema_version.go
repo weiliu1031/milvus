@@ -133,6 +133,7 @@ func (t *bumpSchemaVersionTask) BuildCompactionRequest() (*datapb.CompactionPlan
 			StorageVersion:      segInfo.GetStorageVersion(),
 			Manifest:            segInfo.GetManifestPath(),
 			CommitTimestamp:     segInfo.GetCommitTimestamp(),
+			RestoreTsRanges:     segInfo.GetRestoreTsRanges(),
 		})
 		segments = append(segments, segInfo)
 	}
