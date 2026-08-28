@@ -19,6 +19,7 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "common/common_type_c.h"
@@ -60,6 +61,12 @@ GetLoonReaderThreadPoolSize();
 
 CStatus
 InitIndexBuildReadWindow(int64_t window_bytes);
+
+void
+SetExternalVectorPartialNullAsRowNull(bool enabled);
+
+bool
+GetExternalVectorPartialNullAsRowNull();
 
 // Plugin related APIs
 CStatus

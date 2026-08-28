@@ -101,6 +101,9 @@ func InitSegcore(nodeID int64) error {
 	if err := initcore.InitArrowReaderConfig(paramtable.Get()); err != nil {
 		return err
 	}
+	if err := initcore.InitExternalVectorNullPolicy(paramtable.Get()); err != nil {
+		return err
+	}
 
 	// Apply milvus-storage reader concurrency config: the global reader
 	// thread pool (chunk/file-level fan-out) and the index-build read

@@ -325,6 +325,29 @@ func TestRegisterLoonReaderConfigWatchers(t *testing.T) {
 	assert.EqualValues(t, 1, EffectiveLoonReaderThreadPoolSize())
 }
 
+func TestInitExternalVectorNullPolicy(t *testing.T) {
+	paramtable.Init()
+	pt := paramtable.Get()
+	defer pt.Reset(pt.CommonCfg.ExternalVectorPartialNullPolicy.Key)
+	defer func() {
+		_ = pt.Save(pt.CommonCfg.ExternalVectorPartialNullPolicy.Key, "error")
+		assert.NoError(t, InitExternalVectorNullPolicy(pt))
+	}()
+
+	assert.NoError(t, pt.Save(pt.CommonCfg.ExternalVectorPartialNullPolicy.Key, "error"))
+	assert.NoError(t, InitExternalVectorNullPolicy(pt))
+	assert.False(t, externalVectorPartialNullAsRowNullEnabled())
+
+	assert.NoError(t, pt.Save(pt.CommonCfg.ExternalVectorPartialNullPolicy.Key, " NULL "))
+	assert.NoError(t, InitExternalVectorNullPolicy(pt))
+	assert.True(t, externalVectorPartialNullAsRowNullEnabled())
+
+	assert.NoError(t, pt.Save(pt.CommonCfg.ExternalVectorPartialNullPolicy.Key, "zero"))
+	err := InitExternalVectorNullPolicy(pt)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+}
+
 func TestUpdateLoadTransientBudgetBytes(t *testing.T) {
 	assert.NotPanics(t, func() {
 		UpdateLoadTransientBudgetBytes(0)
