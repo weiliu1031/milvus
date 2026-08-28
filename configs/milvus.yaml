@@ -1061,9 +1061,9 @@ common:
     useLoonFFI: false
     enableGrowingSourceFlush: false # enable flushing growing segment payload from QueryNode growing source through StorageV3 manifest path
     externalVector:
-      # Policy for an external nullable dense-vector row that contains both valid and NULL dimensions.
-      # error: reject the malformed row; null: treat the whole row as NULL.
-      # For a nullable field, a row whose dimensions are all NULL is always treated as a row-level NULL, regardless of this setting.
+      # Policy for parent-valid external dense-vector rows containing a mix of valid and null child elements.
+      # Options: error, null. error rejects the row as malformed input; null promotes the whole row to a row-level null when the field is nullable.
+      # Rows whose child elements are all null are always promoted to row-level null for nullable fields, regardless of this setting.
       partialNullPolicy: error
   # Default value: auto
   # Valid values: [auto, avx512, avx2, avx, sse4_2]
