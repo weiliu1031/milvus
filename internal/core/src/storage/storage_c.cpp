@@ -200,6 +200,16 @@ InitArrowReaderConfig(CArrowReaderConfig c_arrow_reader_config) {
 }
 
 void
+SetExternalVectorPartialNullAsRowNull(bool enabled) {
+    milvus::storage::SetExternalVectorPartialNullAsRowNull(enabled);
+}
+
+bool
+GetExternalVectorPartialNullAsRowNull() {
+    return milvus::storage::GetExternalVectorPartialNullAsRowNull();
+}
+
+void
 CleanRemoteChunkManagerSingleton() {
     milvus::storage::RemoteChunkManagerSingleton::GetInstance().Release();
 }

@@ -1060,6 +1060,11 @@ common:
         threshold: 1024 # split by average size policy threshold(in bytes) in storage v2
     useLoonFFI: false
     enableGrowingSourceFlush: false # enable flushing growing segment payload from QueryNode growing source through StorageV3 manifest path
+    externalVector:
+      # Policy for an external nullable dense-vector row that contains both valid and NULL dimensions.
+      # error: reject the malformed row; null: treat the whole row as NULL.
+      # A row whose dimensions are all NULL is always treated as a row-level NULL.
+      partialNullPolicy: error
   # Default value: auto
   # Valid values: [auto, avx512, avx2, avx, sse4_2]
   # This configuration is only used by querynode and indexnode, it selects CPU instruction set for Searching and Index-building.

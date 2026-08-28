@@ -101,6 +101,9 @@ func InitSegcore(nodeID int64) error {
 	if err := initcore.InitArrowReaderConfig(paramtable.Get()); err != nil {
 		return err
 	}
+	if err := initcore.InitExternalVectorNullPolicy(paramtable.Get()); err != nil {
+		return err
+	}
 
 	// Wire hot-reload watchers so capacity / coalescing-limit changes take effect
 	// without restart, matching QueryNode behavior.

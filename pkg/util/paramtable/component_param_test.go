@@ -93,6 +93,11 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, int64(1048576), Params.ArrowReaderHoleSizeLimitBytes.GetAsInt64())
 		assert.Equal(t, int64(67108864), Params.ArrowReaderRangeSizeLimitBytes.GetAsInt64())
 
+		defer params.Reset(Params.ExternalVectorPartialNullPolicy.Key)
+		assert.Equal(t, "error", Params.ExternalVectorPartialNullPolicy.GetValue())
+		params.Save(Params.ExternalVectorPartialNullPolicy.Key, "null")
+		assert.Equal(t, "null", Params.ExternalVectorPartialNullPolicy.GetValue())
+
 		assert.Equal(t, Params.GracefulTime.GetAsInt64(), int64(DefaultGracefulTime))
 		t.Logf("default grafeful time = %d", Params.GracefulTime.GetAsInt64())
 
