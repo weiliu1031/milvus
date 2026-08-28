@@ -32,6 +32,7 @@
 #include "storage/ThreadPools.h"
 #include "storage/KeyRetriever.h"
 #include "storage/Types.h"
+#include "storage/Util.h"
 #include "storage/loon_ffi/property_singleton.h"
 
 CStatus
