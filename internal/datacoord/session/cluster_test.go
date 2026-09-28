@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bytedance/mockey"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/mocks"
+	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
@@ -1371,4 +1373,70 @@ func TestCopySegmentSharedDefinitionsPayloadSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, wire, sharedSize)
 	t.Logf("100 segments, 27 definitions: shared=%d bytes, legacy=%d bytes", sharedSize, legacySize)
+}
+
+func TestCluster_SnapshotExportCopy(t *testing.T) {
+	c := &cluster{}
+	req := &datapb.SnapshotExportCopyRequest{TaskId: 17}
+	create := mockey.Mock((*cluster).createTask).To(func(_ *cluster, nodeID int64, payload proto.Message, p taskcommon.Properties) error {
+		assert.Equal(t, int64(5), nodeID)
+		assert.Same(t, req, payload)
+		typ, err := p.GetTaskType()
+		require.NoError(t, err)
+		assert.Equal(t, taskcommon.SnapshotExportCopy, typ)
+		return nil
+	}).Build()
+	defer create.UnPatch()
+	require.NoError(t, c.CreateSnapshotExportCopy(5, req))
+	drop := mockey.Mock((*cluster).dropTask).To(func(_ *cluster, nodeID int64, p taskcommon.Properties) error {
+		assert.Equal(t, "1234", p["snapshot_export_deadline"])
+		return nil
+	}).Build()
+	defer drop.UnPatch()
+	require.NoError(t, c.DropSnapshotExportCopy(5, 17, 1234))
+	for _, scenario := range []string{"success", "transport", "malformed", "missing"} {
+		t.Run(scenario, func(t *testing.T) {
+			payload, err := proto.Marshal(&datapb.SnapshotExportCopyResponse{Status: merr.Success(), TaskId: 17})
+			require.NoError(t, err)
+			var queryErr error
+			if scenario == "transport" {
+				queryErr = context.DeadlineExceeded
+			}
+			if scenario == "malformed" {
+				payload = []byte{0xff}
+			}
+			if scenario == "missing" {
+				payload, err = proto.Marshal(&datapb.SnapshotExportCopyResponse{Status: merr.Status(merr.ErrImportSysFailed)})
+				require.NoError(t, err)
+			}
+			query := mockey.Mock((*cluster).queryTask).Return(&workerpb.QueryTaskResponse{Status: merr.Success(), Payload: payload}, queryErr).Build()
+			defer query.UnPatch()
+			response, err := c.QuerySnapshotExportCopy(5, 17)
+			if scenario == "success" {
+				require.NoError(t, err)
+				assert.Equal(t, int64(17), response.GetTaskId())
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+type snapshotExportNodeManager struct{ NodeManager }
+type snapshotExportNodeClient struct{ types.DataNodeClient }
+
+func TestSnapshotExportCopyCapabilityDiscovery(t *testing.T) {
+	nm := &snapshotExportNodeManager{}
+	client := &snapshotExportNodeClient{}
+	ids := mockey.Mock((*snapshotExportNodeManager).GetClientIDs).Return([]int64{1}).Build()
+	defer ids.UnPatch()
+	get := mockey.Mock((*snapshotExportNodeManager).GetClient).Return(client, nil).Build()
+	defer get.UnPatch()
+	for _, supported := range []bool{false, true} {
+		query := mockey.Mock((*snapshotExportNodeClient).QuerySlot).Return(&datapb.QuerySlotResponse{Status: merr.Success(), AvailableSlots: 8, SnapshotExportCopy: supported}, nil).Build()
+		slots := NewCluster(nm).QuerySlot()
+		require.Equal(t, supported, slots[1].SnapshotExportCopy)
+		require.EqualValues(t, 8, slots[1].AvailableSlots)
+		query.UnPatch()
+	}
 }

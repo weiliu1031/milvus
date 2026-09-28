@@ -260,6 +260,34 @@ func (s *globalTaskScheduler) pickNode(slotHeap typeutil.Heap[*nodeSlotEntry], t
 	return entry.nodeID
 }
 
+// pickTaskNode applies optional capability constraints without changing placement
+// for existing tasks. All heaps share slot entries, including their reservations.
+func (s *globalTaskScheduler) pickTaskNode(heap typeutil.Heap[*nodeSlotEntry], task Task) int64 {
+	filter, ok := task.(interface {
+		CanRunOn(*session.WorkerSlots) bool
+	})
+	if !ok {
+		return s.pickNode(heap, task.GetTaskSlot())
+	}
+	var skipped []*nodeSlotEntry
+	for heap.Len() > 0 {
+		entry := heap.Pop()
+		if filter.CanRunOn(entry.slots) {
+			node := s.pickNode(newNodeSlotHeap(map[int64]*session.WorkerSlots{entry.nodeID: entry.slots}), task.GetTaskSlot())
+			heap.Push(entry)
+			for _, item := range skipped {
+				heap.Push(item)
+			}
+			return node
+		}
+		skipped = append(skipped, entry)
+	}
+	for _, item := range skipped {
+		heap.Push(item)
+	}
+	return NullNodeID
+}
+
 func (s *globalTaskScheduler) schedule() {
 	pendingNum := s.pendingTasks.TaskCount()
 	if pendingNum == 0 {
@@ -278,6 +306,20 @@ func (s *globalTaskScheduler) schedule() {
 		if task == nil {
 			break
 		}
+		// A job can time out while waiting for a capable worker. Retire its
+		// task even when no worker has slots, rather than retain it forever.
+		switch task.GetTaskState() {
+		case taskcommon.InProgress:
+			// A pending export may time out before assignment and enter its
+			// cleanup phase. Cleanup must not wait for a free worker slot.
+			task.SetTaskTime(taskcommon.TimeStart, time.Now())
+			s.runningTasks.Insert(task.GetTaskID(), task)
+			continue
+		case taskcommon.None, taskcommon.Finished, taskcommon.Failed:
+			task.DropTaskOnWorker(s.cluster)
+			s.backoffs.Remove(task.GetTaskID())
+			continue
+		}
 		// A task in failure backoff gives way: it re-enters the queue after
 		// this round and is dispatched once its delay elapses, so one
 		// persistently failing task cannot occupy the scheduler.
@@ -285,11 +327,10 @@ func (s *globalTaskScheduler) schedule() {
 			delayed = append(delayed, task)
 			continue
 		}
-		taskSlot := task.GetTaskSlot()
-		nodeID := s.pickNode(slotHeap, taskSlot)
+		nodeID := s.pickTaskNode(slotHeap, task)
 		if nodeID == NullNodeID {
-			s.pendingTasks.Push(task)
-			break
+			delayed = append(delayed, task)
+			continue
 		}
 		future := s.execPool.Submit(func() (struct{}, error) {
 			s.mu.RLock(task.GetTaskID())

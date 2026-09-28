@@ -484,48 +484,6 @@ VectorBuildMaterializer::SetScalarInfo(VectorScalarInfo scalar_info) {
     scalar_info_.emplace(std::move(scalar_info));
 }
 
-storage::ArtifactPtr
-VectorBuildMaterializer::Build() && {
-    AssertOpen("build");
-    consumed_ = true;
-    AssertInfo(layout_.LogicalRows() == index::vector_builder::CheckedSize(
-                                            expected_rows_, "expected row"),
-               "vector source produced {} rows, expected {}",
-               layout_.LogicalRows(),
-               expected_rows_);
-    AssertInfo(spec_.side_inputs.empty() || scalar_info_.has_value(),
-               "vector builder requires declared scalar input delivery");
-
-    std::vector<std::vector<index::VectorScalarCategoryGroup>> category_views;
-    std::vector<index::VectorScalarFieldGroups> field_views;
-    if (scalar_info_.has_value()) {
-        category_views.reserve(scalar_info_->size());
-        field_views.reserve(scalar_info_->size());
-        for (const auto& [field_id, categories] : *scalar_info_) {
-            auto& views = category_views.emplace_back();
-            views.reserve(categories.size());
-            for (const auto& rows : categories) {
-                views.push_back({std::span<const uint32_t>(rows)});
-            }
-            field_views.push_back(
-                {FieldId(field_id),
-                 std::span<const index::VectorScalarCategoryGroup>(views)});
-        }
-    }
-    return std::visit(
-        [this, &field_views](auto& state) -> storage::ArtifactPtr {
-            using S = std::decay_t<decltype(state)>;
-            if constexpr (std::is_same_v<S, std::monostate>) {
-                ThrowInfo(UnexpectedError,
-                          "moved-from vector materializer cannot build");
-                return nullptr;
-            } else {
-                return BuildTyped(state, field_views);
-            }
-        },
-        state_);
-}
-
 void
 VectorBuildMaterializer::ValidateBatch(const FieldDataPtr& batch) const {
     AssertInfo(batch != nullptr,
@@ -732,6 +690,48 @@ VectorBuildMaterializer::BuildTyped(
         builder.reset();
         throw;
     }
+}
+
+storage::ArtifactPtr
+VectorBuildMaterializer::Build() && {
+    AssertOpen("build");
+    consumed_ = true;
+    AssertInfo(layout_.LogicalRows() == index::vector_builder::CheckedSize(
+                                            expected_rows_, "expected row"),
+               "vector source produced {} rows, expected {}",
+               layout_.LogicalRows(),
+               expected_rows_);
+    AssertInfo(spec_.side_inputs.empty() || scalar_info_.has_value(),
+               "vector builder requires declared scalar input delivery");
+
+    std::vector<std::vector<index::VectorScalarCategoryGroup>> category_views;
+    std::vector<index::VectorScalarFieldGroups> field_views;
+    if (scalar_info_.has_value()) {
+        category_views.reserve(scalar_info_->size());
+        field_views.reserve(scalar_info_->size());
+        for (const auto& [field_id, categories] : *scalar_info_) {
+            auto& views = category_views.emplace_back();
+            views.reserve(categories.size());
+            for (const auto& rows : categories) {
+                views.push_back({std::span<const uint32_t>(rows)});
+            }
+            field_views.push_back(
+                {FieldId(field_id),
+                 std::span<const index::VectorScalarCategoryGroup>(views)});
+        }
+    }
+    return std::visit(
+        [this, &field_views](auto& state) -> storage::ArtifactPtr {
+            using S = std::decay_t<decltype(state)>;
+            if constexpr (std::is_same_v<S, std::monostate>) {
+                ThrowInfo(UnexpectedError,
+                          "moved-from vector materializer cannot build");
+                return nullptr;
+            } else {
+                return BuildTyped(state, field_views);
+            }
+        },
+        state_);
 }
 
 }  // namespace milvus::indexbuilder

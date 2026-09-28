@@ -78,9 +78,10 @@ type DataNode struct {
 	Role     string
 	lifetime lifetime.Lifetime[commonpb.StateCode]
 
-	syncMgr         syncmgr.SyncManager
-	importTaskMgr   importv2.TaskManager
-	importScheduler importv2.Scheduler
+	syncMgr                syncmgr.SyncManager
+	snapshotExportExecutor *snapshotExportExecutor
+	importTaskMgr          importv2.TaskManager
+	importScheduler        importv2.Scheduler
 
 	// indexnode related
 	storageFactory StorageFactory
@@ -213,6 +214,7 @@ func (node *DataNode) Init() error {
 			fileresource.InitManager(nil, fileMode)
 		}
 
+		node.snapshotExportExecutor = newSnapshotExportExecutor(node.ctx)
 		node.importTaskMgr = importv2.NewTaskManager()
 		node.importScheduler = importv2.NewScheduler(node.importTaskMgr)
 
@@ -302,6 +304,9 @@ func (node *DataNode) Stop() error {
 		// https://github.com/milvus-io/milvus/issues/12282
 		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		node.lifetime.Wait()
+		if node.snapshotExportExecutor != nil {
+			node.snapshotExportExecutor.close()
+		}
 
 		if node.syncMgr != nil {
 			err := node.syncMgr.Close()

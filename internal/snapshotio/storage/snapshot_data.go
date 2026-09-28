@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	snapshotio "github.com/milvus-io/milvus/internal/snapshotio"
@@ -52,9 +53,13 @@ type SnapshotData struct {
 
 	MetadataPath  string
 	ManifestPaths []string
-	SegmentIDs    []int64
-	BuildIDs      []int64
-	Layout        datapb.SnapshotLayout
+	// Top-level entries retained for validation when reading segment ranges.
+	StorageManifests []*datapb.StorageV2SegmentManifest
+	SegmentIDs       []int64
+	BuildIDs         []int64
+	Layout           datapb.SnapshotLayout
+	// Retain the recorded Avro version for metadata-only preflight fingerprints.
+	ManifestFormatVersion int32
 }
 
 // SnapshotWriter writes snapshot metadata and segment manifests.
@@ -128,47 +133,41 @@ func (w *SnapshotWriter) SaveToRootWithSize(
 	return metadataPath, manifestBytes + int64(len(metadataData)), nil
 }
 
-// PrepareToRootWithStaging writes final segment manifests and a private,
-// verified metadata object. The returned byte count describes the final bundle
-// and does not include the temporary staging object as an additional file.
-func (w *SnapshotWriter) PrepareToRootWithStaging(
-	ctx context.Context,
-	snapshot *SnapshotData,
-	rootPath string,
-	layout datapb.SnapshotLayout,
-	stagingMetadataPath string,
-) (string, int64, error) {
-	if strings.TrimSpace(stagingMetadataPath) == "" {
-		return "", 0, merr.WrapErrServiceInternalMsg("staging metadata path cannot be empty")
-	}
-	metadataPath, metadataData, manifestBytes, err := w.writeManifestsAndMarshalMetadata(
-		ctx,
-		snapshot,
-		rootPath,
-		layout,
-	)
+// PrepareMetadataWithStaging verifies and stages metadata after worker outputs exist.
+func (w *SnapshotWriter) PrepareMetadataWithStaging(ctx context.Context, metadata *datapb.SnapshotMetadata, metadataURI, stagingMetadataPath string) error {
+	data, err := marshalSnapshotMetadataMessage(metadata)
 	if err != nil {
-		return "", 0, err
+		return err
 	}
+	if err := validateStagedSnapshotMetadata(data, metadataURI); err != nil {
+		return err
+	}
+	return w.prepareMetadataWithStaging(ctx, NormalizeSnapshotObjectPath(metadataURI), data, stagingMetadataPath)
+}
+
+func (w *SnapshotWriter) prepareMetadataWithStaging(ctx context.Context, metadataPath string, metadataData []byte, stagingMetadataPath string) error {
 	stagingMetadataPath = NormalizeSnapshotObjectPath(stagingMetadataPath)
+	if strings.TrimSpace(stagingMetadataPath) == "" {
+		return merr.WrapErrServiceInternalMsg("staging metadata path cannot be empty")
+	}
 	if stagingMetadataPath == metadataPath {
-		return "", 0, merr.WrapErrServiceInternalMsg("staging metadata path must differ from final metadata path")
+		return merr.WrapErrServiceInternalMsg("staging metadata path must differ from final metadata path")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", 0, err
+		return err
 	}
 	if err := w.chunkManager.Write(ctx, stagingMetadataPath, metadataData); err != nil {
-		return "", 0, merr.Wrap(err, "failed to write staged snapshot metadata object")
+		return merr.Wrap(err, "failed to write staged snapshot metadata object")
 	}
 	stagedData, err := w.chunkManager.Read(ctx, stagingMetadataPath)
 	if err != nil {
-		return "", 0, merr.Wrap(err, "failed to verify staged snapshot metadata object")
+		return merr.Wrap(err, "failed to verify staged snapshot metadata object")
 	}
 	if !bytes.Equal(stagedData, metadataData) {
-		return "", 0, merr.WrapErrDataIntegrityMsg("staged snapshot metadata differs from prepared metadata")
+		return merr.WrapErrDataIntegrityMsg("staged snapshot metadata differs from prepared metadata")
 	}
 
-	return metadataPath, manifestBytes + int64(len(metadataData)), nil
+	return nil
 }
 
 // CommitStagedMetadata publishes the prepared metadata idempotently. A write
@@ -312,6 +311,10 @@ func marshalSnapshotMetadata(snapshot *SnapshotData, manifestPaths []string, sto
 		Layout:                snapshot.Layout,
 	}
 
+	return marshalSnapshotMetadataMessage(metadata)
+}
+
+func marshalSnapshotMetadataMessage(metadata *datapb.SnapshotMetadata) ([]byte, error) {
 	opts := protojson.MarshalOptions{
 		Multiline:       true,
 		Indent:          "  ",
@@ -393,18 +396,52 @@ func (w *SnapshotWriter) readMetadataFile(ctx context.Context, filePath string) 
 
 // SnapshotReader reads snapshot metadata and segment manifests.
 type SnapshotReader struct {
-	chunkManager milvusstorage.ChunkManager
+	chunkManager        milvusstorage.ChunkManager
+	manifestReadPermits chan struct{}
+	manifestRange       *[2]int64
 }
 
-// NewSnapshotReader creates a snapshot reader.
-func NewSnapshotReader(cm milvusstorage.ChunkManager) *SnapshotReader {
-	return &SnapshotReader{
+// SnapshotReaderOption configures how a reader loads snapshot manifests.
+type SnapshotReaderOption func(*SnapshotReader)
+
+// WithManifestReadPermits enables concurrent manifest reads and Avro decoding.
+// Export Snapshot shares these permits with file copies across the DataNode.
+// The caller owns the buffered channel; the reader never closes it. Nil keeps
+// the default serial behavior.
+func WithManifestReadPermits(permits chan struct{}) SnapshotReaderOption {
+	return func(r *SnapshotReader) { r.manifestReadPermits = permits }
+}
+
+// WithSnapshotManifestRange loads only the half-open manifest range assigned
+// to an export shard through its segment visitor. ReadSnapshot rejects this
+// option. Top-level identity and path validation still applies.
+func WithSnapshotManifestRange(start, end int64) SnapshotReaderOption {
+	return func(r *SnapshotReader) { r.manifestRange = &[2]int64{start, end} }
+}
+
+// NewSnapshotReader creates a snapshot reader. Manifest reads are serial unless
+// shared permits are supplied explicitly by the caller.
+func NewSnapshotReader(cm milvusstorage.ChunkManager, options ...SnapshotReaderOption) *SnapshotReader {
+	r := &SnapshotReader{
 		chunkManager: cm,
 	}
+	for _, option := range options {
+		option(r)
+	}
+	return r
 }
 
 // ReadSnapshot reads a snapshot by metadata path.
 func (r *SnapshotReader) ReadSnapshot(ctx context.Context, metadataFilePath string, includeSegments bool) (*SnapshotData, error) {
+	return r.readSnapshot(ctx, metadataFilePath, includeSegments, nil)
+}
+
+func (r *SnapshotReader) readSnapshot(ctx context.Context, metadataFilePath string, includeSegments bool,
+	visit func(context.Context, *SnapshotData) error,
+) (*SnapshotData, error) {
+	if r.manifestRange != nil && visit == nil {
+		return nil, merr.WrapErrServiceInternalMsg("manifest ranges require the export segment visitor")
+	}
 	if metadataFilePath == "" {
 		return nil, merr.WrapErrServiceInternalMsg("metadata file path cannot be empty")
 	}
@@ -458,20 +495,59 @@ func (r *SnapshotReader) ReadSnapshot(ctx context.Context, metadataFilePath stri
 		return nil, err
 	}
 
+	manifestVersion := metadata.GetFormatVersion()
+	manifestPaths := metadata.GetManifestList()
+	if r.manifestRange != nil {
+		start, end := r.manifestRange[0], r.manifestRange[1]
+		if !includeSegments || start < 0 || end <= start || end > int64(len(manifestPaths)) {
+			return nil, merr.WrapErrDataIntegrityMsg("invalid snapshot manifest range")
+		}
+		manifestPaths = manifestPaths[start:end]
+	}
+	snapshotData := &SnapshotData{
+		SnapshotInfo:          metadata.GetSnapshotInfo(),
+		Collection:            metadata.GetCollection(),
+		Segments:              nil,
+		Indexes:               metadata.GetIndexes(),
+		MetadataPath:          metadataFilePath,
+		ManifestPaths:         append([]string(nil), manifestPaths...),
+		StorageManifests:      metadata.GetStoragev2ManifestList(),
+		SegmentIDs:            metadata.GetSegmentIds(),
+		BuildIDs:              metadata.GetBuildIds(),
+		Layout:                layout,
+		ManifestFormatVersion: manifestVersion,
+	}
+
+	if visit != nil {
+		if layout == datapb.SnapshotLayout_SnapshotLayoutSelfContained {
+			snapshotData.SnapshotInfo.S3Location = metadataFilePath
+			if err := ValidateSelfContainedSnapshotMetadata(metadataFilePath, metadata, nil); err != nil {
+				return nil, merr.Wrap(err, "invalid self-contained snapshot")
+			}
+		}
+		return snapshotData, r.visitSnapshotSegments(ctx, snapshotData, oldRoot, newRoot, shouldRebase, visit)
+	}
 	var allSegments []*datapb.SegmentDescription
 	if includeSegments {
-		for _, manifestPath := range metadata.GetManifestList() {
-			segment, err := r.readManifestFile(ctx, manifestPath, int(metadata.GetFormatVersion()))
-			if err != nil {
-				return nil, merr.Wrapf(err, "failed to read manifest file %s", manifestPath)
-			}
-			allSegments = append(allSegments, segment)
-		}
-
-		if err := validateSnapshotSegmentIDs(metadata.GetSegmentIds(), allSegments); err != nil {
+		allSegments, err = r.readManifests(ctx, manifestPaths, int(manifestVersion))
+		if err != nil {
 			return nil, err
 		}
-		if err := applyStorageManifestPaths(metadata.GetStoragev2ManifestList(), allSegments); err != nil {
+
+		expectedIDs := metadata.GetSegmentIds()
+		mappings := metadata.GetStoragev2ManifestList()
+		if err := validateSnapshotSegmentIDs(expectedIDs, allSegments); err != nil {
+			return nil, err
+		}
+		if shouldRebase {
+			// Rebase Avro contents before installing top-level native entry points,
+			// which metadata relocation has already rebased. Applying the old root
+			// twice would corrupt native paths if the new bundle is below that root.
+			if err := RebaseSelfContainedSnapshotData(&SnapshotData{Segments: allSegments}, oldRoot, newRoot); err != nil {
+				return nil, merr.Wrap(err, "failed to rebase snapshot data")
+			}
+		}
+		if err := applyStorageManifestPaths(mappings, allSegments); err != nil {
 			return nil, err
 		}
 		for _, segment := range allSegments {
@@ -481,26 +557,9 @@ func (r *SnapshotReader) ReadSnapshot(ctx context.Context, metadataFilePath stri
 		}
 	}
 
-	snapshotData := &SnapshotData{
-		SnapshotInfo:  metadata.GetSnapshotInfo(),
-		Collection:    metadata.GetCollection(),
-		Segments:      allSegments,
-		Indexes:       metadata.GetIndexes(),
-		MetadataPath:  metadataFilePath,
-		ManifestPaths: append([]string(nil), metadata.GetManifestList()...),
-		SegmentIDs:    metadata.GetSegmentIds(),
-		BuildIDs:      metadata.GetBuildIds(),
-		Layout:        layout,
-	}
+	snapshotData.Segments = allSegments
 
 	if layout == datapb.SnapshotLayout_SnapshotLayoutSelfContained {
-		if shouldRebase {
-			// Segment manifests may contain data/index paths as well, so rebase
-			// them after the manifest files have been read.
-			if err := RebaseSelfContainedSnapshotData(snapshotData, oldRoot, newRoot); err != nil {
-				return nil, merr.Wrap(err, "failed to rebase snapshot data")
-			}
-		}
 		// Treat the metadata URI used by this read as the source of truth. The
 		// original S3Location may point to the pre-relocation bundle root.
 		snapshotData.SnapshotInfo.S3Location = metadataFilePath
@@ -510,6 +569,77 @@ func (r *SnapshotReader) ReadSnapshot(ctx context.Context, metadataFilePath stri
 	}
 
 	return snapshotData, nil
+}
+
+func (r *SnapshotReader) readManifests(ctx context.Context, paths []string, formatVersion int) ([]*datapb.SegmentDescription, error) {
+	permits := r.manifestReadPermits
+	if permits != nil && cap(permits) == 0 {
+		return nil, merr.WrapErrServiceInternalMsg("manifest read permits must be buffered")
+	}
+	if len(paths) == 0 {
+		return nil, ctx.Err()
+	}
+	segments := make([]*datapb.SegmentDescription, len(paths))
+	read := func(ctx context.Context, i int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		segment, err := r.readManifestFile(ctx, paths[i], formatVersion)
+		if err != nil {
+			return merr.Wrapf(err, "failed to read manifest file %s", paths[i])
+		}
+		// Each slot has one writer. Export relies on segments[i] matching paths[i].
+		segments[i] = segment
+		return nil
+	}
+	if permits == nil {
+		for i := range paths {
+			if err := read(ctx, i); err != nil {
+				return nil, err
+			}
+		}
+		return segments, nil
+	}
+
+	group, readCtx := errgroup.WithContext(ctx)
+	workers := min(cap(permits), len(paths))
+	jobs := make(chan int, workers)
+	group.Go(func() error {
+		defer close(jobs)
+		for i := range paths {
+			select {
+			case jobs <- i:
+			case <-readCtx.Done():
+				return readCtx.Err()
+			}
+		}
+		return nil
+	})
+	for i := 0; i < workers; i++ {
+		group.Go(func() error {
+			for i := range jobs {
+				select {
+				case permits <- struct{}{}:
+				case <-readCtx.Done():
+					return readCtx.Err()
+				}
+				err := read(readCtx, i)
+				<-permits
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	// Join every worker before returning so the caller can safely close clients.
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return segments, nil
 }
 
 func applyStorageManifestPaths(

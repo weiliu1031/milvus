@@ -19,6 +19,7 @@ package taskcommon
 type Type = string
 
 const (
+	SnapshotExportCopy        Type = "SnapshotExportCopy"
 	TypeNone                  Type = "None"
 	PreImport                 Type = "PreImport"
 	Import                    Type = "Import"
@@ -34,6 +35,7 @@ const (
 )
 
 var TypeList = []Type{
+	SnapshotExportCopy,
 	PreImport,
 	Import,
 	Compaction,
