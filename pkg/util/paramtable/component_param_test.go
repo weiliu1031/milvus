@@ -130,14 +130,14 @@ func TestComponentParam_DataCoordSnapshotExportCopyConcurrency(t *testing.T) {
 	params.Reset(key)
 	t.Cleanup(func() { params.Reset(key) })
 
-	assert.Equal(t, 16, params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt())
+	assert.Equal(t, 128, params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt())
 
 	params.Save(key, "3")
 	assert.Equal(t, 3, params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt())
 
 	for _, invalid := range []string{"0", "-1", "invalid"} {
 		params.Save(key, invalid)
-		assert.Equal(t, 16, params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt())
+		assert.Equal(t, 128, params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt())
 	}
 }
 

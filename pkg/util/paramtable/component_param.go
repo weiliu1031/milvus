@@ -7527,13 +7527,13 @@ Startup continuously schedules bounded concurrent reads and retries failed reads
 	p.SnapshotExportCopyConcurrency = ParamItem{
 		Key:          "dataCoord.snapshot.exportCopyConcurrency",
 		Version:      "2.6.15",
-		DefaultValue: "16",
-		Doc: "Maximum concurrent provider-side object copy requests for ExportSnapshot. " +
-			"Invalid or non-positive values are coerced to the default value 16.",
+		DefaultValue: "128",
+		Doc: "Maximum concurrent objects copied by ExportSnapshot. Each multipart object can issue up to 10 concurrent part-copy requests. " +
+			"Invalid or non-positive values are coerced to the default value 128.",
 		Formatter: func(v string) string {
 			parsed, err := strconv.Atoi(v)
 			if err != nil || parsed <= 0 {
-				return "16"
+				return "128"
 			}
 			return v
 		},

@@ -18,13 +18,17 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/minio/minio-go/v7"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -145,7 +149,7 @@ func isDeleteSucceededWithOK(err error) bool {
 }
 
 func (minioObjectStorage *MinioObjectStorage) CopyObjectCrossBucket(ctx context.Context, srcBucket, srcObjectName, dstBucket, dstObjectName string) error {
-	singleCopyMaxSize := min(paramtable.Get().MinioCfg.MultipartCopyThreshold.GetAsInt64(), minioSingleCopyObjectMaxSize)
+	multipartThreshold := paramtable.Get().MinioCfg.MultipartCopyThreshold.GetAsInt64()
 	srcOpts := minio.CopySrcOptions{
 		Bucket: srcBucket,
 		Object: srcObjectName,
@@ -154,19 +158,106 @@ func (minioObjectStorage *MinioObjectStorage) CopyObjectCrossBucket(ctx context.
 		Bucket: dstBucket,
 		Object: dstObjectName,
 	}
-	srcInfo, err := minioObjectStorage.Client.StatObject(ctx, srcBucket, srcObjectName, minio.StatObjectOptions{})
+	var srcInfo minio.ObjectInfo
+	err := retryObjectCopy(ctx, srcObjectName, func() error {
+		var err error
+		srcInfo, err = minioObjectStorage.Client.StatObject(ctx, srcBucket, srcObjectName, minio.StatObjectOptions{})
+		return err
+	})
 	if err != nil {
-		return mapObjectStorageError(srcObjectName, err)
+		return err
 	}
-	// GCS's XML API has no multipart copy: x-amz-copy-source-range (emitted by
-	// ComposeObject) has no x-goog-* equivalent. Its whole-object copy has no
-	// 5GiB cap though, so GCP always takes the single-copy path.
-	if srcInfo.Size <= singleCopyMaxSize || minioObjectStorage.cloudProvider == objectstorage.CloudProviderGCP {
-		_, err = minioObjectStorage.CopyObject(ctx, dstOpts, srcOpts)
-		return mapObjectStorageError(srcObjectName, err)
+	// Small objects use single copy even when a custom threshold is lower
+	// than the multipart minimum. GCS XML does not support ranged multipart copy.
+	if srcInfo.Size <= 10*1024*1024 || (srcInfo.Size < multipartThreshold && srcInfo.Size <= minioSingleCopyObjectMaxSize) || minioObjectStorage.cloudProvider == objectstorage.CloudProviderGCP {
+		return retryObjectCopy(ctx, srcObjectName, func() error {
+			info, err := minioObjectStorage.CopyObject(ctx, dstOpts, srcOpts)
+			if err == nil && info.ETag == "" {
+				return merr.WrapErrServiceUnavailableMsg("object copy returned an empty ETag")
+			}
+			return err
+		})
 	}
-	// Copy larger objects in parts to reduce the work per request. ComposeObject
-	// runs provider-side and avoids streaming snapshot data through Milvus.
-	_, err = minioObjectStorage.ComposeObject(ctx, dstOpts, srcOpts)
-	return mapObjectStorageError(srcObjectName, err)
+	return minioObjectStorage.copyMultipart(ctx, srcBucket, srcObjectName, dstBucket, dstObjectName, srcInfo.Size)
+}
+
+// retryObjectCopy follows milvus-backup's retry policy: retry every operation
+// error, double the delay from 200 ms up to 3 s, and accumulate failed attempts.
+func retryObjectCopy(ctx context.Context, object string, fn func() error) error {
+	return retryObjectCopyAttempts(ctx, object, fn, 10)
+}
+
+func retryObjectCopyAttempts(ctx context.Context, object string, fn func() error, attempts int) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var accumulated error
+	delay := 200 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		if err := fn(); err != nil {
+			accumulated = errors.Join(accumulated, mapObjectStorageError(object, err))
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return errors.Join(accumulated, ctx.Err())
+			}
+			delay = min(delay*2, 3*time.Second)
+		} else {
+			return nil
+		}
+	}
+	return accumulated
+}
+
+// copyMultipart retries each range independently, keeping completed parts in the same upload.
+func (s *MinioObjectStorage) copyMultipart(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, size int64) (err error) {
+	const maxParts int64 = 10000
+	const maxPartSize int64 = 5 * 1024 * 1024 * 1024
+	partSize := max(int64(10*1024*1024), (size-1)/maxParts+1)
+	if size <= 10*1024*1024 || size > 5*1024*1024*1024*1024 || partSize > maxPartSize {
+		return merr.WrapErrParameterInvalidMsg("object %s exceeds multipart copy size limits", srcObject)
+	}
+	core := minio.Core{Client: s.Client}
+	// Initiation is not idempotent: do not replay it and leak an unknown upload ID.
+	uploadID, err := core.NewMultipartUpload(ctx, dstBucket, dstObject, minio.PutObjectOptions{})
+	if err != nil {
+		return mapObjectStorageError(dstObject, err)
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if cleanupErr := retryObjectCopyAttempts(cleanupCtx, dstObject, func() error {
+			return core.AbortMultipartUpload(cleanupCtx, dstBucket, dstObject, uploadID)
+		}, 3); cleanupErr != nil {
+			mlog.Warn(cleanupCtx, "failed to abort multipart copy", mlog.String("object", dstObject), mlog.Err(cleanupErr))
+		}
+	}()
+	parts := make([]minio.CompletePart, (size-1)/partSize+1)
+	group, copyCtx := errgroup.WithContext(ctx)
+	group.SetLimit(10)
+	for i := range parts {
+		group.Go(func() error {
+			return retryObjectCopy(copyCtx, srcObject, func() error {
+				part, err := core.CopyObjectPart(copyCtx, srcBucket, srcObject, dstBucket, dstObject, uploadID, i+1, int64(i)*partSize, min(partSize, size-int64(i)*partSize), nil)
+				if err != nil {
+					return err
+				}
+				if part.ETag == "" {
+					return merr.WrapErrServiceUnavailableMsg("part copy returned an empty ETag")
+				}
+				parts[i] = part
+				return nil
+			})
+		})
+	}
+	if err = group.Wait(); err != nil {
+		return err
+	}
+	// Completion may have succeeded despite a lost response. Do not blindly replay
+	// an upload ID that may already have been consumed by the provider.
+	_, err = core.CompleteMultipartUpload(ctx, dstBucket, dstObject, uploadID, parts, minio.PutObjectOptions{})
+	return mapObjectStorageError(dstObject, err)
 }
