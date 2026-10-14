@@ -166,7 +166,7 @@ minio:
   # The maximum number of objects requested per batch in minio ListObjects rpc, 
   # 0 means using oss client by default, decrease these configuration if ListObjects timeout
   listObjectsMaxKeys: 0
-  multipartCopyThreshold: 1073741824 # Object size threshold in bytes for switching from a single CopyObject request to multipart copy. Larger objects use multipart copy. Default is 1 GiB (1073741824 bytes). Must be a positive integer; invalid values fall back to the default. Single CopyObject requests remain capped at 5 GiB regardless of this threshold. Changes apply to subsequent copies, not copies already in progress. Does not apply to GCP or Azure.
+  multipartCopyThreshold: 524288000 # Object size threshold in bytes for switching from a single CopyObject request to multipart copy. Objects at or above the threshold use multipart copy. Default is 500 MiB (524288000 bytes). Must be a positive integer; invalid values fall back to the default. Single CopyObject requests remain capped at 5 GiB regardless of this threshold. Changes apply to subsequent copies, not copies already in progress. Does not apply to GCP or Azure.
 
 # Milvus supports four message queues (MQ): rocksmq (based on RocksDB), Pulsar, Kafka, and Woodpecker.
 # You can change the MQ by setting the mq.type field.
@@ -939,7 +939,7 @@ dataCoord:
     pendingTimeout: 60 # Timeout in minutes for pending snapshots before GC cleanup
     maxCompactionProtectionSeconds: 604800 # Maximum allowed compaction protection duration in seconds (default 604800 = 7 days)
     crossBucketEndpointAllowlist:  # Comma/space separated endpoint host[:port] allowlist for snapshot server-side cross-bucket copy with custom object storage endpoints. Canonical cloud endpoints derived from cloud_provider and region are allowed without this list.
-    exportCopyConcurrency: 16 # Maximum concurrent provider-side object copy requests for ExportSnapshot. Invalid or non-positive values are coerced to the default value 16.
+    exportCopyConcurrency: 128 # Maximum concurrent objects copied by ExportSnapshot. Each multipart object can issue up to 10 concurrent part-copy requests. Invalid or non-positive values are coerced to the default value 128.
     exportJobTimeout: 43200 # Maximum lifetime in seconds for an accepted snapshot export job, including queue wait time. Default 12 hours.
     exportJobRetention: 10800 # Retention in seconds for completed or failed snapshot export jobs after pin cleanup. Default 3 hours.
     exportMaxConcurrentJobs: 1 # Maximum number of snapshot export jobs executed concurrently by DataCoord.

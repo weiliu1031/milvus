@@ -459,12 +459,12 @@ Provider limitations fail closed:
   scheduling work.
 
 Metadata reads/writes and large object copy can use different helper objects,
-but the large object move itself must be one provider-side copy request.
+but the large object move itself must use provider-side copy operations.
 Export schedules object copies with the refreshable DataCoord configuration
-`dataCoord.snapshot.exportCopyConcurrency`, which defaults to `16`. Each export
+`dataCoord.snapshot.exportCopyConcurrency`, which defaults to `128`. Each export
 worker reads the limit once when it starts, so configuration changes affect new
 worker attempts without changing an active attempt. Invalid or non-positive
-values fall back to `16`. `dataCoord.snapshot.exportMaxConcurrentJobs` defaults
+values fall back to `128`. `dataCoord.snapshot.exportMaxConcurrentJobs` defaults
 to `1`, `dataCoord.snapshot.exportJobTimeout` defaults to 12 hours including
 queue wait, and `dataCoord.snapshot.exportJobRetention` keeps terminal state for
 3 hours after pin cleanup. Public snapshot metadata is written only after every
@@ -475,6 +475,35 @@ use the same requested target root without sharing metadata, manifest, or data
 object keys, and correctness does not depend on an `Exist` preflight or a
 single-DataCoord lock. A failed attempt may leave isolated, unreferenced
 objects; Milvus does not remove them automatically.
+
+### S3-compatible multipart copy and retries
+
+`minio.multipartCopyThreshold` defaults to 500 MiB (524288000 bytes); objects
+at or above the threshold use multipart copy, except objects no larger than
+10 MiB always use single copy to preserve low-threshold compatibility. Part size is the larger of
+10 MiB and the object size divided by 10,000, rounded up, with at most ten
+parts in flight per object. Part size grows when needed to stay within 10,000
+parts, and never exceeds 5 GiB. Completion receives parts in part-number order.
+GCS XML copies continue to use whole-object copy because ranged multipart copy
+is unsupported. Azure and native GCS retain their provider-specific copy paths.
+
+Source stat, whole-object copy, and individual part copy follow milvus-backup's
+retry policy: ten attempts including the first, with all operation errors retried.
+Backoff starts at 200 ms, doubles, and is capped at 3 seconds; there is no jitter.
+As in milvus-backup, the loop waits after every failed attempt, including the
+last, and aggregates errors. Context cancellation interrupts the wait and is
+included in the returned error. Permission errors and missing objects also
+consume the retry budget. Completed parts are retained while a failed part
+retries. Abort uses the same policy with three attempts and an independent
+30-second cleanup context.
+Multipart initiation and completion are not replayed by
+this layer because their results can be ambiguous. Failed or canceled multipart
+copies attempt abort with an independent 30-second cleanup context.
+
+The export concurrency parameter limits objects, not multipart requests. With
+128 concurrent objects and ten parts per object, up to 1,280 part-copy requests
+can be in flight per export job, in addition to provider SDK retries.
+
 
 Same-bucket export is supported, but source protection is an object-level
 invariant. Before copy starts, DataCoord builds the complete source object set:
