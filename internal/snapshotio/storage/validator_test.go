@@ -20,8 +20,11 @@ import (
 	"context"
 	"net/url"
 	"path"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -31,7 +34,88 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/externalspec"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
+
+type snapshotFileExistTarget struct {
+	storage.ChunkManager
+}
+
+func TestValidateSnapshotFileRefs_BoundedConcurrency(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cm := &snapshotFileExistTarget{}
+	started := make(chan struct{}, 65)
+	release := make(chan struct{})
+	var calls, active atomic.Int32
+	m := mockey.Mock((*snapshotFileExistTarget).Exist).To(func(_ *snapshotFileExistTarget, ctx context.Context, _ string) (bool, error) {
+		calls.Add(1)
+		n := active.Add(1)
+		defer active.Add(-1)
+		assert.LessOrEqual(t, n, int32(snapshotFileValidationConcurrency))
+		started <- struct{}{}
+		select {
+		case <-release:
+			return true, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}).Build()
+	defer m.UnPatch()
+	refs := make([]SnapshotFileRef, 65)
+	for i := range refs {
+		refs[i] = SnapshotFileRef{NormalizedPath: "file", Type: SnapshotFileTypeInsertBinlog}
+	}
+	refs = append(refs, SnapshotFileRef{Type: SnapshotFileTypeStorageV3ManifestRoot}, SnapshotFileRef{Type: SnapshotFileTypeStorageV3ManifestObject})
+	done := make(chan error, 1)
+	go func() { done <- validateSnapshotFileRefs(ctx, cm, refs) }()
+	for i := 0; i < snapshotFileValidationConcurrency; i++ {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("validation did not fill its concurrency slots")
+		}
+	}
+	assert.EqualValues(t, snapshotFileValidationConcurrency, active.Load())
+	close(release)
+	require.NoError(t, <-done)
+	assert.EqualValues(t, 65, calls.Load())
+}
+
+func TestValidateSnapshotFileRefs_Failures(t *testing.T) {
+	for _, scenario := range []string{"missing", "io", "cancel", "empty"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cm := &snapshotFileExistTarget{}
+			m := mockey.Mock((*snapshotFileExistTarget).Exist).To(func(_ *snapshotFileExistTarget, _ context.Context, _ string) (bool, error) {
+				if scenario == "io" {
+					return false, merr.ErrServiceUnavailable
+				}
+				return false, nil
+			}).Build()
+			defer m.UnPatch()
+			refs := []SnapshotFileRef{{NormalizedPath: "missing-file", Type: SnapshotFileTypeInsertBinlog}}
+			if scenario == "cancel" {
+				cancel()
+			}
+			if scenario == "empty" {
+				refs = nil
+			}
+			err := validateSnapshotFileRefs(ctx, cm, refs)
+			switch scenario {
+			case "missing":
+				require.ErrorIs(t, err, merr.ErrDataIntegrity)
+			case "io":
+				require.ErrorIs(t, err, merr.ErrServiceUnavailable)
+			case "cancel":
+				require.ErrorIs(t, err, context.Canceled)
+			default:
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 func validateSnapshotForeignStorageForTest(
 	direction Direction,

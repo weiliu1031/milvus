@@ -54,7 +54,8 @@ type CopySegmentTask struct {
 	sourceBucket        string
 	targetBucket        string
 
-	// Target objects created by this task, managed through TaskManager updates.
+	// Cleanup candidates: created objects and cancellation-uncertain destinations,
+	// managed through TaskManager updates after in-flight file copies have drained.
 	copiedFiles []string
 }
 

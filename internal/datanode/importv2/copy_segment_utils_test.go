@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +30,8 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/milvus-io/milvus/internal/compaction"
 	"github.com/milvus-io/milvus/internal/mocks"
@@ -59,6 +63,145 @@ func newCopySegmentCopierMock(
 	).Build()
 	t.Cleanup(func() { mockCopy.UnPatch() })
 	return target
+}
+
+func TestCopyMappedSegmentFiles_ConcurrencyLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		segments int
+		slots    int64
+		peak     int
+	}{
+		{name: "per_segment", segments: 1, slots: 128, peak: segmentFileCopyConcurrency},
+		{name: "shared_worker", segments: 2, slots: 2, peak: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := copyFileSlots
+			copyFileSlots = semaphore.NewWeighted(tc.slots)
+			defer func() { copyFileSlots = previous }()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			started := make(chan struct{}, tc.segments*16)
+			release := make(chan struct{})
+			var active atomic.Int32
+			copier := newCopySegmentCopierMock(t, func(ctx context.Context, _, _, _, _ string) error {
+				n := active.Add(1)
+				defer active.Add(-1)
+				assert.LessOrEqual(t, n, int32(tc.peak))
+				started <- struct{}{}
+				select {
+				case <-release:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			})
+			group := new(errgroup.Group)
+			results := make([][]string, tc.segments)
+			for segment := 0; segment < tc.segments; segment++ {
+				group.Go(func() error {
+					mappings := make(map[string]string)
+					for i := 0; i < 16; i++ {
+						mappings[fmt.Sprintf("src/%d/%d", segment, i)] = fmt.Sprintf("dst/%d/%d", segment, i)
+					}
+					var err error
+					results[segment], err = copyMappedSegmentFiles(ctx, copier, "src", "dst", mappings, nil)
+					return err
+				})
+			}
+			done := make(chan error, 1)
+			go func() { done <- group.Wait() }()
+			for i := 0; i < tc.peak; i++ {
+				select {
+				case <-started:
+				case <-ctx.Done():
+					t.Fatal("copies did not fill their concurrency slots")
+				}
+			}
+			assert.EqualValues(t, tc.peak, active.Load())
+			close(release)
+			require.NoError(t, <-done)
+			for _, files := range results {
+				require.Len(t, files, 16)
+			}
+			require.True(t, copyFileSlots.TryAcquire(tc.slots), "all permits must be released")
+			copyFileSlots.Release(tc.slots)
+		})
+	}
+}
+
+func TestCopyMappedSegmentFiles_FailureDrainsAndTracksUncertainCopy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{}, 2)
+	cancelled := make(chan struct{})
+	releaseFailure := make(chan struct{})
+	releaseSlow := make(chan struct{})
+	var slowOnce sync.Once
+	defer slowOnce.Do(func() { close(releaseSlow) })
+	failure := errors.New("copy failed")
+	copier := newCopySegmentCopierMock(t, func(ctx context.Context, _, src, _, _ string) error {
+		started <- struct{}{}
+		if src == "failure" {
+			select {
+			case <-releaseFailure:
+				return failure
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		<-ctx.Done()
+		close(cancelled)
+		<-releaseSlow
+		return nil // The provider may have created the object despite cancellation.
+	})
+	var files []string
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		files, err = copyMappedSegmentFiles(ctx, copier, "src", "dst", map[string]string{"failure": "dst/failure", "slow": "dst/slow"}, nil)
+		done <- err
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("copies did not start")
+		}
+	}
+	close(releaseFailure)
+	select {
+	case <-cancelled:
+	case <-ctx.Done():
+		t.Fatal("sibling copy was not cancelled")
+	}
+	select {
+	case <-done:
+		t.Fatal("copy returned before its in-flight operation exited")
+	default:
+	}
+	slowOnce.Do(func() { close(releaseSlow) })
+	require.ErrorIs(t, <-done, failure)
+	assert.Equal(t, []string{"dst/slow"}, files)
+}
+
+func TestCopyMappedSegmentFiles_EmptyAndCancelled(t *testing.T) {
+	files, err := copyMappedSegmentFiles(context.Background(), nil, "src", "dst", nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, files)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = copyMappedSegmentFiles(ctx, nil, "src", "dst", map[string]string{"a": "b"}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCopyMappedSegmentFiles_DeadlineKeepsCleanupCandidate(t *testing.T) {
+	copier := newCopySegmentCopierMock(t, func(context.Context, string, string, string, string) error {
+		return context.DeadlineExceeded
+	})
+	files, err := copyMappedSegmentFiles(context.Background(), copier, "src", "dst", map[string]string{"a": "b"}, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, []string{"b"}, files)
 }
 
 func mockNoManifestLobFiles(t *testing.T) {
@@ -1292,7 +1435,10 @@ func TestCopySegmentAndIndexFiles(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "failed to copy file")
-		assert.Empty(t, copiedFiles)
+		for _, file := range copiedFiles {
+			assert.NotContains(t, file, "/111/222/333/", "cleanup must only include target objects")
+			assert.Contains(t, file, "/555/666/")
+		}
 	})
 }
 
@@ -1569,10 +1715,9 @@ func TestCopySegmentAndIndexFiles_ReturnsFileList(t *testing.T) {
 	})
 
 	t.Run("failure returns partial file list", func(t *testing.T) {
-		callCount := 0
+		var callCount atomic.Int32
 		copier := newCopySegmentCopierMock(t, func(_ context.Context, _, _, _, _ string) error {
-			callCount++
-			if callCount > 1 {
+			if callCount.Add(1) > 1 {
 				return errors.New("copy failed")
 			}
 			return nil
@@ -1614,7 +1759,7 @@ func TestCopySegmentAndIndexFiles_ReturnsFileList(t *testing.T) {
 
 		assert.Error(t, err)
 		assert.Nil(t, result)
-		assert.True(t, len(copiedFiles) <= 1, "should return files copied before failure")
+		assert.LessOrEqual(t, len(copiedFiles), 2, "include successful and cancellation-uncertain destinations")
 	})
 }
 
@@ -2614,8 +2759,11 @@ func TestCopySegmentAndIndexFiles_StorageV2CopiesManifest(t *testing.T) {
 		SegmentId:      666,
 	}
 	copied := make(map[string]string)
+	var copiedMu sync.Mutex
 	copier := newCopySegmentCopierMock(t, func(_ context.Context, _, src, _, dst string) error {
+		copiedMu.Lock()
 		copied[src] = dst
+		copiedMu.Unlock()
 		return nil
 	})
 
@@ -2674,8 +2822,11 @@ func TestCopySegmentAndIndexFiles_ExternalTable(t *testing.T) {
 	defer mList.UnPatch()
 
 	copied := make(map[string]string)
+	var copiedMu sync.Mutex
 	copier := newCopySegmentCopierMock(t, func(_ context.Context, _, src, _, dst string) error {
+		copiedMu.Lock()
 		copied[src] = dst
+		copiedMu.Unlock()
 		return nil
 	})
 
@@ -3101,8 +3252,11 @@ func TestCopySegmentAndIndexFiles_WithManifest(t *testing.T) {
 		defer mList.UnPatch()
 
 		copiedSrcPaths := make([]string, 0)
+		var copiedMu sync.Mutex
 		copier := newCopySegmentCopierMock(t, func(_ context.Context, _, src, _, _ string) error {
+			copiedMu.Lock()
 			copiedSrcPaths = append(copiedSrcPaths, src)
+			copiedMu.Unlock()
 			return nil
 		})
 
@@ -3172,7 +3326,10 @@ func TestCopySegmentAndIndexFiles_WithManifest(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "failed to copy file")
-		assert.Empty(t, copiedFiles)
+		for _, file := range copiedFiles {
+			assert.NotContains(t, file, "/111/222/333/", "cleanup must only include target objects")
+			assert.Contains(t, file, "/555/666/")
+		}
 	})
 
 	t.Run("step 3.5 fails on invalid pb path format", func(t *testing.T) {
@@ -3407,8 +3564,11 @@ func TestCopySegmentAndIndexFiles_LocalStorageV3UsesCompletePaths(t *testing.T) 
 	}
 	storageConfig := &indexpb.StorageConfig{StorageType: "local", RootPath: root}
 	copySources := make(map[string]string)
+	var copiedMu sync.Mutex
 	copier := newCopySegmentCopierMock(t, func(ctx context.Context, _, src, _, dst string) error {
+		copiedMu.Lock()
 		copySources[src] = dst
+		copiedMu.Unlock()
 		assert.True(t, path.IsAbs(src))
 		assert.True(t, path.IsAbs(dst))
 		return cm.Copy(ctx, src, dst)
@@ -3506,13 +3666,16 @@ func TestCopySegmentAndIndexFiles_ExternalSourceToLocalCanonicalLayout(t *testin
 		TargetRootPath: root, NewBuildIds: map[int64]int64{7000: 7777},
 	}
 	copied := make(map[string]string)
+	var copiedMu sync.Mutex
 	copier := newCopySegmentCopierMock(t, func(ctx context.Context, srcBucket, src, dstBucket, dst string) error {
 		assert.Equal(t, "source-bucket", srcBucket)
 		assert.Empty(t, dstBucket)
 		suffix, ok := mappings[src]
 		require.True(t, ok, "unexpected source file %q", src)
 		assert.Equal(t, path.Join(root, suffix), dst)
+		copiedMu.Lock()
 		copied[src] = dst
+		copiedMu.Unlock()
 		return cm.Write(ctx, dst, []byte(src))
 	})
 	result, copiedFiles, err := CopySegmentAndIndexFiles(ctx, &struct{ storage.ChunkManager }{},

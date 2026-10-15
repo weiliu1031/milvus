@@ -230,7 +230,10 @@ func TestCopySegmentTask_CleanupUsesTargetManager(t *testing.T) {
 	defer mockRemove.UnPatch()
 
 	var copyCalls []crossBucketCopyCall
+	var copyMu sync.Mutex
 	copier := newCopySegmentCopierMock(t, func(_ context.Context, srcBucket, srcObject, dstBucket, dstObject string) error {
+		copyMu.Lock()
+		defer copyMu.Unlock()
 		copyCalls = append(copyCalls, crossBucketCopyCall{
 			srcBucket: srcBucket,
 			srcObject: srcObject,

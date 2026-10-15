@@ -490,46 +490,49 @@ func (m *snapshotExportManager) executeSnapshotExport(
 		return err
 	}
 	copyConcurrency := Params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt()
-	for cursor := job.GetCopyCursor(); cursor < int64(len(plan.items)); {
-		end := cursor + snapshotExportCheckpointBatchSize
-		if end > int64(len(plan.items)) {
-			end = int64(len(plan.items))
-		}
-		if err := copySnapshotExportPlan(
-			operationCtx,
-			resolved.Copier,
-			instanceCfg.BucketName,
-			resolved.ForeignBucket,
-			plan.items[cursor:end],
-			copyConcurrency,
-		); err != nil {
-			return err
-		}
-		updated, _, err := m.meta.UpdateJob(operationCtx, jobID, func(latest *datapb.ExportSnapshotJob) (bool, error) {
-			if err := ensureSnapshotExportCanAdvance(operationCtx, latest); err != nil {
-				return false, err
+	startCursor := job.GetCopyCursor()
+	cursor := startCursor
+	err = copySnapshotExportPlan(
+		operationCtx,
+		resolved.Copier,
+		instanceCfg.BucketName,
+		resolved.ForeignBucket,
+		plan.items[startCursor:],
+		copyConcurrency,
+		func(completed int) error {
+			end := startCursor + int64(completed)
+			if end-cursor < snapshotExportCheckpointBatchSize && end != int64(len(plan.items)) {
+				return nil
 			}
-			if latest.GetCopyCursor() != cursor {
-				return false, merr.WrapErrDataIntegrityMsg(
-					"snapshot export job %d copy cursor changed from %d to %d",
-					jobID,
-					cursor,
-					latest.GetCopyCursor(),
-				)
+			updated, _, err := m.meta.UpdateJob(operationCtx, jobID, func(latest *datapb.ExportSnapshotJob) (bool, error) {
+				if err := ensureSnapshotExportCanAdvance(operationCtx, latest); err != nil {
+					return false, err
+				}
+				if latest.GetCopyCursor() != cursor {
+					return false, merr.WrapErrDataIntegrityMsg(
+						"snapshot export job %d copy cursor changed from %d to %d",
+						jobID,
+						cursor,
+						latest.GetCopyCursor(),
+					)
+				}
+				latest.CopyCursor = end
+				latest.CopiedFiles = end
+				latest.Progress = snapshotExportCopyProgress(end, int64(len(plan.items)))
+				return false, nil
+			})
+			if err != nil {
+				return err
 			}
-			latest.CopyCursor = end
-			latest.CopiedFiles = end
-			latest.Progress = snapshotExportCopyProgress(end, int64(len(plan.items)))
-			return false, nil
+			cursor = updated.GetCopyCursor()
+			mlog.Info(operationCtx, "snapshot export checkpoint persisted",
+				mlog.FieldJobID(jobID),
+				mlog.Int64("copiedFiles", cursor),
+				mlog.Int64("totalFiles", int64(len(plan.items))))
+			return nil
 		})
-		if err != nil {
-			return err
-		}
-		cursor = updated.GetCopyCursor()
-		mlog.Info(operationCtx, "snapshot export checkpoint persisted",
-			mlog.FieldJobID(jobID),
-			mlog.Int64("copiedFiles", cursor),
-			mlog.Int64("totalFiles", int64(len(plan.items))))
+	if err != nil {
+		return err
 	}
 
 	totalBytes, err := prepareSnapshotExportPlanWithSize(

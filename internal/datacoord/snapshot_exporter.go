@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -196,6 +197,9 @@ func populateSnapshotExportPlanSizes(
 	return totalBytes, nil
 }
 
+// copySnapshotExportPlan keeps copying while checkpoints are persisted.
+// onProgress is serialized and receives the contiguous completed prefix length
+// relative to items, so a checkpoint can never skip an unfinished object.
 func copySnapshotExportPlan(
 	ctx context.Context,
 	copier storage.CrossBucketCopier,
@@ -203,6 +207,7 @@ func copySnapshotExportPlan(
 	targetBucket string,
 	items []snapshotExportPlanItem,
 	concurrency int,
+	onProgress func(int) error,
 ) error {
 	if copier == nil {
 		return merr.WrapErrServiceInternalMsg("cross-bucket copier cannot be nil")
@@ -212,12 +217,32 @@ func copySnapshotExportPlan(
 	}
 	copyGroup, copyCtx := errgroup.WithContext(ctx)
 	copyGroup.SetLimit(concurrency)
-	for _, item := range items {
+	var progressMu sync.Mutex
+	completed := make([]bool, len(items))
+	cursor := 0
+	for index, item := range items {
 		src := item.sourcePath
 		dst := item.destinationPath
 		copyGroup.Go(func() error {
+			if err := copyCtx.Err(); err != nil {
+				return err
+			}
 			if err := copier.CopyCrossBucket(copyCtx, sourceBucket, src, targetBucket, dst); err != nil {
 				return merr.Wrapf(err, "failed to copy snapshot file from %s to %s", src, dst)
+			}
+			if onProgress != nil {
+				progressMu.Lock()
+				defer progressMu.Unlock()
+				completed[index] = true
+				previous := cursor
+				for cursor < len(completed) && completed[cursor] {
+					cursor++
+				}
+				// Serialize callbacks and only checkpoint the contiguous prefix.
+				// Copies beyond that prefix may be replayed after interruption.
+				if cursor != previous {
+					return onProgress(cursor)
+				}
 			}
 			return nil
 		})

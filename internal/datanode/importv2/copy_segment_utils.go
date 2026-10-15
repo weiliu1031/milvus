@@ -18,13 +18,16 @@ package importv2
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
@@ -358,7 +361,49 @@ func generateMappingsFromFiles(
 	return mappings, nil
 }
 
-// CopySegmentAndIndexFiles copies all segment files and index files sequentially.
+func copyMappedSegmentFiles(
+	ctx context.Context,
+	copier storage.CrossBucketCopier,
+	sourceBucket, targetBucket string,
+	mappings map[string]string,
+	logFields []mlog.Field,
+) ([]string, error) {
+	group, copyCtx := errgroup.WithContext(ctx)
+	group.SetLimit(segmentFileCopyConcurrency)
+	var mu sync.Mutex
+	copiedFiles := make([]string, 0, len(mappings))
+	for src, dst := range mappings {
+		group.Go(func() error {
+			if err := copyFileSlots.Acquire(copyCtx, 1); err != nil {
+				return err
+			}
+			defer copyFileSlots.Release(1)
+			copySource := snapshotstorage.NormalizeSnapshotObjectPath(src)
+			mlog.Debug(copyCtx, "copying file",
+				mlog.String("src", snapshotstorage.RedactSnapshotObjectPath(src)), mlog.String("dst", dst))
+			err := copyObjectWithTimeout(copyCtx, copier, sourceBucket, copySource, targetBucket, dst)
+			// A cancelled call can have created its object before returning.
+			// Keep uncertain destinations for cleanup, after all workers drain.
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				mu.Lock()
+				copiedFiles = append(copiedFiles, dst)
+				mu.Unlock()
+			}
+			if err != nil {
+				fields := make([]mlog.Field, 0, len(logFields)+3)
+				fields = append(fields, logFields...)
+				fields = append(fields, mlog.String("src", snapshotstorage.RedactSnapshotObjectPath(src)), mlog.String("dst", dst), mlog.Err(err))
+				mlog.Warn(copyCtx, "failed to copy file", fields...)
+				return merr.Wrapf(err, "failed to copy file from %s to %s", snapshotstorage.RedactSnapshotObjectPath(src), dst)
+			}
+			return nil
+		})
+	}
+	err := group.Wait()
+	return copiedFiles, err
+}
+
+// CopySegmentAndIndexFiles copies files concurrently within shared worker limits.
 func CopySegmentAndIndexFiles(
 	ctx context.Context,
 	sourceCM storage.ChunkManager,
@@ -395,21 +440,9 @@ func CopySegmentAndIndexFiles(
 		return nil, nil, merr.Wrap(err, "failed to generate file mappings")
 	}
 	// Step 3: Execute all copy operations
-	copiedFiles := make([]string, 0, len(mappings))
-	for src, dst := range mappings {
-		copySource := snapshotstorage.NormalizeSnapshotObjectPath(src)
-		mlog.Debug(context.TODO(), "copying file",
-			mlog.String("src", snapshotstorage.RedactSnapshotObjectPath(src)),
-			mlog.String("dst", dst))
-
-		if err := copyObjectWithTimeout(ctx, copier, sourceBucket, copySource, targetBucket, dst); err != nil {
-			fields := make([]mlog.Field, 0, len(logFields)+3)
-			fields = append(fields, logFields...)
-			fields = append(fields, mlog.String("src", snapshotstorage.RedactSnapshotObjectPath(src)), mlog.String("dst", dst), mlog.Err(err))
-			mlog.Warn(context.TODO(), "failed to copy file", fields...)
-			return nil, copiedFiles, merr.Wrapf(err, "failed to copy file from %s to %s", snapshotstorage.RedactSnapshotObjectPath(src), dst)
-		}
-		copiedFiles = append(copiedFiles, dst)
+	copiedFiles, err := copyMappedSegmentFiles(ctx, copier, sourceBucket, targetBucket, mappings, logFields)
+	if err != nil {
+		return nil, copiedFiles, err
 	}
 
 	mlog.Info(context.TODO(), "all files copied successfully",

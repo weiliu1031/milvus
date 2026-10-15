@@ -4892,13 +4892,16 @@ func TestSnapshotExportManager_ExecuteJobErrorBranches(t *testing.T) {
 		job := newJob()
 		manager, meta, _ := newManager(t, job)
 		mockCopy := mockey.Mock(copySnapshotExportPlan).To(
-			func(context.Context, storage.CrossBucketCopier, string, string, []snapshotExportPlanItem, int) error {
+			func(_ context.Context, _ storage.CrossBucketCopier, _, _ string, items []snapshotExportPlanItem, _ int, onProgress func(int) error) error {
 				_, _, err := meta.UpdateJob(context.Background(), job.GetJobId(), func(latest *datapb.ExportSnapshotJob) (bool, error) {
 					latest.CopyCursor = 1
 					latest.CopiedFiles = 1
 					return false, nil
 				})
-				return err
+				if err != nil {
+					return err
+				}
+				return onProgress(len(items))
 			}).Build()
 		defer mockCopy.UnPatch()
 
@@ -4918,12 +4921,15 @@ func TestSnapshotExportManager_ExecuteJobErrorBranches(t *testing.T) {
 		job := newJob()
 		manager, meta, _ := newManager(t, job)
 		mockCopy := mockey.Mock(copySnapshotExportPlan).To(
-			func(context.Context, storage.CrossBucketCopier, string, string, []snapshotExportPlanItem, int) error {
+			func(_ context.Context, _ storage.CrossBucketCopier, _, _ string, items []snapshotExportPlanItem, _ int, onProgress func(int) error) error {
 				_, _, err := meta.UpdateJob(context.Background(), job.GetJobId(), func(latest *datapb.ExportSnapshotJob) (bool, error) {
 					latest.State = datapb.ExportSnapshotJobState_ExportSnapshotJobFailed
 					return false, nil
 				})
-				return err
+				if err != nil {
+					return err
+				}
+				return onProgress(len(items))
 			}).Build()
 		defer mockCopy.UnPatch()
 

@@ -21,6 +21,8 @@ import (
 	"runtime"
 	"sync"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
@@ -28,7 +30,12 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
+const segmentFileCopyConcurrency = 8
+
 var (
+	// File copies use separate permits: segment workers already occupy execPool.
+	copyFileSlots = semaphore.NewWeighted(128)
+
 	execPool         *conc.Pool[any]
 	execPoolInitOnce sync.Once
 )

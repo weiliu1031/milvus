@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/compaction"
@@ -34,6 +35,8 @@ import (
 )
 
 const ExportedSnapshotFilesPath = "files"
+
+const snapshotFileValidationConcurrency = 32
 
 type SnapshotFileType string
 
@@ -107,6 +110,8 @@ func ValidateExternalSnapshotDataFiles(
 }
 
 func validateSnapshotFileRefs(ctx context.Context, cm milvusstorage.ChunkManager, refs []SnapshotFileRef) error {
+	group, checkCtx := errgroup.WithContext(ctx)
+	group.SetLimit(snapshotFileValidationConcurrency)
 	for _, ref := range refs {
 		if ref.Type == SnapshotFileTypeStorageV3ManifestRoot {
 			continue
@@ -118,16 +123,22 @@ func validateSnapshotFileRefs(ctx context.Context, cm milvusstorage.ChunkManager
 			continue
 		}
 
-		exists, err := cm.Exist(ctx, ref.NormalizedPath)
-		if err != nil {
-			return merr.Wrapf(err, "failed to check snapshot file %q", ref.NormalizedPath)
-		}
-		if !exists {
-			return merr.WrapErrDataIntegrityMsg("snapshot file does not exist: %s (%s segment %d)", ref.NormalizedPath, ref.Type, ref.SegmentID)
-		}
+		group.Go(func() error {
+			if err := checkCtx.Err(); err != nil {
+				return err
+			}
+			exists, err := cm.Exist(checkCtx, ref.NormalizedPath)
+			if err != nil {
+				return merr.Wrapf(err, "failed to check snapshot file %q", ref.NormalizedPath)
+			}
+			if !exists {
+				return merr.WrapErrDataIntegrityMsg("snapshot file does not exist: %s (%s segment %d)", ref.NormalizedPath, ref.Type, ref.SegmentID)
+			}
+			return nil
+		})
 	}
 
-	return nil
+	return group.Wait()
 }
 
 type snapshotFileRefCollector struct {

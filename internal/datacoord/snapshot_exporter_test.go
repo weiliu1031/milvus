@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +47,99 @@ func clearSegmentNonInsertFiles(segment *datapb.SegmentDescription) {
 	segment.IndexFiles = nil
 	segment.TextIndexFiles = nil
 	segment.JsonKeyIndexFiles = nil
+}
+
+func TestSnapshotExporter_ContinuousSchedulingWithOrderedProgress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const total = 258
+	items := make([]snapshotExportPlanItem, total)
+	for i := range items {
+		items[i] = snapshotExportPlanItem{sourcePath: fmt.Sprint(i), destinationPath: fmt.Sprint(i)}
+	}
+	releaseFirst := make(chan struct{})
+	reachedNextBatch := make(chan struct{})
+	progressCalled := make(chan struct{}, total)
+	var active atomic.Int32
+	copier := newSnapshotExporterCopierMock(t, func(ctx context.Context, _, src, _, _ string) error {
+		n := active.Add(1)
+		defer active.Add(-1)
+		assert.LessOrEqual(t, n, int32(2))
+		if src == "256" {
+			close(reachedNextBatch)
+		}
+		if src == "0" {
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+	var progress []int
+	done := make(chan error, 1)
+	go func() {
+		done <- copySnapshotExportPlan(ctx, copier, "src", "dst", items, 2, func(cursor int) error {
+			progress = append(progress, cursor)
+			progressCalled <- struct{}{}
+			return nil
+		})
+	}()
+	select {
+	case <-reachedNextBatch:
+	case <-ctx.Done():
+		t.Fatal("next batch was blocked by the first file")
+	}
+	assert.Empty(t, progressCalled, "progress must not skip the unfinished first file")
+	close(releaseFirst)
+	require.NoError(t, <-done)
+	require.NotEmpty(t, progress)
+	assert.Equal(t, total, progress[len(progress)-1])
+	for i := 1; i < len(progress); i++ {
+		assert.Greater(t, progress[i], progress[i-1])
+	}
+}
+
+func TestSnapshotExporter_ContinuousCopyFailures(t *testing.T) {
+	for _, scenario := range []string{"copy", "checkpoint", "cancel", "no_callback", "empty"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			failure := errors.New("injected failure")
+			copier := newSnapshotExporterCopierMock(t, func(context.Context, string, string, string, string) error {
+				if scenario == "copy" {
+					return failure
+				}
+				return nil
+			})
+			callback := func(int) error {
+				if scenario == "checkpoint" {
+					return failure
+				}
+				return nil
+			}
+			if scenario == "cancel" {
+				cancel()
+			}
+			if scenario == "no_callback" {
+				callback = nil
+			}
+			items := []snapshotExportPlanItem{{sourcePath: "a"}, {sourcePath: "b"}}
+			if scenario == "empty" {
+				items = nil
+			}
+			err := copySnapshotExportPlan(ctx, copier, "src", "dst", items, 1, callback)
+			switch scenario {
+			case "copy", "checkpoint":
+				require.ErrorIs(t, err, failure)
+			case "cancel":
+				require.ErrorIs(t, err, context.Canceled)
+			default:
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func snapshotExportStorageConfig(bucket string) *indexpb.StorageConfig {
@@ -93,6 +187,7 @@ func exportSnapshot(
 		targetBucket,
 		plan.items,
 		Params.DataCoordCfg.SnapshotExportCopyConcurrency.GetAsInt(),
+		nil,
 	); err != nil {
 		return "", err
 	}
@@ -920,11 +1015,11 @@ func TestSnapshotExporter_ValidationAndPublicationErrors(t *testing.T) {
 	})
 
 	t.Run("copy validation", func(t *testing.T) {
-		require.Error(t, copySnapshotExportPlan(ctx, nil, "source", "target", nil, 1))
+		require.Error(t, copySnapshotExportPlan(ctx, nil, "source", "target", nil, 1, nil))
 		copier := newSnapshotExporterCopierMock(t, func(context.Context, string, string, string, string) error {
 			return nil
 		})
-		require.Error(t, copySnapshotExportPlan(ctx, copier, "source", "target", nil, 0))
+		require.Error(t, copySnapshotExportPlan(ctx, copier, "source", "target", nil, 0, nil))
 	})
 
 	t.Run("publication validation and write failure", func(t *testing.T) {
