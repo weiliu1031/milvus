@@ -135,11 +135,14 @@ func TestMinioObjectStorageCopyObjectCrossBucket(t *testing.T) {
 			var copyCalls, composeCalls int
 			var gotDst minio.CopyDestOptions
 			var gotSrc minio.CopySrcOptions
-			mockCopy := mockey.Mock((*minio.Client).CopyObject).To(
-				func(_ *minio.Client, _ context.Context, dst minio.CopyDestOptions, src minio.CopySrcOptions) (minio.UploadInfo, error) {
+			mockCopy := mockey.Mock(minio.Core.CopyObject).To(
+				func(_ minio.Core, _ context.Context, srcBucket, srcObject, dstBucket, dstObject string, _ map[string]string, src minio.CopySrcOptions, _ minio.PutObjectOptions) (minio.ObjectInfo, error) {
 					copyCalls++
-					gotDst, gotSrc = dst, src
-					return minio.UploadInfo{ETag: "copied"}, tc.copyErr
+					gotDst = minio.CopyDestOptions{Bucket: dstBucket, Object: dstObject}
+					gotSrc = src
+					assert.Equal(t, srcBucket, src.Bucket)
+					assert.Equal(t, srcObject, src.Object)
+					return minio.ObjectInfo{ETag: "copied"}, tc.copyErr
 				}).Build()
 			defer mockCopy.UnPatch()
 			mockCompose := mockey.Mock((*MinioObjectStorage).copyMultipart).To(
@@ -173,7 +176,11 @@ func TestMinioObjectStorageCopyObjectCrossBucket(t *testing.T) {
 				return
 			}
 			if tc.copyErr != nil {
-				require.ErrorIs(t, err, merr.ErrIoFailed)
+				if tc.wantMultipart {
+					require.ErrorIs(t, err, tc.copyErr)
+				} else {
+					require.ErrorIs(t, err, merr.ErrIoFailed)
+				}
 				require.ErrorContains(t, err, tc.copyErr.Error())
 			} else {
 				require.NoError(t, err)
@@ -182,13 +189,97 @@ func TestMinioObjectStorageCopyObjectCrossBucket(t *testing.T) {
 				assert.Equal(t, 1, composeCalls)
 				assert.Zero(t, copyCalls)
 			} else {
-				assert.Equal(t, 1, copyCalls)
+				wantCalls := 1
+				if tc.copyErr != nil {
+					wantCalls = 10
+				}
+				assert.Equal(t, wantCalls, copyCalls)
 				assert.Zero(t, composeCalls)
 			}
 			assert.Equal(t, "src-bucket", gotSrc.Bucket)
 			assert.Equal(t, "src-object", gotSrc.Object)
 			assert.Equal(t, dstBucket, gotDst.Bucket)
 			assert.Equal(t, "dst-object", gotDst.Object)
+		})
+	}
+}
+
+func TestMinioObjectStorageCopyObjectCrossBucketSingleRequests(t *testing.T) {
+	timer := mockey.Mock(time.After).To(func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}).Build()
+	defer timer.UnPatch()
+
+	const success = `<CopyObjectResult><LastModified>2026-10-14T00:00:00Z</LastModified><ETag>"copied-etag"</ETag></CopyObjectResult>`
+	const embeddedError = `<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>`
+	for _, tc := range []struct {
+		name       string
+		body       string
+		headerETag string
+		status     int
+		recover    bool
+		wantCalls  int
+		wantError  string
+	}{
+		{name: "etag_in_body_only", body: success, wantCalls: 1},
+		{name: "header_cannot_hide_missing_body_etag", body: `<CopyObjectResult/>`, headerETag: `"header-etag"`, wantCalls: 10, wantError: "empty ETag"},
+		{name: "http_200_embedded_error", body: embeddedError, wantCalls: 10, wantError: "empty ETag"},
+		{name: "retry_embedded_error", body: embeddedError, recover: true, wantCalls: 2},
+		{name: "malformed_xml", body: `<CopyObjectResult>`, wantCalls: 10, wantError: "XML syntax error"},
+		{name: "access_denied", status: http.StatusForbidden, body: `<Error><Code>AccessDenied</Code><Message>copy denied</Message></Error>`, wantCalls: 10, wantError: "copy denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var copyCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/xml")
+				switch r.Method {
+				case http.MethodHead:
+					assert.Equal(t, "/src-bucket/src-object", r.URL.Path)
+					w.Header().Set("Content-Length", "1024")
+					w.Header().Set("ETag", `"source-etag"`)
+					w.Header().Set("Last-Modified", "Wed, 14 Oct 2026 00:00:00 GMT")
+				case http.MethodPut:
+					copyCalls++
+					assert.Equal(t, "/dst-bucket/dst-object", r.URL.Path)
+					assert.Equal(t, "src-bucket/src-object", r.Header.Get("X-Amz-Copy-Source"))
+					assert.Empty(t, r.Header.Get("X-Amz-Copy-Source-Range"))
+					assert.Equal(t, int64(0), r.ContentLength)
+					if tc.headerETag != "" {
+						w.Header().Set("ETag", tc.headerETag)
+					}
+					if tc.status != 0 {
+						w.WriteHeader(tc.status)
+					}
+					body := tc.body
+					if tc.recover && copyCalls > 1 {
+						body = success
+					}
+					fmt.Fprint(w, body)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			client, err := minio.New(strings.TrimPrefix(server.URL, "http://"), &minio.Options{
+				Creds:        credentials.NewStaticV4("access-key", "secret-key", ""),
+				Region:       "us-east-1",
+				BucketLookup: minio.BucketLookupPath,
+			})
+			require.NoError(t, err)
+			objectStorage := &MinioObjectStorage{Client: client}
+			err = objectStorage.CopyObjectCrossBucket(context.Background(), "src-bucket", "src-object", "dst-bucket", "dst-object")
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				if tc.status == http.StatusForbidden {
+					require.ErrorIs(t, err, merr.ErrIoPermissionDenied)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantCalls, copyCalls)
 		})
 	}
 }

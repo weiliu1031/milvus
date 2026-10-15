@@ -138,10 +138,6 @@ func (minioObjectStorage *MinioObjectStorage) CopyObjectCrossBucket(ctx context.
 		Bucket: srcBucket,
 		Object: srcObjectName,
 	}
-	dstOpts := minio.CopyDestOptions{
-		Bucket: dstBucket,
-		Object: dstObjectName,
-	}
 	var srcInfo minio.ObjectInfo
 	err := retryObjectCopy(ctx, srcObjectName, func() error {
 		var err error
@@ -155,7 +151,10 @@ func (minioObjectStorage *MinioObjectStorage) CopyObjectCrossBucket(ctx context.
 	// than the multipart minimum. GCS XML does not support ranged multipart copy.
 	if srcInfo.Size <= 10*1024*1024 || (srcInfo.Size < multipartThreshold && srcInfo.Size <= minioSingleCopyObjectMaxSize) || minioObjectStorage.cloudProvider == objectstorage.CloudProviderGCP {
 		return retryObjectCopy(ctx, srcObjectName, func() error {
-			info, err := minioObjectStorage.CopyObject(ctx, dstOpts, srcOpts)
+			// Client.CopyObject in minio-go v7.0.73 reads ETag from the HTTP
+			// header, but S3 returns it in the XML body. Core reads the body.
+			core := minio.Core{Client: minioObjectStorage.Client}
+			info, err := core.CopyObject(ctx, srcBucket, srcObjectName, dstBucket, dstObjectName, nil, srcOpts, minio.PutObjectOptions{})
 			if err == nil && info.ETag == "" {
 				return merr.WrapErrServiceUnavailableMsg("object copy returned an empty ETag")
 			}
