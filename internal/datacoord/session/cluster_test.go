@@ -32,7 +32,6 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/mocks"
-	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
@@ -1419,24 +1418,5 @@ func TestCluster_SnapshotExportCopy(t *testing.T) {
 				require.Error(t, err)
 			}
 		})
-	}
-}
-
-type snapshotExportNodeManager struct{ NodeManager }
-type snapshotExportNodeClient struct{ types.DataNodeClient }
-
-func TestSnapshotExportCopyCapabilityDiscovery(t *testing.T) {
-	nm := &snapshotExportNodeManager{}
-	client := &snapshotExportNodeClient{}
-	ids := mockey.Mock((*snapshotExportNodeManager).GetClientIDs).Return([]int64{1}).Build()
-	defer ids.UnPatch()
-	get := mockey.Mock((*snapshotExportNodeManager).GetClient).Return(client, nil).Build()
-	defer get.UnPatch()
-	for _, supported := range []bool{false, true} {
-		query := mockey.Mock((*snapshotExportNodeClient).QuerySlot).Return(&datapb.QuerySlotResponse{Status: merr.Success(), AvailableSlots: 8, SnapshotExportCopy: supported}, nil).Build()
-		slots := NewCluster(nm).QuerySlot()
-		require.Equal(t, supported, slots[1].SnapshotExportCopy)
-		require.EqualValues(t, 8, slots[1].AvailableSlots)
-		query.UnPatch()
 	}
 }

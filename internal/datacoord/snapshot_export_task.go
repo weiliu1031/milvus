@@ -172,9 +172,6 @@ func (t *snapshotExportCopyTask) GetTaskSlot() int64 {
 	return max(t.request.GetTaskSlot(), 1)
 }
 func (t *snapshotExportCopyTask) GetTaskVersion() int64 { return 1 }
-func (t *snapshotExportCopyTask) CanRunOn(slots *session.WorkerSlots) bool {
-	return slots.SnapshotExportCopy
-}
 func (t *snapshotExportCopyTask) SetTaskTime(kind taskcommon.TimeType, value time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

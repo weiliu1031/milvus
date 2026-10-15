@@ -1581,7 +1581,6 @@ message QuerySlotResponse {
   int64 available_slots = 2;
   string version = 3; // Kept for wire compatibility; new schedulers do not use it
   bool copy_segment_shared_indexes = 4;
-  bool snapshot_export_copy = 5;
 }
 
 enum CompactionTaskState {

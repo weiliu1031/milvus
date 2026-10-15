@@ -128,7 +128,9 @@ missing from an older release.
 ## Scheduling, concurrency and provider copies
 
 Export jobs have no job-count cap. Generic CreateTask/QueryTask/DropTask carry
-`SnapshotExportCopy`; QuerySlot advertises support. Each Export/Restore task
+`SnapshotExportCopy`; placement uses the available slots from QuerySlot, without
+requiring an Export capability field from a shared-pool manager. Workers must
+support this task type before Export is enabled. Each Export/Restore task
 consumes `dataCoord.snapshot.taskSlotUsage` slots (default 1, omitted from the
 default YAML). DataCoord persists the weight at creation and sends it to the
 worker; retries and recovery retain it. Export freezes it in the job request,

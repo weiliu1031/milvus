@@ -753,7 +753,6 @@ func (node *DataNode) QuerySlot(ctx context.Context, req *datapb.QuerySlotReques
 		Status:                   merr.Success(),
 		AvailableSlots:           availableSlots,
 		CopySegmentSharedIndexes: true,
-		SnapshotExportCopy:       true,
 	}, nil
 }
 

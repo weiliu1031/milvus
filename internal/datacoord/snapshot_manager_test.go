@@ -6324,8 +6324,6 @@ func TestSnapshotExportRangeTask_TerminalCleanupBackoff(t *testing.T) {
 	require.Equal(t, taskcommon.SnapshotExportCopy, pending.GetTaskType())
 	require.EqualValues(t, 1, pending.GetTaskSlot())
 	require.EqualValues(t, 1, pending.GetTaskVersion())
-	require.False(t, copyTask.CanRunOn(&session.WorkerSlots{}))
-	require.True(t, copyTask.CanRunOn(&session.WorkerSlots{SnapshotExportCopy: true}))
 	now := time.Now()
 	pending.SetTaskTime(taskcommon.TimeStart, now)
 	require.Equal(t, now, pending.GetTaskTime(taskcommon.TimeStart))
