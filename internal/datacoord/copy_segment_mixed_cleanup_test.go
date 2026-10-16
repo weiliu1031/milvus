@@ -34,7 +34,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
-// Manifest readback rejects every result before installation, including legacy
+// Missing worker acknowledgement rejects every result before installation, including legacy
 // siblings in the same task. Their completed-worker output needs the durable
 // cleanup plan even though those segments never adopt a manifest pointer.
 func TestRejectedCopyCleanupIncludesLegacySibling(t *testing.T) {
@@ -81,7 +81,9 @@ func TestRejectedCopyCleanupIncludesLegacySibling(t *testing.T) {
 					{SegmentId: 2001, ManifestPath: packed.MarshalManifestPath(path.Join(root, "insert_log/100/10/2001"), 3)},
 				},
 			}, copies, m)
-			require.ErrorIs(t, err, merr.ErrServiceUnavailable)
+			require.ErrorIs(t, err, merr.ErrServiceInternal)
+			require.Contains(t, err.Error(), "upgrade the DataNode")
+			require.Zero(t, patch.Times(), "completion must not read back the native manifest")
 			require.Empty(t, m.indexMeta.GetAllSegmentIndexes(2002))
 			persisted, err := catalog.ListSegmentIndexes(ctx, 100)
 			require.NoError(t, err)

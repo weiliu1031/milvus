@@ -19,6 +19,8 @@
 package snapshotio
 
 import (
+	"cmp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -557,6 +559,8 @@ func TextIndexMapToAvro(indexMap map[int64]*datapb.TextIndexStats) []AvroTextInd
 			Stats:   TextIndexStatsToAvro(stats),
 		})
 	}
+	// Stable ordering makes repeated copies of the same manifest byte-identical.
+	slices.SortFunc(entries, func(a, b AvroTextIndexEntry) int { return cmp.Compare(a.FieldID, b.FieldID) })
 	return entries
 }
 
@@ -610,6 +614,8 @@ func JSONKeyIndexMapToAvro(indexMap map[int64]*datapb.JsonKeyStats) []AvroJSONKe
 			Stats:   JSONKeyStatsToAvro(stats),
 		})
 	}
+	// Stable ordering makes repeated copies of the same manifest byte-identical.
+	slices.SortFunc(entries, func(a, b AvroJSONKeyIndexEntry) int { return cmp.Compare(a.FieldID, b.FieldID) })
 	return entries
 }
 
