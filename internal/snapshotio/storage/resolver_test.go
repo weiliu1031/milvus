@@ -20,6 +20,8 @@ import (
 	"context"
 	"testing"
 
+	snapshotio "github.com/milvus-io/milvus/pkg/v3/snapshotio"
+
 	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -164,7 +166,7 @@ func TestResolveForeignStorageLayer1OverridesBucketRoot(t *testing.T) {
 	resolved, err := ResolveForeignStorage(
 		context.Background(),
 		instanceCfg,
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"s3://foreign-bucket/relocated",
 		"",
 	)
@@ -197,7 +199,7 @@ func TestResolveForeignStorageExportObjectKeyUsesInstanceBucket(t *testing.T) {
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"export-root",
 		"",
 	)
@@ -225,7 +227,7 @@ func TestResolveForeignStorageRestoreDoesNotCreateForeignSourceBucket(t *testing
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"s3://foreign-bucket/root/snapshots/1/metadata/1.json",
 		"",
 	)
@@ -252,7 +254,7 @@ func TestResolveForeignStorageAppliesRawCredentialsFromExternalSpec(t *testing.T
 				CloudProvider:     objectstorage.CloudProviderAWS,
 				Region:            "us-west-2",
 			},
-			DirectionRestore,
+			snapshotio.DirectionRestore,
 			"s3://foreign-bucket/root/snapshots/1/metadata/1.json",
 			`{"extfs":{"cloud_provider":"aws","region":"us-west-2","access_key_id":"foreign-ak","access_key_value":"foreign-sk"}}`,
 		)
@@ -270,7 +272,7 @@ func TestResolveForeignStorageAppliesRawCredentialsFromExternalSpec(t *testing.T
 				UseIAM:        true,
 				CloudProvider: objectstorage.CloudProviderGCPNative,
 			},
-			DirectionRestore,
+			snapshotio.DirectionRestore,
 			"gs://foreign-bucket/root/snapshots/1/metadata/1.json",
 			`{"extfs":{"cloud_provider":"gcpnative","use_iam":"true"}}`,
 		)
@@ -290,7 +292,7 @@ func TestResolveForeignStorageAppliesRawCredentialsFromExternalSpec(t *testing.T
 				SecretAccessKeyID: "old-key",
 				CloudProvider:     objectstorage.CloudProviderAzure,
 			},
-			DirectionRestore,
+			snapshotio.DirectionRestore,
 			"azure://core.windows.net/foreign-container/root/snapshots/1/metadata/1.json",
 			`{"extfs":{"cloud_provider":"azure","access_key_id":"azure-account","access_key_value":"azure-key"}}`,
 		)
@@ -318,7 +320,7 @@ func TestResolveForeignStorageLayer2RestoreCopierPreservesSpecCredentialMode(t *
 			CloudProvider:     objectstorage.CloudProviderAWS,
 			Region:            "us-west-2",
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"s3://foreign-bucket/root/snapshots/1/metadata/1.json",
 		`{"extfs":{"cloud_provider":"aws","region":"us-west-2","iam_endpoint":"foreign-iam","access_key_id":"foreign-ak","access_key_value":"foreign-sk"}}`,
 	)
@@ -349,7 +351,7 @@ func TestResolveForeignStorageCopySourceAcceptsSourceRoot(t *testing.T) {
 			CloudProvider:     objectstorage.CloudProviderAWS,
 			Region:            "us-west-2",
 		},
-		DirectionCopySource,
+		snapshotio.DirectionCopySource,
 		"s3://foreign-bucket/source-root/files",
 		`{"extfs":{"cloud_provider":"aws","region":"us-west-2","access_key_id":"foreign-ak","access_key_value":"foreign-sk"}}`,
 	)
@@ -384,7 +386,7 @@ func TestResolveForeignStorageSkipsBucketChecks(t *testing.T) {
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"s3://foreign-bucket/source-root/snapshots/1/metadata/1.json",
 		`{"extfs":{"cloud_provider":"aws","region":"us-west-2","access_key_id":"foreign-ak","access_key_value":"foreign-sk"}}`,
 	)
@@ -392,21 +394,6 @@ func TestResolveForeignStorageSkipsBucketChecks(t *testing.T) {
 	require.Len(t, captured, 2)
 	assert.True(t, captured[0].SkipBucketCheck)
 	assert.True(t, captured[1].SkipBucketCheck)
-}
-
-func TestEndpointAllowlistRejectsPrivateIPUnlessAllowlisted(t *testing.T) {
-	assert.False(t, endpointAllowedByAllowlist(
-		"http://127.0.0.1:9000",
-		"",
-		objectstorage.CloudProviderAWS,
-		"us-west-2",
-	))
-	assert.True(t, endpointAllowedByAllowlist(
-		"http://127.0.0.1:9000",
-		"127.0.0.1:9000",
-		objectstorage.CloudProviderAWS,
-		"us-west-2",
-	))
 }
 
 func TestResolveForeignStorage_RejectsCrossCloud(t *testing.T) {
@@ -421,12 +408,12 @@ func TestResolveForeignStorage_RejectsCrossCloud(t *testing.T) {
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"gs://foreign/root/snapshots/1/metadata/1.json",
 		`{"extfs":{"cloud_provider":"gcpnative","region":"us-central1","use_iam":"true"}}`,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Contains(t, err.Error(), "streaming")
 	assert.Equal(t, merr.InputError, merr.GetErrorType(err))
 	assert.Empty(t, captured)
@@ -443,12 +430,12 @@ func TestResolveForeignStorage_RejectsIndependentS3CompatibleEndpoints(t *testin
 			BucketName:    "local",
 			CloudProvider: "minio",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"minio://minio-b.example.com:9000/foreign/root",
 		`{"extfs":{"cloud_provider":"minio","use_iam":"true"}}`,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Equal(t, merr.InputError, merr.GetErrorType(err))
 	assert.Empty(t, captured)
 }
@@ -464,12 +451,12 @@ func TestResolveForeignStorageRejectsGCPNativeDifferentCustomEndpoints(t *testin
 			BucketName:    "instance-bucket",
 			CloudProvider: objectstorage.CloudProviderGCPNative,
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"https://gcs-b.example.com/foreign-bucket/root/snapshots/1/metadata/1.json",
 		`{"extfs":{"cloud_provider":"gcpnative","use_iam":"true"}}`,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Equal(t, merr.InputError, merr.GetErrorType(err))
 	assert.Empty(t, captured)
 }
@@ -483,12 +470,12 @@ func TestResolveForeignStorageRejectsLocalInstanceConfig(t *testing.T) {
 		&objectstorage.Config{
 			RootPath: "/tmp/milvus",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"s3://foreign-bucket/root/manifest.json",
 		"",
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Equal(t, merr.SystemError, merr.GetErrorType(err))
 	assert.Empty(t, captured)
 }
@@ -505,7 +492,7 @@ func TestResolveForeignStorageLayer2RejectsSpecProviderWithoutEndpoint(t *testin
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"s3://foreign-bucket/root/manifest.json",
 		`{"extfs":{"cloud_provider":"aliyun"}}`,
 	)
@@ -527,7 +514,7 @@ func TestResolveForeignStorageLayer2DerivedEndpointSetsUseSSL(t *testing.T) {
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"s3://foreign-bucket/root/manifest.json",
 		`{"extfs":{"cloud_provider":"aws","region":"us-west-2"}}`,
 	)
@@ -549,12 +536,12 @@ func TestResolveForeignStorageLayer1RejectsDifferentURIFamily(t *testing.T) {
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"gs://foreign-bucket/root/snapshots/1/metadata/1.json",
 		"",
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Equal(t, merr.InputError, merr.GetErrorType(err))
 	assert.Empty(t, captured)
 }
@@ -571,7 +558,7 @@ func TestResolveForeignStorageLayer2RejectsURISchemeProviderMismatch(t *testing.
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"gs://foreign-bucket/root/snapshots/1/metadata/1.json",
 		`{"extfs":{"cloud_provider":"aws","region":"us-west-2"}}`,
 	)
@@ -592,12 +579,12 @@ func TestResolveForeignStorageLayer1RejectsDifferentURIEndpoint(t *testing.T) {
 			BucketName:    "instance-bucket",
 			CloudProvider: "minio",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"minio://minio-b.example.com:9000/foreign-bucket/root/manifest.json",
 		"",
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Empty(t, captured)
 }
 
@@ -613,7 +600,7 @@ func TestResolveForeignStorageExportRawAKSK(t *testing.T) {
 			CloudProvider: objectstorage.CloudProviderAWS,
 			Region:        "us-west-2",
 		},
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"s3://foreign-bucket/root/manifest.json",
 		`{"extfs":{"cloud_provider":"aws","region":"us-west-2","access_key_id":"foreign-ak","access_key_value":"foreign-sk"}}`,
 	)
@@ -623,32 +610,6 @@ func TestResolveForeignStorageExportRawAKSK(t *testing.T) {
 	assert.Equal(t, "foreign-sk", captured[0].SecretAccessKeyID)
 	assert.Equal(t, "foreign-ak", resolved.ForeignStorageConfig.GetAccessKeyID())
 	assert.Equal(t, "foreign-sk", resolved.ForeignStorageConfig.GetSecretAccessKey())
-}
-
-func TestEndpointsCompatibleRejectsDifferentCustomS3Endpoints(t *testing.T) {
-	assert.False(t, endpointsCompatible(
-		"minio-a.example.com:9000",
-		"minio-b.example.com:9000",
-		"minio-b.example.com:9000",
-		"minio",
-		"",
-	))
-}
-
-func TestS3EndpointCompatibilityRejectsNonObjectStorageAWSHost(t *testing.T) {
-	assert.False(t, endpointAllowedByAllowlist(
-		"ec2.us-west-2.amazonaws.com",
-		"",
-		objectstorage.CloudProviderAWS,
-		"us-west-2",
-	))
-	assert.False(t, endpointsCompatible(
-		"s3.us-west-2.amazonaws.com",
-		"ec2.us-west-2.amazonaws.com",
-		"ec2.us-west-2.amazonaws.com",
-		objectstorage.CloudProviderAWS,
-		"us-west-2",
-	))
 }
 
 func azureInstanceCfg() *objectstorage.Config {
@@ -671,7 +632,7 @@ func TestResolveForeignStorageAzureCrossAccountExportWithSourceSAS(t *testing.T)
 	resolved, err := ResolveForeignStorage(
 		context.Background(),
 		azureInstanceCfg(),
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://backup-account.blob.core.windows.net/backup-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"backup-account","access_key_value":"backup-key","source_sas_token":"?sv=2024-08-04&sig=abc"}}`,
 	)
@@ -708,7 +669,7 @@ func TestResolveForeignStorageAzureCrossAccountExportWithSourceSASDefaultPort(t 
 	resolved, err := ResolveForeignStorage(
 		context.Background(),
 		instanceCfg,
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://backup-account.blob.core.windows.net/backup-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"backup-account","access_key_value":"backup-key","source_sas_token":"sv=2024-08-04&sig=abc"}}`,
 	)
@@ -737,7 +698,7 @@ func TestResolveForeignStorageAzureSameAccountExportDefaultPort(t *testing.T) {
 	_, err := ResolveForeignStorage(
 		context.Background(),
 		instanceCfg,
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://instance-account.blob.core.windows.net/instance-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"instance-account","access_key_value":"instance-key"}}`,
 	)
@@ -760,7 +721,7 @@ func TestResolveForeignStorageAzureCrossAccountSourceSASNonDefaultPort(t *testin
 	_, err := ResolveForeignStorage(
 		context.Background(),
 		instanceCfg,
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://backup-account.blob.core.windows.net/backup-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"backup-account","access_key_value":"backup-key","source_sas_token":"sv=2024-08-04&sig=abc"}}`,
 	)
@@ -777,7 +738,7 @@ func TestResolveForeignStorageAzureCrossAccountRestoreWithSourceSAS(t *testing.T
 	_, err := ResolveForeignStorage(
 		context.Background(),
 		azureInstanceCfg(),
-		DirectionRestore,
+		snapshotio.DirectionRestore,
 		"azure://backup-account.blob.core.windows.net/backup-container/root/snapshots/1/metadata/1.json",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"backup-account","access_key_value":"backup-key","source_sas_token":"sv=2024-08-04&sig=abc"}}`,
 	)
@@ -829,7 +790,7 @@ func TestResolveForeignStorageAzureCrossAccountRestoreConstructsRealClients(t *t
 		resolved, err := ResolveForeignStorage(
 			context.Background(),
 			instanceCfg,
-			DirectionRestore,
+			snapshotio.DirectionRestore,
 			"azure://backup-account.blob.core.windows.net/backup-container/root/snapshots/1/metadata/1.json",
 			externalSpec,
 		)
@@ -843,7 +804,7 @@ func TestResolveForeignStorageAzureCrossAccountRestoreConstructsRealClients(t *t
 		resolved, err := ResolveForeignStorage(
 			context.Background(),
 			instanceCfg,
-			DirectionCopySource,
+			snapshotio.DirectionCopySource,
 			"azure://backup-account.blob.core.windows.net/backup-container/root",
 			externalSpec,
 		)
@@ -863,12 +824,12 @@ func TestResolveForeignStorageAzureCrossAccountWithoutSASRejected(t *testing.T) 
 	_, err := ResolveForeignStorage(
 		context.Background(),
 		azureInstanceCfg(),
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://backup-account.blob.core.windows.net/backup-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"backup-account","access_key_value":"backup-key"}}`,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), unsupportedServerSideCopyMessage)
+	assert.Contains(t, err.Error(), "server-side cross-bucket copy is unsupported")
 	assert.Empty(t, captured)
 }
 
@@ -881,7 +842,7 @@ func TestResolveForeignStorageAzureSameAccountWithSASRejected(t *testing.T) {
 	_, err := ResolveForeignStorage(
 		context.Background(),
 		azureInstanceCfg(),
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://instance-account.blob.core.windows.net/backup-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"instance-account","access_key_value":"backup-key","source_sas_token":"sv=2024-08-04&sig=abc"}}`,
 	)
@@ -899,7 +860,7 @@ func TestResolveForeignStorageAzureCrossCloudSASRejected(t *testing.T) {
 	_, err := ResolveForeignStorage(
 		context.Background(),
 		azureInstanceCfg(),
-		DirectionExport,
+		snapshotio.DirectionExport,
 		"azure://backup-account.blob.core.chinacloudapi.cn/backup-container/export-root",
 		`{"extfs":{"cloud_provider":"azure","access_key_id":"backup-account","access_key_value":"backup-key","source_sas_token":"sv=2024-08-04&sig=abc"}}`,
 	)

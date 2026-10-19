@@ -192,13 +192,13 @@ func (AzureObjectStorage *AzureObjectStorage) GetObject(ctx context.Context, buc
 
 func (AzureObjectStorage *AzureObjectStorage) PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64) error {
 	_, err := AzureObjectStorage.Client.NewContainerClient(bucketName).NewBlockBlobClient(objectName).UploadStream(ctx, reader, &azblob.UploadStreamOptions{})
-	return mapObjectStorageError(objectName, err)
+	return objectstorage.ToMilvusIoError(objectName, err)
 }
 
 func (AzureObjectStorage *AzureObjectStorage) StatObject(ctx context.Context, bucketName, objectName string) (int64, error) {
 	info, err := AzureObjectStorage.Client.NewContainerClient(bucketName).NewBlockBlobClient(objectName).GetProperties(ctx, &blob.GetPropertiesOptions{})
 	if err != nil {
-		return 0, mapObjectStorageError(objectName, err)
+		return 0, objectstorage.ToMilvusIoError(objectName, err)
 	}
 	return *info.ContentLength, nil
 }
@@ -211,7 +211,7 @@ func (AzureObjectStorage *AzureObjectStorage) WalkWithObjects(ctx context.Contex
 		for pager.More() {
 			pageResp, err := pager.NextPage(ctx)
 			if err != nil {
-				return mapObjectStorageError(prefix, err)
+				return objectstorage.ToMilvusIoError(prefix, err)
 			}
 			for _, blob := range pageResp.Segment.BlobItems {
 				if !walkFunc(&ChunkObjectInfo{FilePath: *blob.Name, ModifyTime: *blob.Properties.LastModified}) {
@@ -226,7 +226,7 @@ func (AzureObjectStorage *AzureObjectStorage) WalkWithObjects(ctx context.Contex
 		for pager.More() {
 			pageResp, err := pager.NextPage(ctx)
 			if err != nil {
-				return mapObjectStorageError(prefix, err)
+				return objectstorage.ToMilvusIoError(prefix, err)
 			}
 
 			for _, blob := range pageResp.Segment.BlobItems {
@@ -246,7 +246,7 @@ func (AzureObjectStorage *AzureObjectStorage) WalkWithObjects(ctx context.Contex
 
 func (AzureObjectStorage *AzureObjectStorage) RemoveObject(ctx context.Context, bucketName, objectName string) error {
 	_, err := AzureObjectStorage.Client.NewContainerClient(bucketName).NewBlockBlobClient(objectName).Delete(ctx, &blob.DeleteOptions{})
-	return mapObjectStorageError(objectName, err)
+	return objectstorage.ToMilvusIoError(objectName, err)
 }
 
 func (AzureObjectStorage *AzureObjectStorage) CopyObjectCrossBucket(ctx context.Context, srcContainer, srcObjectName, dstContainer, dstObjectName string) error {
@@ -280,7 +280,7 @@ func startOrResumeAzureCopy(ctx context.Context, dstBlobClient *blockblob.Client
 	})
 	if err != nil {
 		if !bloberror.HasCode(err, bloberror.PendingCopyOperation, bloberror.ConditionNotMet, bloberror.TargetConditionNotMet) {
-			return mapObjectStorageError(dstObjectName, err)
+			return objectstorage.ToMilvusIoError(dstObjectName, err)
 		}
 	}
 
@@ -318,7 +318,7 @@ func waitAzureCopyComplete(
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			mappedErr := mapObjectStorageError(dstObjectName, err)
+			mappedErr := objectstorage.ToMilvusIoError(dstObjectName, err)
 			if merr.IsNonRetryableErr(mappedErr) {
 				return mappedErr
 			}

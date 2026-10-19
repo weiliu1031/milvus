@@ -24,13 +24,13 @@ import (
 	"testing"
 
 	"github.com/bytedance/mockey"
-	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	sharedsnapshot "github.com/milvus-io/milvus/pkg/v3/snapshotio"
 )
 
 type snapshotExporterCopierTarget struct{ storage.SizedCrossBucketCopier }
@@ -80,7 +80,7 @@ func TestSnapshotExporter_L0CommitTimestamps(t *testing.T) {
 				}
 				return cm.Write(ctx, dst, bytes)
 			})
-			sourceURI, err := snapshotstorage.NewSnapshotWriter(cm).Save(ctx, snapshot)
+			sourceURI, err := sharedsnapshot.NewSnapshotWriter(cm).Save(ctx, snapshot)
 			require.NoError(t, err)
 			req := &datapb.SnapshotExportCopyRequest{
 				TaskId: 1, GenerationId: 1, SegmentEnd: 2,
@@ -88,15 +88,15 @@ func TestSnapshotExporter_L0CommitTimestamps(t *testing.T) {
 				SnapshotMetadataPath: sourceURI, TargetUri: path.Join(cm.RootPath(), "export"),
 				SourceStorageConfig: &indexpb.StorageConfig{},
 			}
-			resolved := &snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, Copier: copier, ForeignStorageConfig: &indexpb.StorageConfig{}}
-			copied, err := snapshotstorage.ExecuteSnapshotExport(ctx, req, cm, resolved, make(chan struct{}, 2), nil)
+			resolved := &sharedsnapshot.ResolvedForeignStorage{ForeignCM: cm, Copier: copier, ForeignStorageConfig: &indexpb.StorageConfig{}}
+			copied, err := sharedsnapshot.ExecuteSnapshotExport(ctx, req, cm, resolved, make(chan struct{}, 2), nil)
 			require.NoError(t, err)
-			final, err := snapshotstorage.FinalizeSnapshotExport(ctx, req, []*datapb.SnapshotExportCopyTask{{TaskId: 1, SegmentEnd: 2, Result: copied}}, cm, resolved)
+			final, err := sharedsnapshot.FinalizeSnapshotExport(ctx, req, []*datapb.SnapshotExportCopyTask{{TaskId: 1, SegmentEnd: 2, Result: copied}}, cm, resolved)
 			require.NoError(t, err)
 			uri := final.MetadataURI
-			err = commitSnapshotExportMetadata(ctx, cm, snapshotstorage.SnapshotExportAttemptURI(req), uri)
+			err = commitSnapshotExportMetadata(ctx, cm, sharedsnapshot.SnapshotExportAttemptURI(req), uri)
 			require.NoError(t, err)
-			result, err := snapshotstorage.NewSnapshotReader(cm).ReadSnapshot(ctx, uri, true)
+			result, err := sharedsnapshot.NewSnapshotReader(cm).ReadSnapshot(ctx, uri, true)
 			require.NoError(t, err)
 			require.Equal(t, commit, result.Segments[0].GetCommitTimestamp(), "export preserves captured timestamps without inferring omitted values")
 			require.Zero(t, result.Segments[1].GetCommitTimestamp())

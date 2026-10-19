@@ -595,7 +595,7 @@ func TestMapObjectStorageError_GCP_NewErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gcpErr := &googleapi.Error{Code: tt.statusCode}
-			result := mapObjectStorageError("test/path", gcpErr)
+			result := objectstorage.ToMilvusIoError("test/path", gcpErr)
 			assert.True(t, errors.Is(result, tt.expectedError))
 		})
 	}
@@ -603,18 +603,18 @@ func TestMapObjectStorageError_GCP_NewErrors(t *testing.T) {
 
 func TestMapObjectStorageError_GCP_SentinelErrors(t *testing.T) {
 	t.Run("ErrObjectNotExist", func(t *testing.T) {
-		result := mapObjectStorageError("test/path", cstorage.ErrObjectNotExist)
+		result := objectstorage.ToMilvusIoError("test/path", cstorage.ErrObjectNotExist)
 		assert.ErrorIs(t, result, merr.ErrIoKeyNotFound)
 	})
 
 	t.Run("ErrBucketNotExist", func(t *testing.T) {
-		result := mapObjectStorageError("test/path", cstorage.ErrBucketNotExist)
+		result := objectstorage.ToMilvusIoError("test/path", cstorage.ErrBucketNotExist)
 		assert.ErrorIs(t, result, merr.ErrIoBucketNotFound)
 	})
 
 	t.Run("WrappedErrObjectNotExist", func(t *testing.T) {
 		wrappedErr := errors.Wrap(cstorage.ErrObjectNotExist, "get attrs failed")
-		result := mapObjectStorageError("test/path", wrappedErr)
+		result := objectstorage.ToMilvusIoError("test/path", wrappedErr)
 		assert.ErrorIs(t, result, merr.ErrIoKeyNotFound)
 	})
 
@@ -624,13 +624,13 @@ func TestMapObjectStorageError_GCP_SentinelErrors(t *testing.T) {
 
 	t.Run("MultiWrappedErrObjectNotExist", func(t *testing.T) {
 		libErr := fmt.Errorf("%w: %w", cstorage.ErrObjectNotExist, notFound)
-		result := mapObjectStorageError("test/path", libErr)
+		result := objectstorage.ToMilvusIoError("test/path", libErr)
 		assert.ErrorIs(t, result, merr.ErrIoKeyNotFound)
 	})
 
 	t.Run("MultiWrappedErrBucketNotExist", func(t *testing.T) {
 		libErr := fmt.Errorf("%w: %w", cstorage.ErrBucketNotExist, notFound)
-		result := mapObjectStorageError("test/path", libErr)
+		result := objectstorage.ToMilvusIoError("test/path", libErr)
 		assert.ErrorIs(t, result, merr.ErrIoBucketNotFound)
 	})
 }

@@ -52,7 +52,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/metastore"
-	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
+	snapshotadapter "github.com/milvus-io/milvus/internal/snapshotio/storage"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster"
 	internaltypes "github.com/milvus-io/milvus/internal/types"
@@ -64,6 +64,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
+	snapshotstorage "github.com/milvus-io/milvus/pkg/v3/snapshotio"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
@@ -3412,7 +3413,7 @@ func TestSnapshotExportManager_SubmitDurableJob(t *testing.T) {
 		defer cancel()
 		events := make([]string, 0, 5)
 
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).To(
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).To(
 			func(*objectstorage.Config, snapshotstorage.Direction, string, string) error {
 				events = append(events, "validate")
 				return nil
@@ -3481,7 +3482,7 @@ func TestSnapshotExportManager_SubmitDurableJob(t *testing.T) {
 	})
 
 	t.Run("persistence failure releases pin with live context", func(t *testing.T) {
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 		defer mockValidate.UnPatch()
 		mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return(
 			&datapb.SnapshotInfo{Id: 1, CollectionId: 100, Name: "snapshot-1"}, nil).Build()
@@ -3527,7 +3528,7 @@ func TestSnapshotExportManager_SubmitDurableJob(t *testing.T) {
 }
 
 func TestSnapshotExportManager_SubmitSeparatesMatchingClusterLocalIDs(t *testing.T) {
-	mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+	mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 	defer mockValidate.UnPatch()
 	mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return(
 		&datapb.SnapshotInfo{Id: 1, CollectionId: 100, Name: "snapshot-1"}, nil).Build()
@@ -3652,7 +3653,7 @@ func TestSnapshotExportManager_ExecutesAndPublishesDurableResult(t *testing.T) {
 		}
 		return targetCM.Write(copyCtx, dst, data)
 	})
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignBucket:        "target-bucket",
 		ForeignCM:            targetCM,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
@@ -3776,7 +3777,7 @@ func TestSnapshotExportManager_ReplaysGenerationAfterWorkerLoss(t *testing.T) {
 		}
 		return targetCM.Write(copyCtx, dst, data)
 	})
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignBucket:        "target-bucket",
 		ForeignCM:            targetCM,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
@@ -3907,7 +3908,7 @@ func TestSnapshotExportManager_CompletesPublishingAfterOriginalDeadline(t *testi
 	job := preparePublishingSnapshotExportJob(t, targetCM, targetRoot, 9001)
 	meta, err := newSnapshotExportMeta(context.Background(), newSnapshotExportCatalogFake(job))
 	require.NoError(t, err)
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignBucket: "target-bucket",
 		ForeignCM:     targetCM,
 	}, nil).Build()
@@ -3940,7 +3941,7 @@ func TestSnapshotExportManager_ReplaysPublishingAfterCompletionPersistenceFailur
 	meta, err := newSnapshotExportMeta(context.Background(), catalog)
 	require.NoError(t, err)
 	manager := newSnapshotExportManagerWithWorkers(t, context.Background(), meta, nil)
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignBucket: "target-bucket",
 		ForeignCM:     targetCM,
 	}, nil).Build()
@@ -3990,7 +3991,7 @@ func TestSnapshotExportManager_PublishingStagingFailures(t *testing.T) {
 			meta, err := newSnapshotExportMeta(context.Background(), newSnapshotExportCatalogFake(job))
 			require.NoError(t, err)
 			manager := newSnapshotExportManagerWithWorkers(t, context.Background(), meta, nil)
-			defer mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+			defer mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 				ForeignBucket: "target-bucket", ForeignCM: targetCM,
 			}, nil).Build().UnPatch()
 			failure := merr.ErrIoTooManyRequests
@@ -4044,7 +4045,7 @@ func TestSnapshotExportManager_TimeoutStopsLateCopyCheckpoint(t *testing.T) {
 		}
 		return targetCM.Write(context.Background(), dst, data)
 	})
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignBucket:        "target-bucket",
 		ForeignCM:            targetCM,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
@@ -4406,7 +4407,7 @@ func TestSnapshotExportManager_SubmitFailurePaths(t *testing.T) {
 
 	t.Run("storage validation fails", func(t *testing.T) {
 		expected := errors.New("invalid target")
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(expected).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(expected).Build()
 		defer mockValidate.UnPatch()
 		manager := newSnapshotExportManagerWithWorkers(t, context.Background(), nil, nil)
 		jobID, err := manager.Submit(context.Background(), 100, "snapshot-1", "default", "collection-1", "target", "")
@@ -4416,7 +4417,7 @@ func TestSnapshotExportManager_SubmitFailurePaths(t *testing.T) {
 
 	t.Run("snapshot lookup fails", func(t *testing.T) {
 		expected := errors.New("snapshot missing")
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 		defer mockValidate.UnPatch()
 		mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return((*datapb.SnapshotInfo)(nil), expected).Build()
 		defer mockGetSnapshot.UnPatch()
@@ -4428,7 +4429,7 @@ func TestSnapshotExportManager_SubmitFailurePaths(t *testing.T) {
 
 	t.Run("job allocation fails", func(t *testing.T) {
 		expected := errors.New("allocator unavailable")
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 		defer mockValidate.UnPatch()
 		mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return(&datapb.SnapshotInfo{Id: 1}, nil).Build()
 		defer mockGetSnapshot.UnPatch()
@@ -4446,7 +4447,7 @@ func TestSnapshotExportManager_SubmitFailurePaths(t *testing.T) {
 
 	t.Run("source pin fails", func(t *testing.T) {
 		expected := errors.New("pin unavailable")
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 		defer mockValidate.UnPatch()
 		mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return(&datapb.SnapshotInfo{Id: 1}, nil).Build()
 		defer mockGetSnapshot.UnPatch()
@@ -4465,7 +4466,7 @@ func TestSnapshotExportManager_SubmitFailurePaths(t *testing.T) {
 	})
 
 	t.Run("persistence failure reports cleanup failure", func(t *testing.T) {
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 		defer mockValidate.UnPatch()
 		mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return(&datapb.SnapshotInfo{Id: 1}, nil).Build()
 		defer mockGetSnapshot.UnPatch()
@@ -4497,7 +4498,7 @@ func TestSnapshotExportManager_SubmitFailurePaths(t *testing.T) {
 		defer Params.Reset(restoreTTLKey)
 		Params.Save(timeoutKey, "2")
 		defer Params.Reset(timeoutKey)
-		mockValidate := mockey.Mock(snapshotstorage.ValidateForeignStorageRequest).Return(nil).Build()
+		mockValidate := mockey.Mock(snapshotadapter.ValidateForeignStorageRequest).Return(nil).Build()
 		defer mockValidate.UnPatch()
 		mockGetSnapshot := mockey.Mock((*snapshotMeta).GetSnapshot).Return(&datapb.SnapshotInfo{Id: 1}, nil).Build()
 		defer mockGetSnapshot.UnPatch()
@@ -4916,7 +4917,7 @@ func TestSnapshotExportManager_PersistenceAndCleanupBranches(t *testing.T) {
 
 func TestSnapshotManager_RestoreExternalData_PermanentReadErrorCreatesFailedJob(t *testing.T) {
 	cm := storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignCM:            cm,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
 	}, nil).Build()
@@ -4957,7 +4958,7 @@ func TestSnapshotManager_RestoreExternalData_PermanentReadErrorCreatesFailedJob(
 
 func TestSnapshotManager_RestoreExternalData_TransientReadErrorRemainsRetryable(t *testing.T) {
 	cm := storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignCM:            cm,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
 	}, nil).Build()
@@ -4996,7 +4997,7 @@ func TestSnapshotManager_RestoreExternalData_TransientReadErrorRemainsRetryable(
 
 func TestSnapshotManager_RestoreExternalData_DataIntegrityCreatesFailedJob(t *testing.T) {
 	cm := storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignCM:            cm,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
 	}, nil).Build()
@@ -5039,7 +5040,7 @@ func TestSnapshotManager_RestoreExternalData_FingerprintMismatchCreatesFailedJob
 	snapshotData.SnapshotInfo.Name = "snapshot-1"
 	snapshotData.SnapshotInfo.CollectionId = 100
 	cm := storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 		ForeignCM:            cm,
 		ForeignStorageConfig: &indexpb.StorageConfig{},
 	}, nil).Build()
@@ -5153,7 +5154,7 @@ func TestSnapshotManager_RestoreExternalData_DeterministicMappingErrorsCreateFai
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cm := storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
-			mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+			mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 				ForeignCM:            cm,
 				ForeignStorageConfig: &indexpb.StorageConfig{},
 			}, nil).Build()
@@ -5298,7 +5299,7 @@ func TestRestoreExternalSnapshot_BroadcastCarriesExternalSpec(t *testing.T) {
 		RootPath:   "root",
 	}
 
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).To(
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).To(
 		func(
 			_ context.Context,
 			_ *objectstorage.Config,
@@ -5321,7 +5322,7 @@ func TestRestoreExternalSnapshot_BroadcastCarriesExternalSpec(t *testing.T) {
 		func(
 			_ *snapshotMeta,
 			_ context.Context,
-			gotCM storage.ChunkManager,
+			gotCM snapshotstorage.ChunkManager,
 			gotURI string,
 			includeSegments bool,
 		) (*snapshotstorage.SnapshotData, error) {
@@ -5412,7 +5413,7 @@ func TestRestoreExternalSnapshot_RejectsExistingTargetUnderNameLock(t *testing.T
 	snapshotURI := "s3://foreign-bucket/root/snapshots/s1/metadata/1.json"
 	phase0Lock := newMockBroadcastAPIImpl()
 
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(
 		&snapshotstorage.ResolvedForeignStorage{
 			ForeignCM:            storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir())),
 			ForeignStorageConfig: &indexpb.StorageConfig{BucketName: "foreign-bucket", RootPath: "root"},
@@ -5436,7 +5437,7 @@ func TestRestoreExternalSnapshot_RejectsExistingTargetUnderNameLock(t *testing.T
 		func(
 			_ *snapshotMeta,
 			_ context.Context,
-			_ storage.ChunkManager,
+			_ snapshotstorage.ChunkManager,
 			_ string,
 			_ bool,
 		) (*snapshotstorage.SnapshotData, error) {
@@ -5614,7 +5615,7 @@ func TestRestoreSnapshot_ConcurrentTargetAdmission(t *testing.T) {
 			defer mRead.UnPatch()
 			mCMEK := mockey.Mock((*snapshotManager).validateCMEKCompatibility).Return(nil).Build()
 			defer mCMEK.UnPatch()
-			mResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{}, nil).Build()
+			mResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{}, nil).Build()
 			defer mResolve.UnPatch()
 			mReadExternal := mockey.Mock((*snapshotMeta).ReadAndValidateExternalSnapshotDataWithChunkManager).Return(snapshotData, nil).Build()
 			defer mReadExternal.UnPatch()
@@ -5773,7 +5774,7 @@ func TestRestoreExternalSnapshot_SerializesSameTarget(t *testing.T) {
 	secondResolveEntered := make(chan struct{}, 1)
 	var resolveCalls atomic.Int32
 
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).To(
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).To(
 		func(
 			_ context.Context,
 			_ *objectstorage.Config,
@@ -6016,7 +6017,7 @@ func TestRestoreExternalSnapshot_PreparationFailuresReleaseLocks(t *testing.T) {
 			if stage == "nameless snapshot" {
 				data.SnapshotInfo.Name = ""
 			}
-			mResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{}, nil).Build()
+			mResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{}, nil).Build()
 			defer mResolve.UnPatch()
 			var readErr, cmekErr error
 			if stage == "snapshot read" {
@@ -6107,7 +6108,7 @@ func newSnapshotExportManagerWithWorkers(t *testing.T, ctx context.Context, meta
 			w.manager.wg.Add(1)
 			go func() {
 				defer w.manager.wg.Done()
-				resolved, err := snapshotstorage.ResolveForeignStorage(w.manager.ctx, snapshotstorage.InstanceConfigFromParamtable(Params), snapshotstorage.DirectionExport, snapshotstorage.SnapshotExportAttemptURI(req), req.GetExternalSpec())
+				resolved, err := snapshotadapter.ResolveForeignStorage(w.manager.ctx, snapshotadapter.InstanceConfigFromParamtable(Params), snapshotstorage.DirectionExport, snapshotstorage.SnapshotExportAttemptURI(req), req.GetExternalSpec())
 				var prepared *datapb.SnapshotExportCopyResponse
 				if err == nil {
 					prepared, err = snapshotstorage.ExecuteSnapshotExport(w.manager.ctx, req, w.manager.snapshotManager.snapshotMeta.chunkManager, resolved, make(chan struct{}, 16), nil)
@@ -6193,7 +6194,7 @@ func newSnapshotExportManagerWithWorkers(t *testing.T, ctx context.Context, meta
 			require.NoError(t, err)
 			_, _, err = meta.UpdateJob(ctx, job.GetJobId(), func(latest *datapb.ExportSnapshotJob) (bool, error) {
 				latest.Progress = 5
-				latest.CopyRequest = &datapb.SnapshotExportCopyRequest{JobId: job.GetJobId(), SnapshotId: snapshot.SnapshotInfo.GetId(), CollectionId: snapshot.SnapshotInfo.GetCollectionId(), SnapshotMetadataPath: metadata, SourceStorageConfig: snapshotstorage.StorageConfigFromInstance(Params), TargetUri: job.GetTargetS3Path(), ExternalSpec: job.GetExternalSpec(), DeadlineTime: job.GetDeadlineTime()}
+				latest.CopyRequest = &datapb.SnapshotExportCopyRequest{JobId: job.GetJobId(), SnapshotId: snapshot.SnapshotInfo.GetId(), CollectionId: snapshot.SnapshotInfo.GetCollectionId(), SnapshotMetadataPath: metadata, SourceStorageConfig: snapshotadapter.StorageConfigFromInstance(Params), TargetUri: job.GetTargetS3Path(), ExternalSpec: job.GetExternalSpec(), DeadlineTime: job.GetDeadlineTime()}
 				return false, nil
 			})
 			require.NoError(t, err)
@@ -6707,7 +6708,7 @@ func TestSnapshotExportManager_PublishingUsesFrozenStorageConfig(t *testing.T) {
 	job.CopyRequest = &datapb.SnapshotExportCopyRequest{SourceStorageConfig: &indexpb.StorageConfig{Address: "frozen-endpoint", BucketName: "frozen-bucket", AccessKeyID: "frozen-key", SecretAccessKey: "frozen-secret"}, ExternalSpec: "frozen-spec"}
 	meta, err := newSnapshotExportMeta(ctx, newSnapshotExportCatalogFake(job))
 	require.NoError(t, err)
-	resolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).To(func(_ context.Context, cfg *objectstorage.Config, direction snapshotstorage.Direction, target, spec string) (*snapshotstorage.ResolvedForeignStorage, error) {
+	resolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).To(func(_ context.Context, cfg *objectstorage.Config, direction snapshotstorage.Direction, target, spec string) (*snapshotstorage.ResolvedForeignStorage, error) {
 		require.Equal(t, "frozen-endpoint", cfg.Address)
 		require.Equal(t, "frozen-bucket", cfg.BucketName)
 		require.Equal(t, "frozen-key", cfg.AccessKeyID)
@@ -7041,7 +7042,7 @@ func TestSnapshotExportShards_RejectsExternalCollectionBeforeDispatch(t *testing
 				dispatched = true
 				cancel()
 			}).Build().UnPatch()
-			defer mockey.Mock(snapshotstorage.ResolveForeignStorage).To(func(context.Context, *objectstorage.Config, snapshotstorage.Direction, string, string) (*snapshotstorage.ResolvedForeignStorage, error) {
+			defer mockey.Mock(snapshotadapter.ResolveForeignStorage).To(func(context.Context, *objectstorage.Config, snapshotstorage.Direction, string, string) (*snapshotstorage.ResolvedForeignStorage, error) {
 				finalizing = true
 				return nil, merr.ErrServiceInternal
 			}).Build().UnPatch()
@@ -7078,7 +7079,7 @@ func TestSnapshotExportShards_EmptySnapshotPublication(t *testing.T) {
 	defer mockey.Mock((*storage.RemoteChunkManager).RootPath).Return(source.RootPath()).Build().UnPatch()
 	defer mockey.Mock((*snapshotExportTestAllocator).AllocID).Return(int64(101), nil).Build().UnPatch()
 	resolved := &snapshotstorage.ResolvedForeignStorage{ForeignCM: target, ForeignStorageConfig: &indexpb.StorageConfig{StorageType: "local", RootPath: target.RootPath()}}
-	defer mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(resolved, nil).Build().UnPatch()
+	defer mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(resolved, nil).Build().UnPatch()
 	req, _ := snapshotPreparedTaskFixture(0)
 	req.SnapshotMetadataPath, req.TargetUri = metadata, target.RootPath()
 	job := &datapb.ExportSnapshotJob{JobId: 1, CollectionId: 100, CopyRequest: req, State: datapb.ExportSnapshotJobState_ExportSnapshotJobExecuting, DeadlineTime: uint64(time.Now().Add(time.Minute).UnixMilli())}
@@ -7381,7 +7382,7 @@ func TestRestoreExternalSnapshot_MetadataOnlyPreflightThenFullJobValidation(t *t
 			}
 			location, _, err := snapshotstorage.NewSnapshotWriter(cm).SaveToRootWithSize(ctx, data, cm.RootPath(), datapb.SnapshotLayout_SnapshotLayoutReferenced)
 			require.NoError(t, err)
-			defer mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}}, nil).Build().UnPatch()
+			defer mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}}, nil).Build().UnPatch()
 			defer mockey.Mock((*snapshotManager).RestoreCollection).Return(int64(200), nil).Build().UnPatch()
 			defer mockey.Mock((*copySegmentMeta).GetJob).Return(nil).Build().UnPatch()
 			var saved *copySegmentJob
@@ -7614,7 +7615,7 @@ func TestSnapshotManager_RestoreExternalData_SourceErrorBoundaries(t *testing.T)
 			if mode == "transient resolve error" {
 				resolveErr = merr.ErrIoTooManyRequests
 			}
-			defer mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+			defer mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 				ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{},
 			}, resolveErr).Build().UnPatch()
 			// A faulty reader view is rejected by the real full fingerprint,
@@ -7683,9 +7684,9 @@ func TestSnapshotExportShards_CoordinatorFinalization(t *testing.T) {
 			defer mockey.Mock((*storage.RemoteChunkManager).UnderlyingObjectStorage).Return(store).Build().UnPatch()
 			defer func() { require.Equal(t, createErr == nil, store.closed) }()
 			resolved := &snapshotstorage.ResolvedForeignStorage{ForeignCM: &struct{ storage.ChunkManager }{}}
-			defer mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(resolved, resolveErr).Build().UnPatch()
+			defer mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(resolved, resolveErr).Build().UnPatch()
 			defer mockey.Mock(snapshotstorage.FinalizeSnapshotExport).To(func(_ context.Context, got *datapb.SnapshotExportCopyRequest,
-				tasks []*datapb.SnapshotExportCopyTask, source storage.ChunkManager, target *snapshotstorage.ResolvedForeignStorage,
+				tasks []*datapb.SnapshotExportCopyTask, source snapshotstorage.ChunkManager, target *snapshotstorage.ResolvedForeignStorage,
 			) (*snapshotstorage.SnapshotExportFinalizationResult, error) {
 				require.True(t, proto.Equal(req, got))
 				require.Equal(t, job.CopyTasks, tasks)

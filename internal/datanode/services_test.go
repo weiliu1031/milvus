@@ -43,7 +43,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datanode/external"
 	"github.com/milvus-io/milvus/internal/datanode/importv2"
 	"github.com/milvus-io/milvus/internal/datanode/index"
-	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
+	snapshotadapter "github.com/milvus-io/milvus/internal/snapshotio/storage"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/v3/common"
@@ -53,6 +53,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
+	snapshotstorage "github.com/milvus-io/milvus/pkg/v3/snapshotio"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
 	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
@@ -955,7 +956,7 @@ func (s *DataNodeServicesSuite) TestCopySegment() {
 		s.node.storageFactory = factory
 		defer func() { s.node.storageFactory = originalFactory }()
 
-		mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).
+		mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).
 			Return(nil, merr.WrapErrServiceInternalMsg("resolve source storage failed")).
 			Build()
 		defer mockResolve.UnPatch()
@@ -974,7 +975,7 @@ func (s *DataNodeServicesSuite) TestCopySegment() {
 
 func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesForeignSource() {
 	targetCM := &struct{ storage.ChunkManager }{}
-	sourceCM := &struct{ storage.ChunkManager }{}
+	sourceCM := &struct{ snapshotstorage.ChunkManager }{}
 	sourceStorageConfig := &indexpb.StorageConfig{
 		BucketName: "foreign-bucket",
 		RootPath:   "foreign-root",
@@ -1026,7 +1027,7 @@ func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesForeignSo
 	defer mockTaskID.UnPatch()
 
 	resolveCalled := false
-	mResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).To(
+	mResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).To(
 		func(
 			ctx context.Context,
 			instanceCfg *objectstorage.Config,
@@ -1055,7 +1056,7 @@ func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesForeignSo
 			copyPermits chan struct{},
 			gotReq *datapb.CopySegmentRequest,
 			manager importv2.TaskManager,
-			gotSourceCM storage.ChunkManager,
+			gotSourceCM snapshotstorage.ChunkManager,
 			gotTargetCM storage.ChunkManager,
 			gotSourceStorageConfig *indexpb.StorageConfig,
 			gotCopier storage.CrossBucketCopier,
@@ -1093,7 +1094,7 @@ func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesForeignSo
 
 func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesSameBucketSourceRoot() {
 	targetCM := &struct{ storage.ChunkManager }{}
-	sourceCM := &struct{ storage.ChunkManager }{}
+	sourceCM := &struct{ snapshotstorage.ChunkManager }{}
 	sourceStorageConfig := &indexpb.StorageConfig{
 		BucketName: "shared-bucket",
 		RootPath:   "source-root",
@@ -1137,7 +1138,7 @@ func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesSameBucke
 	defer mockTaskID.UnPatch()
 
 	resolveCalled := false
-	mockResolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).To(
+	mockResolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).To(
 		func(
 			_ context.Context,
 			instanceCfg *objectstorage.Config,
@@ -1166,7 +1167,7 @@ func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotResolvesSameBucke
 			copyPermits chan struct{},
 			gotReq *datapb.CopySegmentRequest,
 			_ importv2.TaskManager,
-			gotSourceCM storage.ChunkManager,
+			gotSourceCM snapshotstorage.ChunkManager,
 			gotTargetCM storage.ChunkManager,
 			gotSourceStorageConfig *indexpb.StorageConfig,
 			gotCopier storage.CrossBucketCopier,
@@ -1262,7 +1263,7 @@ func (s *DataNodeServicesSuite) TestCopySegmentExternalSnapshotUsesRawCredential
 			copyPermits chan struct{},
 			gotReq *datapb.CopySegmentRequest,
 			manager importv2.TaskManager,
-			gotSourceCM storage.ChunkManager,
+			gotSourceCM snapshotstorage.ChunkManager,
 			gotTargetCM storage.ChunkManager,
 			gotSourceStorageConfig *indexpb.StorageConfig,
 			gotCopier storage.CrossBucketCopier,
@@ -1979,7 +1980,7 @@ func TestSnapshotExportRangeTask_ContinuousExecution(t *testing.T) {
 		return 1, nil
 	}).Build()
 	defer patch.UnPatch()
-	resolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).To(func(context.Context, *objectstorage.Config, snapshotstorage.Direction, string, string) (*snapshotstorage.ResolvedForeignStorage, error) {
+	resolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).To(func(context.Context, *objectstorage.Config, snapshotstorage.Direction, string, string) (*snapshotstorage.ResolvedForeignStorage, error) {
 		initializations.Add(1)
 		return &snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: copier, ForeignBucket: "target"}, nil
 	}).Build()
@@ -2023,7 +2024,7 @@ func TestSnapshotExportRangeTask_CancelAndShutdown(t *testing.T) {
 		return 0, ctx.Err()
 	}).Build()
 	defer copyMock.UnPatch()
-	resolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: copier, ForeignBucket: "target"}, nil).Build()
+	resolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: copier, ForeignBucket: "target"}, nil).Build()
 	defer resolve.UnPatch()
 	e := newSnapshotExportExecutor(context.Background())
 	require.NoError(t, e.create(req))
@@ -2071,7 +2072,7 @@ func TestSnapshotExportRangeTask_StorageFailuresAndRPC(t *testing.T) {
 			if scenario == "initialization" {
 				resolveErr = merr.ErrIoPermissionDenied
 			}
-			resolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: copier, ForeignBucket: "target"}, resolveErr).Build()
+			resolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: copier, ForeignBucket: "target"}, resolveErr).Build()
 			defer resolve.UnPatch()
 			if scenario == "corrupt source" {
 				require.NoError(t, cm.Write(context.Background(), req.SnapshotMetadataPath, []byte("corrupt")))
@@ -2175,7 +2176,7 @@ func TestSnapshotExportRangeTask_ExpiryAndAdmission(t *testing.T) {
 func TestSnapshotExportRangeTask_ClientCleanupAndExpiryTimer(t *testing.T) {
 	req, cm := snapshotExportRangeRequest(t, 0)
 	defer mockey.Mock((*snapshotWholeCopyStorage).CopyCrossBucket).Return(nil).Build().UnPatch()
-	resolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: &snapshotWholeCopyStorage{}}, nil).Build()
+	resolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: &snapshotWholeCopyStorage{}}, nil).Build()
 	defer resolve.UnPatch()
 	underlying := mockey.Mock((*storage.RemoteChunkManager).UnderlyingObjectStorage).Return(&snapshotWholeClosingStorage{}).Build()
 	defer underlying.UnPatch()
@@ -2240,7 +2241,7 @@ func TestSnapshotExportRangeTask_IndependentConcurrency(t *testing.T) {
 				return 0, ctx.Err()
 			}).Build()
 			defer copy.UnPatch()
-			resolve := mockey.Mock(snapshotstorage.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
+			resolve := mockey.Mock(snapshotadapter.ResolveForeignStorage).Return(&snapshotstorage.ResolvedForeignStorage{
 				ForeignCM: cm, ForeignStorageConfig: &indexpb.StorageConfig{}, Copier: copier, ForeignBucket: "target",
 			}, nil).Build()
 			defer resolve.UnPatch()

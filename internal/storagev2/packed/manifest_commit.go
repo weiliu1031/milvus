@@ -172,7 +172,7 @@ func commitManifestUpdates(basePath string, baseVersion int64,
 	// AddStatsToManifest behavior.
 	var handle C.LoonTransactionHandle
 	res := C.loon_transaction_open(cBasePath, cProperties,
-		C.int64_t(baseVersion),
+		C.int64_t(baseVersion), 0, /* manifest_size: unknown */
 		C.LOON_TRANSACTION_RESOLVE_OVERWRITE,
 		getRetryLimit(), &handle)
 	if err := HandleLoonFFIResult(res); err != nil {
@@ -187,7 +187,7 @@ func commitManifestUpdates(basePath string, baseVersion int64,
 	}
 
 	var commitVersion C.int64_t
-	res = C.loon_transaction_commit(handle, &commitVersion)
+	res = C.loon_transaction_commit(handle, &commitVersion, nil)
 	if err := HandleLoonFFIResult(res); err != nil {
 		return "", merr.WrapErrStorage(err, "commit manifest commit")
 	}

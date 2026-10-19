@@ -1078,7 +1078,7 @@ func TestMapObjectStorageError_Azure_NewErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := mapObjectStorageError("test/path", tt.inputError)
+			result := objectstorage.ToMilvusIoError("test/path", tt.inputError)
 			assert.True(t, errors.Is(result, tt.expectedError),
 				"expected %v, got %v", tt.expectedError, result)
 		})

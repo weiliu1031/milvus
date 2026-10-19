@@ -86,7 +86,7 @@ func NewFFISegmentReader(
 	var handle C.LoonSegmentReaderHandle
 	result := C.loon_segment_reader_open(
 		cBasePath,
-		C.int64_t(version),
+		C.int64_t(version), 0, /* manifest_size: unknown */
 		cSchema,
 		cNeededColumns,
 		numColumns,

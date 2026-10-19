@@ -32,11 +32,11 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/milvus-io/milvus/internal/mocks"
-	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	snapshotstorage "github.com/milvus-io/milvus/pkg/v3/snapshotio"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
@@ -1054,7 +1054,7 @@ func TestCopySegmentTask_PhaseFailures(t *testing.T) {
 			req := copyBatchRequestForTest()
 			phaseErr := merr.ErrServiceUnavailable
 			if phase == "prepare" {
-				defer mockey.Mock(prepareSegmentCopy).To(func(_ context.Context, _ storage.ChunkManager, _ *indexpb.StorageConfig, source *datapb.CopySegmentSource, _ *datapb.CopySegmentTarget) (*segmentCopyPlan, error) {
+				defer mockey.Mock(prepareSegmentCopy).To(func(_ context.Context, _ snapshotstorage.ChunkManager, _ *indexpb.StorageConfig, source *datapb.CopySegmentSource, _ *datapb.CopySegmentTarget) (*segmentCopyPlan, error) {
 					if source.SegmentId == 444 {
 						return nil, phaseErr
 					}
@@ -1062,7 +1062,7 @@ func TestCopySegmentTask_PhaseFailures(t *testing.T) {
 				}).Build().UnPatch()
 			}
 			if phase == "collision" {
-				defer mockey.Mock(prepareSegmentCopy).To(func(_ context.Context, _ storage.ChunkManager, _ *indexpb.StorageConfig, source *datapb.CopySegmentSource, _ *datapb.CopySegmentTarget) (*segmentCopyPlan, error) {
+				defer mockey.Mock(prepareSegmentCopy).To(func(_ context.Context, _ snapshotstorage.ChunkManager, _ *indexpb.StorageConfig, source *datapb.CopySegmentSource, _ *datapb.CopySegmentTarget) (*segmentCopyPlan, error) {
 					return &segmentCopyPlan{mappings: map[string]string{"one": "dst", "two": "dst"}}, nil
 				}).Build().UnPatch()
 			}
@@ -1202,7 +1202,7 @@ func TestCopySegmentTask_SegmentPipeline(t *testing.T) {
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
 			defer unblock()
-			defer mockey.Mock(prepareSegmentCopy).To(func(ctx context.Context, _ storage.ChunkManager, _ *indexpb.StorageConfig, source *datapb.CopySegmentSource, _ *datapb.CopySegmentTarget) (*segmentCopyPlan, error) {
+			defer mockey.Mock(prepareSegmentCopy).To(func(ctx context.Context, _ snapshotstorage.ChunkManager, _ *indexpb.StorageConfig, source *datapb.CopySegmentSource, _ *datapb.CopySegmentTarget) (*segmentCopyPlan, error) {
 				if source.SegmentId == 444 {
 					close(blocked)
 					select {

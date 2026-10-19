@@ -1306,7 +1306,7 @@ func TestRemoteChunkManagerCanceledMetrics(t *testing.T) {
 		cancelBefore := testutil.ToFloat64(cancelCounter)
 		failBefore := testutil.ToFloat64(failCounter)
 
-		mcm.client = &canceledObjectStorage{getErr: ToMilvusIoError("test/path", context.Canceled)}
+		mcm.client = &canceledObjectStorage{getErr: objectstorage.ToMilvusIoError("test/path", context.Canceled)}
 		_, err := mcm.getObject(context.Background(), "test-bucket", "test/path", 0, 0)
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, cancelBefore+1, testutil.ToFloat64(cancelCounter))
@@ -1319,7 +1319,7 @@ func TestRemoteChunkManagerCanceledMetrics(t *testing.T) {
 		cancelBefore := testutil.ToFloat64(cancelCounter)
 		failBefore := testutil.ToFloat64(failCounter)
 
-		mcm.client = &canceledObjectStorage{putErr: ToMilvusIoError("test/path", context.Canceled)}
+		mcm.client = &canceledObjectStorage{putErr: objectstorage.ToMilvusIoError("test/path", context.Canceled)}
 		err := mcm.putObject(context.Background(), "test-bucket", "test/path", nil, 0)
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, cancelBefore+1, testutil.ToFloat64(cancelCounter))
@@ -1360,22 +1360,22 @@ func TestToMilvusIoError(t *testing.T) {
 	fileName := "test_file"
 
 	t.Run("nil error", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, nil)
+		err := objectstorage.ToMilvusIoError(fileName, nil)
 		assert.NoError(t, err)
 	})
 
 	t.Run("io.ErrUnexpectedEOF", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, io.ErrUnexpectedEOF)
+		err := objectstorage.ToMilvusIoError(fileName, io.ErrUnexpectedEOF)
 		assert.ErrorIs(t, err, merr.ErrIoUnexpectEOF)
 	})
 
 	t.Run("syscall.ECONNRESET", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, syscall.ECONNRESET)
+		err := objectstorage.ToMilvusIoError(fileName, syscall.ECONNRESET)
 		assert.ErrorIs(t, err, merr.ErrIoTooManyRequests)
 	})
 
 	t.Run("generic error", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, errors.New("some error"))
+		err := objectstorage.ToMilvusIoError(fileName, errors.New("some error"))
 		assert.ErrorIs(t, err, merr.ErrIoFailed)
 	})
 
@@ -1388,14 +1388,14 @@ func TestToMilvusIoError(t *testing.T) {
 		{name: "context deadline exceeded", err: context.DeadlineExceeded, code: merr.TimeoutCode},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := ToMilvusIoError(fileName, test.err)
+			err := objectstorage.ToMilvusIoError(fileName, test.err)
 			assert.ErrorIs(t, err, test.err)
 			assert.Equal(t, test.code, merr.Code(err))
 		})
 
 		t.Run("wrapped "+test.name, func(t *testing.T) {
 			cause := merr.Wrap(test.err, "object storage request failed")
-			err := ToMilvusIoError(fileName, cause)
+			err := objectstorage.ToMilvusIoError(fileName, cause)
 			assert.ErrorIs(t, err, test.err)
 			assert.Equal(t, test.code, merr.Code(err))
 		})
@@ -1403,91 +1403,91 @@ func TestToMilvusIoError(t *testing.T) {
 
 	t.Run("minio NoSuchKey", func(t *testing.T) {
 		minioErr := minio.ErrorResponse{Code: "NoSuchKey"}
-		err := ToMilvusIoError(fileName, minioErr)
+		err := objectstorage.ToMilvusIoError(fileName, minioErr)
 		assert.ErrorIs(t, err, merr.ErrIoKeyNotFound)
 	})
 
 	t.Run("minio SlowDown", func(t *testing.T) {
 		minioErr := minio.ErrorResponse{Code: "SlowDown"}
-		err := ToMilvusIoError(fileName, minioErr)
+		err := objectstorage.ToMilvusIoError(fileName, minioErr)
 		assert.ErrorIs(t, err, merr.ErrIoTooManyRequests)
 	})
 
 	t.Run("minio TooManyRequestsException", func(t *testing.T) {
 		minioErr := minio.ErrorResponse{Code: "TooManyRequestsException"}
-		err := ToMilvusIoError(fileName, minioErr)
+		err := objectstorage.ToMilvusIoError(fileName, minioErr)
 		assert.ErrorIs(t, err, merr.ErrIoTooManyRequests)
 	})
 
 	t.Run("minio other error", func(t *testing.T) {
 		minioErr := minio.ErrorResponse{Code: "AccessDenied"}
-		err := ToMilvusIoError(fileName, minioErr)
+		err := objectstorage.ToMilvusIoError(fileName, minioErr)
 		assert.ErrorIs(t, err, merr.ErrIoPermissionDenied)
 	})
 
 	t.Run("azure BlobNotFound", func(t *testing.T) {
 		azureErr := &azcore.ResponseError{ErrorCode: string(bloberror.BlobNotFound)}
-		err := ToMilvusIoError(fileName, azureErr)
+		err := objectstorage.ToMilvusIoError(fileName, azureErr)
 		assert.ErrorIs(t, err, merr.ErrIoKeyNotFound)
 	})
 
 	t.Run("azure ServerBusy", func(t *testing.T) {
 		azureErr := &azcore.ResponseError{ErrorCode: string(bloberror.ServerBusy)}
-		err := ToMilvusIoError(fileName, azureErr)
+		err := objectstorage.ToMilvusIoError(fileName, azureErr)
 		assert.ErrorIs(t, err, merr.ErrIoTooManyRequests)
 	})
 
 	t.Run("azure other error", func(t *testing.T) {
 		azureErr := &azcore.ResponseError{ErrorCode: "SomeOtherError"}
-		err := ToMilvusIoError(fileName, azureErr)
+		err := objectstorage.ToMilvusIoError(fileName, azureErr)
 		assert.ErrorIs(t, err, merr.ErrIoFailed)
 	})
 
 	t.Run("googleapi NotFound", func(t *testing.T) {
 		googleErr := &googleapi.Error{Code: http.StatusNotFound}
-		err := ToMilvusIoError(fileName, googleErr)
+		err := objectstorage.ToMilvusIoError(fileName, googleErr)
 		assert.ErrorIs(t, err, merr.ErrIoKeyNotFound)
 	})
 
 	t.Run("googleapi TooManyRequests", func(t *testing.T) {
 		googleErr := &googleapi.Error{Code: http.StatusTooManyRequests}
-		err := ToMilvusIoError(fileName, googleErr)
+		err := objectstorage.ToMilvusIoError(fileName, googleErr)
 		assert.ErrorIs(t, err, merr.ErrIoTooManyRequests)
 	})
 
 	t.Run("googleapi permission denied", func(t *testing.T) {
 		googleErr := &googleapi.Error{Code: http.StatusForbidden}
-		err := ToMilvusIoError(fileName, googleErr)
+		err := objectstorage.ToMilvusIoError(fileName, googleErr)
 		assert.ErrorIs(t, err, merr.ErrIoPermissionDenied)
 	})
 
 	// Test cases for passing merr.ErrIo* errors directly
 	// These should be returned as-is without re-wrapping
 	t.Run("direct merr.ErrIoKeyNotFound", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, merr.ErrIoKeyNotFound)
+		err := objectstorage.ToMilvusIoError(fileName, merr.ErrIoKeyNotFound)
 		assert.ErrorIs(t, err, merr.ErrIoKeyNotFound)
 		// assert.Same() removed: merr errors are struct values, not pointers
 		// ErrorIs() is sufficient to verify no unwanted wrapping occurred
 	})
 
 	t.Run("direct merr.ErrIoPermissionDenied", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, merr.ErrIoPermissionDenied)
+		err := objectstorage.ToMilvusIoError(fileName, merr.ErrIoPermissionDenied)
 		assert.ErrorIs(t, err, merr.ErrIoPermissionDenied)
 	})
 
 	t.Run("direct merr.ErrIoBucketNotFound", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, merr.ErrIoBucketNotFound)
+		err := objectstorage.ToMilvusIoError(fileName, merr.ErrIoBucketNotFound)
 		assert.ErrorIs(t, err, merr.ErrIoBucketNotFound)
 	})
 
 	t.Run("direct merr.ErrIoInvalidArgument", func(t *testing.T) {
-		err := ToMilvusIoError(fileName, merr.ErrIoInvalidArgument)
+		err := objectstorage.ToMilvusIoError(fileName, merr.ErrIoInvalidArgument)
 		assert.ErrorIs(t, err, merr.ErrIoInvalidArgument)
 	})
 
 	t.Run("wrapped merr.ErrIoKeyNotFound", func(t *testing.T) {
 		wrappedErr := fmt.Errorf("failed to read: %w", merr.ErrIoKeyNotFound)
-		err := ToMilvusIoError(fileName, wrappedErr)
+		err := objectstorage.ToMilvusIoError(fileName, wrappedErr)
 		assert.ErrorIs(t, err, merr.ErrIoKeyNotFound)
 		// Verify the error is returned without additional wrapping
 		assert.Equal(t, wrappedErr, err, "should return wrapped error as-is")
